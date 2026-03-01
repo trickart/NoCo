@@ -37,27 +37,42 @@ import Network
 }
 
 /// Helper: start an NWListener on a random port, return the listener and port.
-private func startTCPServer(handler: @escaping @Sendable (NWConnection) -> Void) throws -> (NWListener, UInt16) {
+/// Uses withCheckedThrowingContinuation instead of DispatchSemaphore to avoid
+/// blocking cooperative threads (which causes CI hangs with limited thread pools).
+private func startTCPServer(handler: @escaping @Sendable (NWConnection) -> Void) async throws -> (NWListener, UInt16) {
     let listener = try NWListener(using: .tcp, on: .any)
-    nonisolated(unsafe) var serverPort: UInt16 = 0
-    let portReady = DispatchSemaphore(value: 0)
 
-    listener.stateUpdateHandler = { state in
-        if case .ready = state {
-            serverPort = listener.port?.rawValue ?? 0
-            portReady.signal()
+    let port: UInt16 = try await withCheckedThrowingContinuation { continuation in
+        listener.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                continuation.resume(returning: listener.port?.rawValue ?? 0)
+            case .failed(let error):
+                continuation.resume(throwing: error)
+            default:
+                break
+            }
         }
+        listener.newConnectionHandler = handler
+        listener.start(queue: .global())
     }
 
-    listener.newConnectionHandler = handler
-    listener.start(queue: .global())
-    portReady.wait()
-    return (listener, serverPort)
+    return (listener, port)
+}
+
+/// Helper: run the event loop on a background thread to avoid blocking cooperative threads.
+private func runEventLoopAsync(_ runtime: NodeRuntime, timeout: TimeInterval) async {
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            runtime.runEventLoop(timeout: timeout)
+            continuation.resume()
+        }
+    }
 }
 
 @Test(.timeLimit(.minutes(1)))
 func netConnectAndEcho() async throws {
-    let (listener, port) = try startTCPServer { conn in
+    let (listener, port) = try await startTCPServer { conn in
         conn.start(queue: .global())
         @Sendable func receive() {
             conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, _ in
@@ -95,7 +110,7 @@ func netConnectAndEcho() async throws {
         });
     """)
 
-    runtime.runEventLoop(timeout: 5)
+    await runEventLoopAsync(runtime, timeout: 5)
 
     #expect(messages.contains("connected"))
     #expect(messages.contains("data:hello"))
@@ -120,7 +135,7 @@ func netConnectRefused() async throws {
         });
     """)
 
-    runtime.runEventLoop(timeout: 5)
+    await runEventLoopAsync(runtime, timeout: 5)
 
     let hasError = messages.contains { $0.hasPrefix("error:") }
     #expect(hasError)
@@ -128,7 +143,7 @@ func netConnectRefused() async throws {
 
 @Test(.timeLimit(.minutes(1)))
 func netDrainEvent() async throws {
-    let (listener, port) = try startTCPServer { conn in
+    let (listener, port) = try await startTCPServer { conn in
         conn.start(queue: .global())
         // Accept but do nothing
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { _, _, _, _ in }
@@ -151,14 +166,14 @@ func netDrainEvent() async throws {
         });
     """)
 
-    runtime.runEventLoop(timeout: 5)
+    await runEventLoopAsync(runtime, timeout: 5)
 
     #expect(messages.contains("drain"))
 }
 
 @Test(.timeLimit(.minutes(1)))
 func netSocketTimeout() async throws {
-    let (listener, port) = try startTCPServer { conn in
+    let (listener, port) = try await startTCPServer { conn in
         conn.start(queue: .global())
         // Accept but never send data
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { _, _, _, _ in }
@@ -181,7 +196,7 @@ func netSocketTimeout() async throws {
         });
     """)
 
-    runtime.runEventLoop(timeout: 5)
+    await runEventLoopAsync(runtime, timeout: 5)
 
     #expect(messages.contains("timeout"))
 }

@@ -231,7 +231,7 @@ final class TCPSocket: @unchecked Sendable {
                     guard let sock = self.jsSocket, let ctx = sock.context else { return }
                     let err = JSValue(newErrorFromMessage: error.localizedDescription, in: ctx)
                     sock.invokeMethod("emit", withArguments: ["error", err as Any])
-                    sock.invokeMethod("emit", withArguments: ["close", true])
+                    sock.invokeMethod("destroy", withArguments: [])
                 }
             case .waiting(let error):
                 self.eventLoop.enqueueCallback {
