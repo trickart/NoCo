@@ -42,6 +42,9 @@ public final class NodeRuntime: @unchecked Sendable {
     /// Node.js conventions: `[execPath, scriptPath, ...userArgs]`.
     public var argv: [String]
 
+    /// Filesystem sandbox configuration for this runtime instance.
+    public var fsConfiguration = FSConfiguration()
+
     /// Initialize a new NodeRuntime with optional configuration.
     public init(argv: [String] = CommandLine.arguments, configure: ((NodeRuntime) -> Void)? = nil) {
         self.argv = argv

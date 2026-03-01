@@ -18,14 +18,11 @@ public struct FSConfiguration {
 public struct FSModule: NodeModule {
     public static let moduleName = "fs"
 
-    /// The filesystem configuration. Set on the runtime before creating the module.
-    public nonisolated(unsafe) static var configuration = FSConfiguration()
-
     @discardableResult
     public static func install(in context: JSContext, runtime: NodeRuntime) -> JSValue {
         let fs = JSValue(newObjectIn: context)!
         let fm = FileManager.default
-        let config = configuration
+        let config = runtime.fsConfiguration
 
         // Helper: validate path within sandbox
         func validatePath(_ path: String) -> String? {
