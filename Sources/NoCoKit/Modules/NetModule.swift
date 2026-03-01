@@ -6,21 +6,24 @@ import Network
 public struct NetModule: NodeModule {
     public static let moduleName = "net"
 
-    // Socket management
-    nonisolated(unsafe) private static var sockets: [Int: TCPSocket] = [:]
-    nonisolated(unsafe) private static var nextSocketId: Int = 1
-
     @discardableResult
     public static func install(in context: JSContext, runtime: NodeRuntime) -> JSValue {
+        // Per-runtime socket storage (captured by closures below)
+        final class SocketStorage {
+            var sockets: [Int: TCPSocket] = [:]
+            var nextSocketId: Int = 1
+        }
+        let storage = SocketStorage()
+
         // Register Swift-side native bridge functions
 
         // __netConnect(host, port, jsSocket) -> socketId
         let connectBlock: @convention(block) (String, Int, JSValue) -> Int = { host, port, jsSocket in
-            let id = nextSocketId
-            nextSocketId += 1
+            let id = storage.nextSocketId
+            storage.nextSocketId += 1
             let tcp = TCPSocket(host: host, port: UInt16(port), eventLoop: runtime.eventLoop)
             tcp.jsSocket = jsSocket
-            sockets[id] = tcp
+            storage.sockets[id] = tcp
             runtime.eventLoop.retainHandle()
             tcp.start()
             return id
@@ -29,7 +32,7 @@ public struct NetModule: NodeModule {
 
         // __netWrite(socketId, dataArray, callback) -> Bool
         let writeBlock: @convention(block) (Int, JSValue, JSValue) -> Bool = { id, dataVal, cb in
-            guard let tcp = sockets[id] else { return false }
+            guard let tcp = storage.sockets[id] else { return false }
             let len = Int(dataVal.forProperty("length")?.toInt32() ?? 0)
             var bytes = Data(count: len)
             for i in 0..<len {
@@ -46,15 +49,15 @@ public struct NetModule: NodeModule {
 
         // __netDestroy(socketId)
         let destroyBlock: @convention(block) (Int) -> Void = { id in
-            sockets[id]?.destroy()
-            sockets.removeValue(forKey: id)
+            storage.sockets[id]?.destroy()
+            storage.sockets.removeValue(forKey: id)
             runtime.eventLoop.releaseHandle()
         }
         context.setObject(destroyBlock, forKeyedSubscript: "__netDestroy" as NSString)
 
         // __netSetTimeout(socketId, timeoutMs)
         let setTimeoutBlock: @convention(block) (Int, Int) -> Void = { id, ms in
-            sockets[id]?.setIdleTimeout(ms: ms)
+            storage.sockets[id]?.setIdleTimeout(ms: ms)
         }
         context.setObject(setTimeoutBlock, forKeyedSubscript: "__netSetTimeout" as NSString)
 
@@ -228,7 +231,7 @@ final class TCPSocket: @unchecked Sendable {
                     guard let sock = self.jsSocket, let ctx = sock.context else { return }
                     let err = JSValue(newErrorFromMessage: error.localizedDescription, in: ctx)
                     sock.invokeMethod("emit", withArguments: ["error", err as Any])
-                    sock.invokeMethod("emit", withArguments: ["close", true])
+                    sock.invokeMethod("destroy", withArguments: [])
                 }
             case .waiting(let error):
                 self.eventLoop.enqueueCallback {
