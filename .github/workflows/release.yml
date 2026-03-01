@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build for macOS
+        run: swift build -c release --arch arm64 --arch x86_64
+
+      - name: Create artifactbundle
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+
+          mkdir -p noco.artifactbundle/noco-macos/bin
+
+          cp .build/apple/Products/Release/noco noco.artifactbundle/noco-macos/bin/noco
+
+          cat > noco.artifactbundle/info.json << EOF
+          {
+            "schemaVersion": "1.0",
+            "artifacts": {
+              "noco": {
+                "version": "${VERSION}",
+                "type": "executable",
+                "variants": [
+                  {
+                    "path": "noco-macos/bin/noco",
+                    "supportedTriples": ["arm64-apple-macosx", "x86_64-apple-macosx"]
+                  }
+                ]
+              }
+            }
+          }
+          EOF
+
+      - name: Create zip and calculate checksum
+        id: archive
+        run: |
+          zip -r noco.artifactbundle.zip noco.artifactbundle
+          CHECKSUM=$(swift package compute-checksum ./noco.artifactbundle.zip)
+          echo $CHECKSUM
+          echo "CHECKSUM=${CHECKSUM}" >> $GITHUB_ENV
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}"
+
+          cat > release-notes.md << EOF
+          # artifactbundle
+
+          checksum: ${{ env.CHECKSUM }}
+          EOF
+
+          gh release create "${TAG}" \
+            noco.artifactbundle.zip \
+            --generate-notes \
+            --notes-file release-notes.md
