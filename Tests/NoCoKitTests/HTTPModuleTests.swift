@@ -205,6 +205,37 @@ func httpServerRawHeaders() async throws {
     await eventLoopTask.value
 }
 
+// MARK: - rawBody Tests
+
+@Test func httpIncomingMessageRawBody() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var captured;
+        server.on('request', function(req, res) { captured = req; });
+        server._handleRequest(1, 'POST', '/api', { 'content-type': 'application/json' }, '1.1', '{"name":"test"}', []);
+        [
+            captured.rawBody instanceof Buffer,
+            captured.rawBody.toString() === '{"name":"test"}'
+        ].every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpIncomingMessageNoRawBodyWhenEmpty() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var captured;
+        server.on('request', function(req, res) { captured = req; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        captured.rawBody === undefined;
+    """)
+    #expect(result?.toBool() == true)
+}
+
 // MARK: - http.createServer Tests
 
 @Test(.timeLimit(.minutes(1)))
