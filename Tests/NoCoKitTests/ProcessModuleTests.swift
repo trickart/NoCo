@@ -1,0 +1,122 @@
+import Testing
+import JavaScriptCore
+@testable import NoCoKit
+
+// MARK: - Process Module Tests
+
+@Test func processProperties() async throws {
+    let runtime = NodeRuntime()
+
+    let platform = runtime.evaluate("process.platform")?.toString()
+    #expect(platform == "darwin")
+
+    let version = runtime.evaluate("process.version")?.toString()
+    #expect(version == "v18.0.0")
+}
+
+@Test func processCwd() async throws {
+    let runtime = NodeRuntime()
+    let cwd = runtime.evaluate("process.cwd()")?.toString()
+    #expect(cwd != nil && !cwd!.isEmpty)
+}
+
+@Test func processNextTick() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("process.nextTick(function() { console.log('ticked'); })")
+    runtime.runEventLoop(timeout: 1)
+
+    #expect(messages.contains("ticked"))
+}
+
+// MARK: - Process Module Edge Cases
+
+@Test func processArch() async throws {
+    let runtime = NodeRuntime()
+    let arch = runtime.evaluate("process.arch")?.toString()
+    #expect(arch == "arm64" || arch == "x64")
+}
+
+@Test func processPid() async throws {
+    let runtime = NodeRuntime()
+    let pid = runtime.evaluate("process.pid")?.toInt32() ?? 0
+    #expect(pid > 0)
+}
+
+@Test func processArgv() async throws {
+    let runtime = NodeRuntime()
+    let isArray = runtime.evaluate("Array.isArray(process.argv)")?.toBool()
+    #expect(isArray == true)
+}
+
+@Test func processEnv() async throws {
+    let runtime = NodeRuntime()
+    let isObj = runtime.evaluate("typeof process.env === 'object'")?.toBool()
+    #expect(isObj == true)
+    let hasPath = runtime.evaluate("typeof process.env.PATH === 'string'")?.toBool()
+    #expect(hasPath == true)
+}
+
+@Test func processExit() async throws {
+    let runtime = NodeRuntime()
+    var messages: [(NodeRuntime.ConsoleLevel, String)] = []
+    runtime.consoleHandler = { level, msg in messages.append((level, msg)) }
+
+    runtime.evaluate("""
+        setTimeout(function() { console.log('should not fire'); }, 5000);
+        process.exit(0);
+    """)
+    runtime.runEventLoop(timeout: 0.2)
+
+    // process.exit should have stopped the event loop
+    #expect(messages.contains(where: { $0.1.contains("process.exit") }))
+    #expect(!messages.contains(where: { $0.1 == "should not fire" }))
+}
+
+@Test func processHrtime() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var hr = process.hrtime();
+        Array.isArray(hr) && hr.length === 2 && typeof hr[0] === 'number' && typeof hr[1] === 'number';
+    """)
+    #expect(result?.toBool() == true)
+
+    // Seconds should be positive
+    let seconds = runtime.evaluate("process.hrtime()[0]")?.toInt32() ?? 0
+    #expect(seconds >= 0)
+}
+
+@Test func processMemoryUsage() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var mem = process.memoryUsage();
+        typeof mem.rss === 'number' && mem.rss > 0;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func processStdoutWrite() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("process.stdout.write('hello stdout')")
+    #expect(messages.contains("hello stdout"))
+}
+
+@Test func processNextTickWithArgs() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        process.nextTick(function(a, b) {
+            console.log(a + ':' + b);
+        }, 'arg1', 'arg2');
+    """)
+    runtime.runEventLoop(timeout: 1)
+
+    #expect(messages.contains("arg1:arg2"))
+}

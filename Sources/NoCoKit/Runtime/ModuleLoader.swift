@@ -1,0 +1,337 @@
+import Foundation
+import JavaScriptCore
+
+/// Implements CommonJS `require()` resolution and loading.
+/// Resolution order: builtin modules → cache → file system.
+public final class ModuleLoader {
+    private weak var runtime: NodeRuntime?
+    private var moduleCache: [String: JSValue] = [:]
+
+    init(runtime: NodeRuntime) {
+        self.runtime = runtime
+        installRequire()
+    }
+
+    private func installRequire() {
+        guard let runtime = runtime else { return }
+        let context = runtime.context
+
+        let requireBlock: @convention(block) (String) -> JSValue = { [weak self] moduleName in
+            guard let self = self else {
+                return JSValue(undefinedIn: JSContext.current())
+            }
+            return self.require(moduleName)
+        }
+
+        context.setObject(
+            unsafeBitCast(requireBlock, to: AnyObject.self),
+            forKeyedSubscript: "require" as NSString
+        )
+    }
+
+    /// Resolve and load a module by name.
+    func require(_ moduleName: String) -> JSValue {
+        guard let runtime = runtime else {
+            return JSValue(undefinedIn: JSContext.current())
+        }
+
+        // 1. Check builtin modules (including subpath like 'fs/promises')
+        if let moduleType = runtime.registeredModules[moduleName] {
+            if let cached = moduleCache[moduleName] {
+                return cached
+            }
+            let exports = moduleType.install(in: runtime.context, runtime: runtime)
+            moduleCache[moduleName] = exports
+            return exports
+        }
+
+        // 1b. Handle builtin subpath modules (e.g., 'fs/promises')
+        if moduleName.contains("/") {
+            let parts = moduleName.split(separator: "/", maxSplits: 1)
+            let baseName = String(parts[0])
+            let subPath = String(parts[1])
+            if let moduleType = runtime.registeredModules[baseName] {
+                let cacheKey = moduleName
+                if let cached = moduleCache[cacheKey] {
+                    return cached
+                }
+                // Install the base module first
+                let base = moduleType.install(in: runtime.context, runtime: runtime)
+                // Try to get the subpath property
+                if subPath == "promises" {
+                    // Create promisified version
+                    let promises = createPromisifiedFS(base, context: runtime.context)
+                    moduleCache[cacheKey] = promises
+                    return promises
+                }
+                if let sub = base.forProperty(subPath), !sub.isUndefined {
+                    moduleCache[cacheKey] = sub
+                    return sub
+                }
+                // Fallback: return base module
+                moduleCache[cacheKey] = base
+                return base
+            }
+        }
+
+        // 2. Check cache
+        if let cached = moduleCache[moduleName] {
+            return cached
+        }
+
+        // 3. Resolve file path
+        let resolvedPath = resolveFilePath(moduleName)
+
+        guard let path = resolvedPath else {
+            let error = runtime.context.createError(
+                "Cannot find module '\(moduleName)'", code: "MODULE_NOT_FOUND")
+            runtime.context.exception = error
+            return JSValue(undefinedIn: runtime.context)
+        }
+
+        return loadFile(at: path)
+    }
+
+    /// Load a JS file (or JSON file) as a CommonJS module.
+    @discardableResult
+    public func loadFile(at path: String) -> JSValue {
+        guard let runtime = runtime else {
+            return JSValue(undefinedIn: JSContext.current())
+        }
+
+        // Check cache by absolute path
+        if let cached = moduleCache[path] {
+            return cached
+        }
+
+        guard let source = try? String(contentsOfFile: path, encoding: .utf8) else {
+            let error = runtime.context.createError(
+                "Cannot read module '\(path)'", code: "MODULE_NOT_FOUND")
+            runtime.context.exception = error
+            return JSValue(undefinedIn: runtime.context)
+        }
+
+        // Handle JSON files natively
+        if path.hasSuffix(".json") {
+            let context = runtime.context
+            let result = context.evaluateScript("(\(source))")!
+            moduleCache[path] = result
+            return result
+        }
+
+        let context = runtime.context
+        let module = JSValue(newObjectIn: context)!
+        let exports = JSValue(newObjectIn: context)!
+        module.setValue(exports, forProperty: "exports")
+        module.setValue(path, forProperty: "filename")
+        module.setValue((path as NSString).deletingLastPathComponent, forProperty: "path")
+
+        // Cache before executing (handle circular requires)
+        moduleCache[path] = exports
+
+        let dirname = (path as NSString).deletingLastPathComponent
+
+        // Wrap in CommonJS function
+        let wrapped = """
+            (function(exports, require, module, __filename, __dirname) {
+            \(source)
+            })
+            """
+
+        guard let fn = context.evaluateScript(wrapped, withSourceURL: URL(fileURLWithPath: path))
+        else {
+            moduleCache.removeValue(forKey: path)
+            return JSValue(undefinedIn: context)
+        }
+
+        // Create a local require that resolves relative to this module's directory
+        let localRequire: @convention(block) (String) -> JSValue = { [weak self] name in
+            guard let self = self else { return JSValue(undefinedIn: JSContext.current()) }
+            if name.hasPrefix(".") || name.hasPrefix("/") {
+                let resolved = self.resolveRelativePath(name, from: dirname)
+                if let resolved = resolved {
+                    return self.loadFile(at: resolved)
+                }
+            }
+            // Try node_modules resolution from this module's directory
+            if !name.hasPrefix(".") && !name.hasPrefix("/") {
+                if let resolved = self.resolveNodeModules(name, from: dirname) {
+                    return self.loadFile(at: resolved)
+                }
+            }
+            return self.require(name)
+        }
+
+        fn.call(withArguments: [
+            exports,
+            unsafeBitCast(localRequire, to: AnyObject.self),
+            module,
+            path,
+            dirname,
+        ])
+
+        // If an exception occurred during module loading, remove from cache
+        // and let it propagate (don't log here — the top-level caller will).
+        if context.exception != nil {
+            moduleCache.removeValue(forKey: path)
+            return JSValue(undefinedIn: context)
+        }
+
+        // Module might have replaced module.exports
+        let finalExports = module.forProperty("exports") ?? exports
+        moduleCache[path] = finalExports
+        return finalExports
+    }
+
+    /// Resolve a file path from a module name.
+    private func resolveFilePath(_ name: String) -> String? {
+        if name.hasPrefix(".") || name.hasPrefix("/") {
+            return resolveRelativePath(name, from: FileManager.default.currentDirectoryPath)
+        }
+        // Try node_modules resolution from cwd
+        return resolveNodeModules(name, from: FileManager.default.currentDirectoryPath)
+    }
+
+    /// Resolve a relative path from a base directory.
+    private func resolveRelativePath(_ name: String, from baseDir: String) -> String? {
+        let fm = FileManager.default
+
+        var candidate: String
+        if name.hasPrefix("/") {
+            candidate = name
+        } else {
+            candidate = (baseDir as NSString).appendingPathComponent(name)
+        }
+        candidate = (candidate as NSString).standardizingPath
+
+        // Try exact path
+        if fm.fileExists(atPath: candidate) {
+            var isDir: ObjCBool = false
+            fm.fileExists(atPath: candidate, isDirectory: &isDir)
+            if !isDir.boolValue {
+                return candidate
+            }
+            // It's a directory, try index.js
+            let indexPath = (candidate as NSString).appendingPathComponent("index.js")
+            if fm.fileExists(atPath: indexPath) {
+                return indexPath
+            }
+            return nil
+        }
+
+        // Try with .js extension
+        let withJs = candidate + ".js"
+        if fm.fileExists(atPath: withJs) {
+            return withJs
+        }
+
+        // Try with .json extension
+        let withJson = candidate + ".json"
+        if fm.fileExists(atPath: withJson) {
+            return withJson
+        }
+
+        // Try as directory with index.js
+        let dirIndex = (candidate as NSString).appendingPathComponent("index.js")
+        if fm.fileExists(atPath: dirIndex) {
+            return dirIndex
+        }
+
+        return nil
+    }
+
+    /// Read the "main" field from a package.json file.
+    private func readPackageJsonMain(at dir: String) -> String? {
+        let packageJsonPath = (dir as NSString).appendingPathComponent("package.json")
+        guard let data = FileManager.default.contents(atPath: packageJsonPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let main = json["main"] as? String
+        else {
+            return nil
+        }
+        return main
+    }
+
+    /// Resolve a bare module name by walking up the directory tree looking for node_modules.
+    private func resolveNodeModules(_ name: String, from startDir: String) -> String? {
+        let fm = FileManager.default
+        var dir = (startDir as NSString).standardizingPath
+
+        while true {
+            // Skip if this directory is itself named "node_modules"
+            if (dir as NSString).lastPathComponent != "node_modules" {
+                let moduleDir = (dir as NSString).appendingPathComponent("node_modules/\(name)")
+                if fm.fileExists(atPath: moduleDir) {
+                    // Try package.json main field
+                    if let main = readPackageJsonMain(at: moduleDir) {
+                        if let resolved = resolveRelativePath("./" + main, from: moduleDir) {
+                            return resolved
+                        }
+                    }
+                    // Try index.js
+                    let indexPath = (moduleDir as NSString).appendingPathComponent("index.js")
+                    if fm.fileExists(atPath: indexPath) {
+                        return indexPath
+                    }
+                }
+            }
+
+            let parent = (dir as NSString).deletingLastPathComponent
+            if parent == dir { break }  // reached root
+            dir = parent
+        }
+
+        return nil
+    }
+
+    /// Create a promisified version of the fs module.
+    private func createPromisifiedFS(_ fsModule: JSValue, context: JSContext) -> JSValue {
+        let script = """
+        (function(fs) {
+            var promises = {};
+            // Wrap common fs methods as promise-returning versions
+            var methods = ['readFile', 'writeFile', 'appendFile', 'readdir',
+                           'stat', 'unlink', 'mkdir', 'rmdir', 'rename',
+                           'copyFile', 'access', 'chmod', 'chown'];
+            methods.forEach(function(name) {
+                var syncName = name + 'Sync';
+                promises[name] = function() {
+                    var args = Array.prototype.slice.call(arguments);
+                    return new Promise(function(resolve, reject) {
+                        try {
+                            if (typeof fs[syncName] === 'function') {
+                                var result = fs[syncName].apply(fs, args);
+                                resolve(result);
+                            } else if (typeof fs[name] === 'function') {
+                                args.push(function(err, data) {
+                                    if (err) reject(err);
+                                    else resolve(data);
+                                });
+                                fs[name].apply(fs, args);
+                            } else {
+                                reject(new Error(name + ' is not supported'));
+                            }
+                        } catch(e) {
+                            reject(e);
+                        }
+                    });
+                };
+            });
+            // fs.promises.open — minimal stub
+            promises.open = function(path, flags) {
+                return new Promise(function(resolve, reject) {
+                    reject(new Error('fs.promises.open is not supported'));
+                });
+            };
+            return promises;
+        })
+        """
+        let factory = context.evaluateScript(script)!
+        return factory.call(withArguments: [fsModule])!
+    }
+
+    /// Clear the module cache.
+    func clearCache() {
+        moduleCache.removeAll()
+    }
+}
