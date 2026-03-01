@@ -172,6 +172,7 @@ public final class NodeRuntime: @unchecked Sendable {
         registerModule(AssertModule.self)
         registerModule(ZlibModule.self)
         registerModule(NetModule.self)
+        registerModule(OSModule.self)
 
         // Install global require and set up global object
         context.evaluateScript("""

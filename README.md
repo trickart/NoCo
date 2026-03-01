@@ -122,6 +122,7 @@ runtime.runEventLoop(timeout: .infinity)
 | `events` | `EventEmitter` |
 | `string_decoder` | `StringDecoder` |
 | `buffer` | `Buffer` |
+| `os` | `arch`, `platform`, `type`, `release`, `version`, `hostname`, `homedir`, `tmpdir`, `totalmem`, `freemem`, `cpus`, `loadavg`, `uptime`, `endianness`, `networkInterfaces`, `userInfo`, `EOL`, `constants` |
 | `timers` | `setTimeout`, `setInterval` |
 
 ## Architecture
