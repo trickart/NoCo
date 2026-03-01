@@ -164,6 +164,7 @@ public final class NodeRuntime: @unchecked Sendable {
         registerModule(CryptoModule.self)
         registerModule(StreamModule.self)
         registerModule(HTTPModule.self)
+        registerModule(HTTP2Module.self)
         registerModule(StringDecoderModule.self)
         registerModule(EventEmitterModule.self)
         registerModule(BufferModule.self)
