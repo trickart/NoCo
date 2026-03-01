@@ -348,6 +348,7 @@ public struct HTTP2Module: NodeModule {
                 });
                 if (bodyStr && bodyStr.length > 0) {
                     req._body.push(bodyStr);
+                    req.rawBody = Buffer.from(bodyStr, 'utf8');
                 }
                 this.emit('request', req, res);
                 for (var i = 0; i < req._body.length; i++) {

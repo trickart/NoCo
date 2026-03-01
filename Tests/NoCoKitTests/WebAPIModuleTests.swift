@@ -288,6 +288,75 @@ import JavaScriptCore
     #expect(result?.toBool() == true)
 }
 
+// MARK: - ReadableStream Body Tests
+
+@Test func requestTextFromReadableStream() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var stream = new ReadableStream({
+            start: function(controller) {
+                controller.enqueue('{"name":');
+                controller.enqueue('"test"}');
+                controller.close();
+            }
+        });
+        var req = new Request('http://localhost', { method: 'POST', body: stream });
+        req.text().then(function(t) {
+            console.log('text:' + t);
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("text:{\"name\":\"test\"}"))
+}
+
+@Test func requestJsonFromReadableStream() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var stream = new ReadableStream({
+            start: function(controller) {
+                controller.enqueue('{"key":"value"}');
+                controller.close();
+            }
+        });
+        var req = new Request('http://localhost', { method: 'POST', body: stream });
+        req.json().then(function(obj) {
+            console.log('key:' + obj.key);
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("key:value"))
+}
+
+@Test func responseTextFromReadableStream() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var stream = new ReadableStream({
+            start: function(controller) {
+                controller.enqueue('hello world');
+                controller.close();
+            }
+        });
+        var res = new Response(stream);
+        res.text().then(function(t) {
+            console.log('res-text:' + t);
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("res-text:hello world"))
+}
+
 // MARK: - Global Web APIs Existence
 
 @Test func globalWebAPIs() async throws {
