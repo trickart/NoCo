@@ -175,6 +175,83 @@ private func runEventLoopInBackground(_ runtime: NodeRuntime, timeout: TimeInter
     #expect(result?.toBool() == true)
 }
 
+// MARK: - Http2ServerRequest/Response Property Tests
+
+@Test func http2ServerRequestProperties() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http2 = require('http2');
+        var captured;
+        var server = http2.createServer(function(req, res) { captured = req; });
+        server._handleRequest(1, 'GET', '/test',
+            { ':authority': 'example.com', ':scheme': 'https', host: 'example.com' },
+            '2.0', '', [':authority', 'example.com', ':scheme', 'https', 'host', 'example.com']);
+        [
+            Array.isArray(captured.rawHeaders),
+            captured.rawHeaders.length === 6,
+            captured.rawHeaders[0] === ':authority',
+            captured.rawHeaders[1] === 'example.com',
+            captured.authority === 'example.com',
+            captured.scheme === 'https',
+            typeof captured.socket === 'object',
+            captured.socket.remoteAddress === '127.0.0.1',
+            captured.complete === true,
+            captured.errored === null,
+            typeof captured.destroy === 'function'
+        ].every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func http2ServerResponseProperties() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http2 = require('http2');
+        var res = new http2.Http2ServerResponse(1);
+        [
+            res.headersSent === false,
+            res.writable === true,
+            res.writableFinished === false,
+            typeof res.flushHeaders === 'function',
+            typeof res.destroy === 'function',
+            typeof res.stream === 'object',
+            res.stream.id === 1
+        ].every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func http2ServerResponseDestroy() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http2 = require('http2');
+        var res = new http2.Http2ServerResponse(1);
+        res.on('close', function() { console.log('h2-res-closed'); });
+        res.destroy();
+    """)
+    #expect(messages.contains("h2-res-closed"))
+
+    let result = runtime.evaluate("res.finished === true && res.writable === false")
+    #expect(result?.toBool() == true)
+}
+
+@Test func http2ServerRequestDestroy() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http2 = require('http2');
+        var req = new http2.Http2ServerRequest(1, 'GET', '/', {}, '2.0', []);
+        req.on('close', function() { console.log('h2-req-closed'); });
+        req.destroy();
+    """)
+    #expect(messages.contains("h2-req-closed"))
+}
+
 // MARK: - HTTP/2 Server Integration Tests
 
 @Test(.timeLimit(.minutes(1)))
