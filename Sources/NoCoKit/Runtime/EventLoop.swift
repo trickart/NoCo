@@ -7,13 +7,14 @@ public final class EventLoop: @unchecked Sendable {
     private var timers: [Int: TimerEntry] = [:]
     private var nextTimerId: Int = 1
     private var nextTickQueue: [JSValue] = []
-    private var running = false
+    private var _running = false
     /// Dedicated queue for thread-safe access to pendingCallbacks and _activeHandles.
     /// Separate from `queue` (jsQueue) to avoid deadlock when run() executes on jsQueue.
     private let ioLock = DispatchQueue(label: "com.nodecore.eventloop.io")
     private var pendingCallbacks: [() -> Void] = []
     /// Number of active I/O handles (e.g. TCP sockets) keeping the loop alive.
     private var _activeHandles: Int = 0
+    private let wakeup = DispatchSemaphore(value: 0)
 
     /// Called after each callback execution to check/clear uncaught JS exceptions.
     var onUncaughtException: (() -> Void)?
@@ -77,6 +78,7 @@ public final class EventLoop: @unchecked Sendable {
         ioLock.async { [self] in
             pendingCallbacks.append(block)
         }
+        wakeup.signal()
     }
 
     /// Drain the pending callbacks queue.
@@ -115,10 +117,10 @@ public final class EventLoop: @unchecked Sendable {
 
     /// Run the event loop until no pending work or timeout.
     func run(timeout: TimeInterval = 30) {
-        running = true
+        ioLock.sync { [self] in _running = true }
         let deadline = timeout.isInfinite ? Date.distantFuture : Date().addingTimeInterval(timeout)
 
-        while running && hasPendingWork && Date() < deadline {
+        while ioLock.sync(execute: { [self] in _running }) && hasPendingWork && Date() < deadline {
             drainNextTick()
             drainCallbacks()
 
@@ -144,16 +146,25 @@ public final class EventLoop: @unchecked Sendable {
 
             let callbacksEmpty = ioLock.sync { [self] in pendingCallbacks.isEmpty }
             if !firedAny && nextTickQueue.isEmpty && callbacksEmpty {
-                // Sleep briefly to avoid busy-waiting
-                Thread.sleep(forTimeInterval: 0.005)
+                // Wait until signaled, next timer fires, or run deadline expires
+                let remaining = max(deadline.timeIntervalSinceNow, 0)
+                let nextFire = timers.values.map(\.fireTime).min()
+                let waitInterval: TimeInterval
+                if let next = nextFire {
+                    waitInterval = min(max(next.timeIntervalSinceNow, 0), remaining)
+                } else {
+                    waitInterval = min(0.1, remaining)
+                }
+                _ = wakeup.wait(timeout: .now() + waitInterval)
             }
         }
-        running = false
+        ioLock.sync { [self] in _running = false }
     }
 
     /// Stop the event loop.
     func stop() {
-        running = false
+        ioLock.sync { [self] in _running = false }
+        wakeup.signal()
     }
 
     /// Cancel all timers and clear queues.
@@ -161,7 +172,9 @@ public final class EventLoop: @unchecked Sendable {
         timers.removeAll()
         nextTickQueue.removeAll()
         pendingCallbacks.removeAll()
-        ioLock.sync { [self] in _activeHandles = 0 }
-        running = false
+        ioLock.sync { [self] in
+            _activeHandles = 0
+            _running = false
+        }
     }
 }

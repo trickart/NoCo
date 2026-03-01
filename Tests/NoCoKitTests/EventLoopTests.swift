@@ -65,3 +65,107 @@ import JavaScriptCore
     let filtered = messages.filter { ["a", "b", "c"].contains($0) }
     #expect(filtered == ["a", "b", "c"])
 }
+
+@Test func enqueueCallbackWakesUpImmediately() async throws {
+    let runtime = NodeRuntime()
+    runtime.eventLoop.retainHandle()
+
+    async let loopDone: Void = withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            runtime.runEventLoop(timeout: 5)
+            continuation.resume()
+        }
+    }
+
+    // コールバック往復でイベントループが確実に起動済みであることを確認
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        runtime.eventLoop.enqueueCallback {
+            continuation.resume()
+        }
+    }
+    // ループがアイドル待機に戻る時間を確保
+    try await Task.sleep(for: .milliseconds(10))
+
+    let enqueueTime = DispatchTime.now().uptimeNanoseconds
+    let callbackTime: UInt64 = await withCheckedContinuation { continuation in
+        runtime.eventLoop.enqueueCallback {
+            let time = DispatchTime.now().uptimeNanoseconds
+            runtime.eventLoop.releaseHandle()
+            continuation.resume(returning: time)
+        }
+    }
+
+    let elapsedMs = Double(callbackTime - enqueueTime) / 1_000_000
+    #expect(elapsedMs < 50, "enqueueCallback should wake up the loop immediately, but took \(elapsedMs)ms")
+
+    await loopDone
+}
+
+@Test func stopWakesUpImmediately() async throws {
+    let runtime = NodeRuntime()
+    runtime.eventLoop.retainHandle()
+
+    async let loopDone: Void = withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            runtime.runEventLoop(timeout: 5)
+            continuation.resume()
+        }
+    }
+
+    // コールバック往復でイベントループが確実に起動済みであることを確認
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        runtime.eventLoop.enqueueCallback {
+            continuation.resume()
+        }
+    }
+    // ループがアイドル待機に戻る時間を確保
+    try await Task.sleep(for: .milliseconds(10))
+
+    let stopTime = DispatchTime.now().uptimeNanoseconds
+    runtime.eventLoop.stop()
+
+    await loopDone
+    let doneTime = DispatchTime.now().uptimeNanoseconds
+
+    let elapsedMs = Double(doneTime - stopTime) / 1_000_000
+    #expect(elapsedMs < 50, "stop() should wake up the loop immediately, but took \(elapsedMs)ms")
+}
+
+@Test func multipleEnqueueCallbacksProcessedInOrder() async throws {
+    let runtime = NodeRuntime()
+    nonisolated(unsafe) var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+    runtime.eventLoop.retainHandle()
+
+    async let loopDone: Void = withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            runtime.runEventLoop(timeout: 5)
+            continuation.resume()
+        }
+    }
+
+    // コールバック往復でイベントループが確実に起動済みであることを確認
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        runtime.eventLoop.enqueueCallback {
+            continuation.resume()
+        }
+    }
+    // ループがアイドル待機に戻る時間を確保
+    try await Task.sleep(for: .milliseconds(10))
+
+    for i in 0..<10 {
+        runtime.eventLoop.enqueueCallback {
+            runtime.context.evaluateScript("console.log('callback-\(i)')")
+        }
+    }
+
+    // 最後のコールバックでループを終了させる
+    runtime.eventLoop.enqueueCallback {
+        runtime.eventLoop.releaseHandle()
+    }
+
+    await loopDone
+
+    let expected = (0..<10).map { "callback-\($0)" }
+    #expect(messages == expected)
+}
