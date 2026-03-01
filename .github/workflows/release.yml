@@ -74,7 +74,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME}"
           CHECKSUM="${{ env.CHECKSUM }}"
-          URL="https://github.com/aspect-apps/NoCo/releases/download/${VERSION}/noco.artifactbundle.zip"
+          URL="https://github.com/trickart/NoCo/releases/download/${VERSION}/noco.artifactbundle.zip"
 
           gh repo clone trickart/homebrew-tap /tmp/homebrew-tap
 
