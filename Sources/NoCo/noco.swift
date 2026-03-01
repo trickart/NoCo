@@ -24,9 +24,14 @@ struct NoCo: ParsableCommand {
     }
 
     func run() throws {
-        let runtime = NodeRuntime()
+        let execPath = CommandLine.arguments.first ?? "noco"
+        // captureForPassthrough includes the leading "--" terminator; strip it
+        let userArgs = scriptArguments.drop(while: { $0 == "--" })
 
         if let code = eval {
+            var argv = [execPath, "[eval]"]
+            argv.append(contentsOf: userArgs)
+            let runtime = NodeRuntime(argv: argv)
             runtime.evaluate(code)
             runtime.runEventLoop()
         } else if let script = script {
@@ -42,6 +47,9 @@ struct NoCo: ParsableCommand {
                 throw NoCoError.fileNotFound(absPath)
             }
 
+            var argv = [execPath, absPath]
+            argv.append(contentsOf: userArgs)
+            let runtime = NodeRuntime(argv: argv)
             runtime.moduleLoader.loadFile(at: absPath)
             runtime.runEventLoop()
         }

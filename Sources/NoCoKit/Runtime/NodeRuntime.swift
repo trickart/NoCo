@@ -37,8 +37,14 @@ public final class NodeRuntime: @unchecked Sendable {
         case log, info, warn, error, debug
     }
 
+    /// The argument list exposed as `process.argv` in JavaScript.
+    /// Defaults to `CommandLine.arguments` but can be overridden to follow
+    /// Node.js conventions: `[execPath, scriptPath, ...userArgs]`.
+    public var argv: [String]
+
     /// Initialize a new NodeRuntime with optional configuration.
-    public init(configure: ((NodeRuntime) -> Void)? = nil) {
+    public init(argv: [String] = CommandLine.arguments, configure: ((NodeRuntime) -> Void)? = nil) {
+        self.argv = argv
         context = JSContext()!
         eventLoop = EventLoop(queue: jsQueue)
         moduleLoader = ModuleLoader(runtime: self)

@@ -40,7 +40,7 @@ public struct ProcessModule: NodeModule {
         process.setValue(ProcessInfo.processInfo.processIdentifier, forProperty: "pid")
 
         // process.argv
-        let argv = JSValue.array(from: CommandLine.arguments, in: context)
+        let argv = JSValue.array(from: runtime.argv, in: context)
         process.setValue(argv, forProperty: "argv")
 
         // process.env
