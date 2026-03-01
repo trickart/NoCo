@@ -322,6 +322,23 @@ public struct StreamModule: NodeModule {
                 }
             }
 
+            // Readable.toWeb() - converts a Node.js Readable to a Web ReadableStream
+            Readable.toWeb = function(readable) {
+                return new ReadableStream({
+                    start: function(controller) {
+                        readable.on('data', function(chunk) {
+                            controller.enqueue(chunk);
+                        });
+                        readable.on('end', function() {
+                            controller.close();
+                        });
+                        readable.on('error', function(err) {
+                            controller.error(err);
+                        });
+                    }
+                });
+            };
+
             // Node.js: require('stream') returns Stream itself, with subclasses as properties
             Stream.Readable = Readable;
             Stream.Writable = Writable;
