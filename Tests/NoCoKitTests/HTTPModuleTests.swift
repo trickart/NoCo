@@ -1,6 +1,17 @@
 import Testing
+import Foundation
 import JavaScriptCore
 @testable import NoCoKit
+
+/// Helper: run the event loop on a background thread to avoid blocking cooperative threads.
+private func runEventLoopInBackground(_ runtime: NodeRuntime, timeout: TimeInterval) async {
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            runtime.runEventLoop(timeout: timeout)
+            continuation.resume()
+        }
+    }
+}
 
 // MARK: - HTTP Module Tests
 
@@ -85,4 +96,109 @@ import JavaScriptCore
         typeof req === 'object' && typeof req.write === 'function' && typeof req.end === 'function';
     """)
     #expect(result?.toBool() == true)
+}
+
+// MARK: - http.createServer Tests
+
+@Test(.timeLimit(.minutes(1)))
+func httpCreateServerGET() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            res.end('Hello World');
+        });
+        server.listen(0, '127.0.0.1', function() {
+            var addr = server.address();
+            console.log('listening:' + addr.port);
+        });
+    """)
+
+    // Run event loop in background
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackground(runtime, timeout: 10)
+    }
+
+    // Wait for server to start
+    var port = 0
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        if let msg = messages.first(where: { $0.hasPrefix("listening:") }) {
+            port = Int(msg.replacingOccurrences(of: "listening:", with: "")) ?? 0
+            break
+        }
+    }
+    #expect(port > 0)
+
+    // Make HTTP request from Swift
+    let url = URL(string: "http://127.0.0.1:\(port)/test")!
+    let (data, response) = try await URLSession.shared.data(from: url)
+    let httpResponse = response as! HTTPURLResponse
+    let body = String(data: data, encoding: .utf8)!
+
+    #expect(httpResponse.statusCode == 200)
+    #expect(body == "Hello World")
+
+    // Stop the event loop
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+}
+
+@Test(.timeLimit(.minutes(1)))
+func httpCreateServerPOST() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {
+            var body = '';
+            req.on('data', function(chunk) { body += chunk; });
+            req.on('end', function() {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ received: body }));
+            });
+        });
+        server.listen(0, '127.0.0.1', function() {
+            var addr = server.address();
+            console.log('listening:' + addr.port);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackground(runtime, timeout: 10)
+    }
+
+    // Wait for server to start
+    var port = 0
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if let msg = messages.first(where: { $0.hasPrefix("listening:") }) {
+            port = Int(msg.replacingOccurrences(of: "listening:", with: "")) ?? 0
+            break
+        }
+    }
+    #expect(port > 0)
+
+    // POST request from Swift
+    let url = URL(string: "http://127.0.0.1:\(port)/api")!
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+    request.httpBody = "test=hello".data(using: .utf8)
+
+    let (data, response) = try await URLSession.shared.upload(for: request, from: request.httpBody!)
+    let httpResponse = response as! HTTPURLResponse
+    let body = String(data: data, encoding: .utf8)!
+
+    #expect(httpResponse.statusCode == 200)
+    #expect(body.contains("\"received\":\"test=hello\""))
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
 }
