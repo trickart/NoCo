@@ -188,3 +188,47 @@ import JavaScriptCore
     """)
     #expect(messages.contains(where: { $0.1 == "error:ENOENT" }))
 }
+
+/// Helper: run the event loop on a background thread to avoid blocking cooperative threads.
+private func runEventLoopInBackgroundFS(_ runtime: NodeRuntime, timeout: TimeInterval) async {
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            runtime.runEventLoop(timeout: timeout)
+            continuation.resume()
+        }
+    }
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fsReadFileAsyncDuringEventLoop() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_readfile_async_\(UUID().uuidString).txt"
+    FileManager.default.createFile(atPath: tmpPath, contents: "async hello".data(using: .utf8))
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        fs.readFile('\(tmpPath)', 'utf8', function(err, data) {
+            if (err) { console.log('error:' + err.message); }
+            else { console.log('result:' + data); }
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    // Wait for the callback to fire
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        if messages.contains(where: { $0.hasPrefix("result:") }) { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("result:async hello"))
+}
