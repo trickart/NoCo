@@ -66,6 +66,7 @@ public final class EventLoop: @unchecked Sendable {
             nextTickQueue.removeAll()
             for cb in callbacks {
                 cb.call(withArguments: [])
+                onUncaughtException?()
             }
         }
     }
@@ -137,6 +138,7 @@ public final class EventLoop: @unchecked Sendable {
                         timers.removeValue(forKey: id)
                     }
                     entry.callback.call(withArguments: [])
+                    onUncaughtException?()
                 }
             }
 
