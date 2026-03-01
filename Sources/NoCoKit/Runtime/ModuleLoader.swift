@@ -6,6 +6,7 @@ import JavaScriptCore
 public final class ModuleLoader {
     private weak var runtime: NodeRuntime?
     private var moduleCache: [String: JSValue] = [:]
+    private var loadingModules: [String: JSValue] = [:]
 
     init(runtime: NodeRuntime) {
         self.runtime = runtime
@@ -104,6 +105,11 @@ public final class ModuleLoader {
             return cached
         }
 
+        // 循環 require: module.exports の現在値を返す
+        if let loadingModule = loadingModules[path] {
+            return loadingModule.forProperty("exports")
+        }
+
         guard let source = try? String(contentsOfFile: path, encoding: .utf8) else {
             let error = runtime.context.createError(
                 "Cannot read module '\(path)'", code: "MODULE_NOT_FOUND")
@@ -126,8 +132,8 @@ public final class ModuleLoader {
         module.setValue(path, forProperty: "filename")
         module.setValue((path as NSString).deletingLastPathComponent, forProperty: "path")
 
-        // Cache before executing (handle circular requires)
-        moduleCache[path] = exports
+        // Register as loading (handle circular requires via module.exports)
+        loadingModules[path] = module
 
         let dirname = (path as NSString).deletingLastPathComponent
 
@@ -140,7 +146,7 @@ public final class ModuleLoader {
 
         guard let fn = context.evaluateScript(wrapped, withSourceURL: URL(fileURLWithPath: path))
         else {
-            moduleCache.removeValue(forKey: path)
+            loadingModules.removeValue(forKey: path)
             return JSValue(undefinedIn: context)
         }
 
@@ -170,15 +176,16 @@ public final class ModuleLoader {
             dirname,
         ])
 
-        // If an exception occurred during module loading, remove from cache
+        // If an exception occurred during module loading, remove from loading
         // and let it propagate (don't log here — the top-level caller will).
         if context.exception != nil {
-            moduleCache.removeValue(forKey: path)
+            loadingModules.removeValue(forKey: path)
             return JSValue(undefinedIn: context)
         }
 
         // Module might have replaced module.exports
         let finalExports = module.forProperty("exports") ?? exports
+        loadingModules.removeValue(forKey: path)
         moduleCache[path] = finalExports
         return finalExports
     }
@@ -395,5 +402,6 @@ public final class ModuleLoader {
     /// Clear the module cache.
     func clearCache() {
         moduleCache.removeAll()
+        loadingModules.removeAll()
     }
 }

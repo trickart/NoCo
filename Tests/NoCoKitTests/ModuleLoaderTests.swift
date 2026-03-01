@@ -102,6 +102,17 @@ private func fixturesPath() -> String {
     #expect(result?.toString() == "valueA:valueB")
 }
 
+@Test func requireCircularWithModuleExportsReplacement() async throws {
+    let runtime = NodeRuntime()
+    let fixturePath = fixturesPath() + "/circular_replace_a.js"
+    let result = runtime.evaluate("""
+        var a = require('\(fixturePath)');
+        var b = require('\(fixturePath.replacingOccurrences(of: "_a.js", with: "_b.js"))');
+        b.aHasGetValue + ':' + b.getValueFromA();
+    """)
+    #expect(result?.toString() == "true:fromA")
+}
+
 @Test func requireClearCache() async throws {
     let runtime = NodeRuntime()
     let tmpPath = NSTemporaryDirectory() + "nodecore_test_clearcache_\(UUID().uuidString).js"
