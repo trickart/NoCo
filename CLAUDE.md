@@ -26,7 +26,7 @@ NoCo is a Node.js-compatible runtime built on Apple's JavaScriptCore framework, 
 
 - **NodeRuntime** — Central class wrapping `JSContext`. All JS operations go through a serial `DispatchQueue` (`jsQueue`) for thread safety. Use `runtime.perform { context in ... }` to execute JS safely from any thread. Provides `URL` constructor and `URLSearchParams` via `__urlParse` bridge.
 - **ModuleLoader** — CommonJS `require()` implementation. Resolution order: builtin → cache → node_modules → filesystem. Wraps file modules in `(function(exports, require, module, __filename, __dirname) { ... })`. Caches by absolute path; handles circular requires by caching before execution.
-- **EventLoop** — Manages timers (setTimeout/setInterval), nextTick queue, and I/O handles. Has its own `ioLock` separate from jsQueue to avoid deadlocks. Loop: drain nextTick → drain callbacks → fire timers. Supports `timeout: .infinity` for long-running servers.
+- **EventLoop** — Manages timers (setTimeout/setInterval), nextTick queue, and I/O handles. Has its own `ioLock` separate from jsQueue to avoid deadlocks. Loop: drain nextTick → drain callbacks → fire timers. Supports `timeout: .infinity` for long-running servers. `onUncaughtException` handler checks and clears JS exceptions after each callback in `drainCallbacks()`, preventing one failed callback from blocking subsequent ones.
 - **NodeModule** — Protocol for all modules: `static var moduleName: String` + `static func install(in:runtime:) -> JSValue`.
 
 ### Module Types
@@ -39,7 +39,7 @@ NoCo is a Node.js-compatible runtime built on Apple's JavaScriptCore framework, 
 
 - **Swift→JS closures**: Use `@convention(block)` + `unsafeBitCast` to `AnyObject`
 - **JS arguments**: `JSContext.currentArguments() as? [JSValue] ?? []`
-- **No exceptionHandler on JSContext**: Callers check `context.exception` after evaluation to preserve JS try/catch behavior
+- **No exceptionHandler on JSContext**: Callers check `context.exception` after evaluation to preserve JS try/catch behavior. `NodeRuntime.checkException()` (public) logs and clears uncaught exceptions; also wired to `EventLoop.onUncaughtException` to isolate failures between callbacks.
 - **JSValue helpers** in `JSValueExtensions.swift`: `JSValue.object(from:in:)`, `.isNullOrUndefined`, `.callSafe()`
 - **Error creation**: `context.createSystemError("msg", code: "ENOENT", syscall: "open", path: "/foo")` for Node.js-style errors
 
