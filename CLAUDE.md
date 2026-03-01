@@ -26,7 +26,7 @@ NoCo is a Node.js-compatible runtime built on Apple's JavaScriptCore framework, 
 
 - **NodeRuntime** — Central class wrapping `JSContext`. All JS operations go through a serial `DispatchQueue` (`jsQueue`) for thread safety. Use `runtime.perform { context in ... }` to execute JS safely from any thread. Provides `URL` constructor and `URLSearchParams` via `__urlParse` bridge.
 - **ModuleLoader** — CommonJS `require()` implementation. Resolution order: builtin → cache → node_modules → filesystem. Wraps file modules in `(function(exports, require, module, __filename, __dirname) { ... })`. Caches by absolute path; handles circular requires by caching before execution.
-- **EventLoop** — Manages timers (setTimeout/setInterval), nextTick queue, and I/O handles. Has its own `ioLock` separate from jsQueue to avoid deadlocks. Loop: drain nextTick → drain callbacks → fire timers. Supports `timeout: .infinity` for long-running servers. `onUncaughtException` handler checks and clears JS exceptions after each callback in `drainCallbacks()`, preventing one failed callback from blocking subsequent ones.
+- **EventLoop** — Manages timers (setTimeout/setInterval), nextTick queue, and I/O handles. Has its own `ioLock` separate from jsQueue to avoid deadlocks. Loop: drain nextTick → drain callbacks → fire timers. Idle time is `DispatchSemaphore` wait (not polling); `enqueueCallback()` and `stop()` call `wakeup.signal()` for instant wakeup. Supports `timeout: .infinity` for long-running servers. `onUncaughtException` handler checks and clears JS exceptions after each callback in `drainCallbacks()`, preventing one failed callback from blocking subsequent ones.
 - **NodeModule** — Protocol for all modules: `static var moduleName: String` + `static func install(in:runtime:) -> JSValue`.
 
 ### Module Types
@@ -67,7 +67,7 @@ Key classes:
 
 - **jsQueue**: All JS operations must run on this serial queue. The event loop's `run()` blocks this queue.
 - **NIO event loop**: Runs on separate thread. Must NOT call `runtime.perform` (causes deadlock with jsQueue).
-- **Async callbacks from background threads**: Must use `runtime.eventLoop.enqueueCallback { ... }` instead of `runtime.perform { ... }`. The callback is picked up by `drainCallbacks()` on the next event loop iteration. Access `runtime.context` directly inside the callback.
+- **Async callbacks from background threads**: Must use `runtime.eventLoop.enqueueCallback { ... }` instead of `runtime.perform { ... }`. The callback is picked up by `drainCallbacks()` on the next event loop iteration. `enqueueCallback` signals the `wakeup` semaphore, so the loop resumes immediately without polling delay. Access `runtime.context` directly inside the callback.
 - **NIO→JS bridge**: Store `Channel` directly (not `ChannelHandlerContext`) for cross-thread access safety.
 
 ### Test Patterns
