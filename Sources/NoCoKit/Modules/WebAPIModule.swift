@@ -371,7 +371,8 @@ public struct WebAPIModule {
                 } else {
                     this.headers = new Headers();
                 }
-                this.body = init.body !== undefined ? init.body : null;
+                this._bodySource = init.body !== undefined ? init.body : null;
+                this._bodyStream = undefined;
                 this.bodyUsed = false;
                 this.signal = init.signal || new AbortSignal();
                 this.mode = init.mode || 'cors';
@@ -385,11 +386,27 @@ public struct WebAPIModule {
                 this.destination = init.destination || '';
                 this.duplex = init.duplex || undefined;
             }
+            Object.defineProperty(Request.prototype, 'body', {
+                get: function() {
+                    if (this._bodySource === null || this._bodySource === undefined) return null;
+                    if (this._bodySource instanceof ReadableStream) return this._bodySource;
+                    if (this._bodyStream !== undefined) return this._bodyStream;
+                    var src = this._bodySource;
+                    this._bodyStream = new ReadableStream({
+                        start: function(controller) {
+                            controller.enqueue(typeof src === 'string' ? src : String(src));
+                            controller.close();
+                        }
+                    });
+                    return this._bodyStream;
+                },
+                configurable: true
+            });
             Request.prototype.clone = function() {
                 return new Request(this.url, {
                     method: this.method,
                     headers: new Headers(this.headers),
-                    body: this.body,
+                    body: this._bodySource,
                     signal: this.signal,
                     mode: this.mode,
                     credentials: this.credentials,
@@ -403,10 +420,11 @@ public struct WebAPIModule {
             };
             Request.prototype.text = function() {
                 this.bodyUsed = true;
-                if (this.body === null || this.body === undefined) return Promise.resolve('');
-                if (typeof this.body === 'string') return Promise.resolve(this.body);
-                if (this.body instanceof ReadableStream) {
-                    var reader = this.body.getReader();
+                var body = this._bodySource;
+                if (body === null || body === undefined) return Promise.resolve('');
+                if (typeof body === 'string') return Promise.resolve(body);
+                if (body instanceof ReadableStream) {
+                    var reader = body.getReader();
                     var chunks = [];
                     function pump() {
                         return reader.read().then(function(result) {
@@ -417,7 +435,7 @@ public struct WebAPIModule {
                     }
                     return pump();
                 }
-                return Promise.resolve(String(this.body));
+                return Promise.resolve(String(body));
             };
             Request.prototype.json = function() {
                 return this.text().then(function(t) { return JSON.parse(t); });
@@ -450,14 +468,31 @@ public struct WebAPIModule {
                 } else {
                     this.headers = new Headers();
                 }
-                this.body = body !== undefined && body !== null ? body : null;
+                this._bodySource = body !== undefined && body !== null ? body : null;
+                this._bodyStream = undefined;
                 this.bodyUsed = false;
                 this.type = 'default';
                 this.url = init.url || '';
                 this.redirected = false;
             }
+            Object.defineProperty(Response.prototype, 'body', {
+                get: function() {
+                    if (this._bodySource === null || this._bodySource === undefined) return null;
+                    if (this._bodySource instanceof ReadableStream) return this._bodySource;
+                    if (this._bodyStream !== undefined) return this._bodyStream;
+                    var src = this._bodySource;
+                    this._bodyStream = new ReadableStream({
+                        start: function(controller) {
+                            controller.enqueue(typeof src === 'string' ? src : String(src));
+                            controller.close();
+                        }
+                    });
+                    return this._bodyStream;
+                },
+                configurable: true
+            });
             Response.prototype.clone = function() {
-                return new Response(this.body, {
+                return new Response(this._bodySource, {
                     status: this.status,
                     statusText: this.statusText,
                     headers: new Headers(this.headers)
@@ -465,10 +500,11 @@ public struct WebAPIModule {
             };
             Response.prototype.text = function() {
                 this.bodyUsed = true;
-                if (this.body === null || this.body === undefined) return Promise.resolve('');
-                if (typeof this.body === 'string') return Promise.resolve(this.body);
-                if (this.body instanceof ReadableStream) {
-                    var reader = this.body.getReader();
+                var body = this._bodySource;
+                if (body === null || body === undefined) return Promise.resolve('');
+                if (typeof body === 'string') return Promise.resolve(body);
+                if (body instanceof ReadableStream) {
+                    var reader = body.getReader();
                     var chunks = [];
                     function pump() {
                         return reader.read().then(function(result) {
@@ -479,7 +515,7 @@ public struct WebAPIModule {
                     }
                     return pump();
                 }
-                return Promise.resolve(String(this.body));
+                return Promise.resolve(String(body));
             };
             Response.prototype.json = function() {
                 return this.text().then(function(t) { return JSON.parse(t); });

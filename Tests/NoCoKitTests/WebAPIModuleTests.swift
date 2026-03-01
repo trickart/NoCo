@@ -91,7 +91,7 @@ import JavaScriptCore
         });
         req.method === 'POST' &&
         req.headers.get('content-type') === 'application/json' &&
-        req.body === '{"key":"value"}';
+        req._bodySource === '{"key":"value"}';
     """)
     #expect(result?.toBool() == true)
 }
@@ -108,7 +108,7 @@ import JavaScriptCore
         cloned.url === original.url &&
         cloned.method === original.method &&
         cloned.headers.get('x-test') === 'value' &&
-        cloned.body === 'hello' &&
+        cloned._bodySource === 'hello' &&
         cloned !== original &&
         cloned.headers !== original.headers;
     """)
@@ -141,7 +141,8 @@ import JavaScriptCore
         var res = new Response('Hello', { status: 201 });
         res.status === 201 &&
         res.ok === true &&
-        res.body === 'Hello' &&
+        res.body instanceof ReadableStream &&
+        res._bodySource === 'Hello' &&
         res.headers instanceof Headers;
     """)
     #expect(result?.toBool() == true)
@@ -166,7 +167,7 @@ import JavaScriptCore
         [
             jsonRes.status === 200,
             jsonRes.headers.get('content-type') === 'application/json',
-            jsonRes.body === '{"key":"value"}',
+            jsonRes._bodySource === '{"key":"value"}',
             redirectRes.status === 302,
             redirectRes.headers.get('location') === 'https://example.com',
             errorRes.status === 0,
@@ -355,6 +356,91 @@ import JavaScriptCore
     runtime.runEventLoop(timeout: 2)
 
     #expect(messages.contains("res-text:hello world"))
+}
+
+// MARK: - Response.body ReadableStream Tests
+
+@Test func responseBodyIsReadableStream() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var res = new Response('Hello');
+        console.log('isStream:' + (res.body instanceof ReadableStream));
+        var reader = res.body.getReader();
+        reader.read().then(function(r) {
+            console.log('value:' + r.value);
+            return reader.read();
+        }).then(function(r) {
+            console.log('done:' + r.done);
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("isStream:true"))
+    #expect(messages.contains("value:Hello"))
+    #expect(messages.contains("done:true"))
+}
+
+@Test func responseBodyNullWhenEmpty() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var res = new Response();
+        res.body === null;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func responseBodyReadableStreamPassthrough() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var stream = new ReadableStream({
+            start: function(c) { c.enqueue('data'); c.close(); }
+        });
+        var res = new Response(stream);
+        res.body === stream;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func requestBodyIsReadableStream() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var req = new Request('http://localhost', { method: 'POST', body: 'test' });
+        req.body instanceof ReadableStream;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func responseBodyGetReaderWorkflow() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var res = new Response('{"cors":true}', {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+        });
+        // Simulate @hono/node-server responseViaResponseObject path
+        var reader = res.body.getReader();
+        var chunks = [];
+        function pump() {
+            return reader.read().then(function(result) {
+                if (result.done) {
+                    console.log('body:' + chunks.join(''));
+                    return;
+                }
+                chunks.push(result.value);
+                return pump();
+            });
+        }
+        pump();
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("body:{\"cors\":true}"))
 }
 
 // MARK: - Global Web APIs Existence
