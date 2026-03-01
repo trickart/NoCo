@@ -98,6 +98,113 @@ private func runEventLoopInBackground(_ runtime: NodeRuntime, timeout: TimeInter
     #expect(result?.toBool() == true)
 }
 
+// MARK: - IncomingMessage / ServerResponse Properties
+
+@Test func httpIncomingMessageProperties() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        // Simulate request via _handleRequest
+        var captured;
+        server.on('request', function(req, res) { captured = req; });
+        server._handleRequest(1, 'GET', '/test', { host: 'localhost' }, '1.1', '', ['Host', 'localhost']);
+        [
+            Array.isArray(captured.rawHeaders),
+            captured.rawHeaders[0] === 'Host',
+            captured.rawHeaders[1] === 'localhost',
+            typeof captured.socket === 'object',
+            captured.socket.remoteAddress === '127.0.0.1',
+            captured.complete === true,
+            captured.errored === null,
+            typeof captured.destroy === 'function'
+        ].every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpServerResponseProperties() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var res = new http.ServerResponse(1);
+        var results = [
+            res.headersSent === false,
+            res.writable === true,
+            res.writableFinished === false,
+            typeof res.flushHeaders === 'function',
+            typeof res.destroy === 'function'
+        ];
+        results.every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpServerResponseDestroy() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var res = new http.ServerResponse(1);
+        res.on('close', function() { console.log('res-closed'); });
+        res.destroy();
+    """)
+    #expect(messages.contains("res-closed"))
+
+    let result = runtime.evaluate("res.finished === true && res.writable === false")
+    #expect(result?.toBool() == true)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func httpServerRawHeaders() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {
+            console.log('rawHeaders:' + JSON.stringify(req.rawHeaders));
+            console.log('isArray:' + Array.isArray(req.rawHeaders));
+            res.writeHead(200);
+            res.end('ok');
+        });
+        server.listen(0, '127.0.0.1', function() {
+            console.log('listening:' + server.address().port);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackground(runtime, timeout: 10)
+    }
+
+    var port = 0
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if let msg = messages.first(where: { $0.hasPrefix("listening:") }) {
+            port = Int(msg.replacingOccurrences(of: "listening:", with: "")) ?? 0
+            break
+        }
+    }
+    #expect(port > 0)
+
+    let url = URL(string: "http://127.0.0.1:\(port)/test")!
+    var request = URLRequest(url: url)
+    request.setValue("test-value", forHTTPHeaderField: "X-Test")
+    let (_, _) = try await URLSession.shared.data(for: request)
+
+    // Give time for the callback to fire
+    try await Task.sleep(nanoseconds: 200_000_000)
+
+    #expect(messages.contains(where: { $0.starts(with: "rawHeaders:") }))
+    #expect(messages.contains("isArray:true"))
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+}
+
 // MARK: - http.createServer Tests
 
 @Test(.timeLimit(.minutes(1)))
