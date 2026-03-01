@@ -156,6 +156,7 @@ public final class NodeRuntime: @unchecked Sendable {
         ProcessModule.install(in: context, runtime: self)
         BufferModule.install(in: context, runtime: self)
         EventEmitterModule.install(in: context, runtime: self)
+        WebAPIModule.install(in: context, runtime: self)
 
         // Register require()-able modules
         registerModule(PathModule.self)
@@ -176,10 +177,12 @@ public final class NodeRuntime: @unchecked Sendable {
         registerModule(OSModule.self)
         registerModule(QuerystringModule.self)
 
-        // Install global require and set up global object
+        // Ensure global is set (ProcessModule sets it, but guard as fallback)
         context.evaluateScript("""
-            if (typeof global === 'undefined') { var global = this; }
-            global.global = global;
+            if (typeof global === 'undefined' || global !== this) {
+                this.global = this;
+                global = this;
+            }
             """)
 
         // __urlParse bridge: parse a URL string using Foundation.URLComponents

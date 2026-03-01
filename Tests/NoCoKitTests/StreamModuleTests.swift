@@ -267,6 +267,64 @@ import JavaScriptCore
     #expect(result?.toBool() == true)
 }
 
+// MARK: - Readable.toWeb() Tests
+
+@Test func readableToWeb() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var stream = require('stream');
+        var r = new stream.Readable();
+        var webStream = stream.Readable.toWeb(r);
+        var reader = webStream.getReader();
+        reader.read().then(function(result) {
+            console.log('value:' + result.value);
+            console.log('done:' + result.done);
+        });
+        r.push('hello');
+    """)
+    runtime.runEventLoop(timeout: 1)
+
+    #expect(messages.contains("value:hello"))
+    #expect(messages.contains("done:false"))
+}
+
+@Test func readableToWebEnd() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    // Test that pushing null on an empty Readable closes the ReadableStream
+    runtime.evaluate("""
+        var stream = require('stream');
+        var r = new stream.Readable();
+        var webStream = stream.Readable.toWeb(r);
+        var reader = webStream.getReader();
+        reader.read().then(function(result) {
+            console.log('end-done:' + result.done);
+        });
+        r.push(null);
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("end-done:true"))
+}
+
+@Test func readableToWebIsReadableStream() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var stream = require('stream');
+        var r = new stream.Readable();
+        var webStream = stream.Readable.toWeb(r);
+        webStream instanceof ReadableStream &&
+        typeof webStream.getReader === 'function' &&
+        typeof stream.Readable.toWeb === 'function';
+    """)
+    #expect(result?.toBool() == true)
+}
+
 @Test func streamTransformFlush() async throws {
     let runtime = NodeRuntime()
     var messages: [String] = []

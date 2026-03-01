@@ -120,3 +120,32 @@ import JavaScriptCore
 
     #expect(messages.contains("arg1:arg2"))
 }
+
+// MARK: - Global Object Tests
+
+@Test func processGlobalIsGlobalObject() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        (function() {
+            var g = this;
+            var globalIsThis = (global === g);
+            var globalIsNotProcess = (global !== process);
+            return globalIsThis && globalIsNotProcess;
+        })();
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func processGlobalHasCorrectProperties() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        [
+            global.process === process,
+            global.global === global,
+            typeof global.console === 'object',
+            typeof global.setTimeout === 'function',
+            typeof global.Buffer === 'function'
+        ].every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}

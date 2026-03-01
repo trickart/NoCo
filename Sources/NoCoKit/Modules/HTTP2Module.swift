@@ -120,7 +120,7 @@ public struct HTTP2Module: NodeModule {
             var EventEmitter = this.__NoCo_EventEmitter;
 
             // --- Http2ServerRequest (compatibility API) ---
-            function Http2ServerRequest(reqId, method, url, headers, httpVersion) {
+            function Http2ServerRequest(reqId, method, url, headers, httpVersion, rawHeaders) {
                 this._events = Object.create(null);
                 this._maxListeners = 10;
                 this._reqId = reqId;
@@ -132,11 +132,23 @@ public struct HTTP2Module: NodeModule {
                 this._encoding = null;
                 this._body = [];
                 this._ended = false;
+                this.complete = false;
+                this.errored = null;
                 this.stream = { id: reqId };
+                this.rawHeaders = rawHeaders || [];
+                this.authority = headers[':authority'] || headers['host'] || '';
+                this.scheme = headers[':scheme'] || 'https';
+                this.socket = { encrypted: false, remoteAddress: '127.0.0.1', remotePort: 0 };
             }
             Http2ServerRequest.prototype = Object.create(EventEmitter.prototype);
             Http2ServerRequest.prototype.constructor = Http2ServerRequest;
             Http2ServerRequest.prototype.setEncoding = function(enc) { this._encoding = enc; return this; };
+            Http2ServerRequest.prototype.destroy = function(err) {
+                this._ended = true;
+                if (err) this.errored = err;
+                this.emit('close');
+                return this;
+            };
 
             // --- Http2ServerResponse (compatibility API) ---
             function Http2ServerResponse(reqId) {
@@ -147,10 +159,27 @@ public struct HTTP2Module: NodeModule {
                 this._headers = {};
                 this._headersSent = false;
                 this.finished = false;
+                this.writable = true;
+                this.writableFinished = false;
                 this.stream = { id: reqId };
             }
             Http2ServerResponse.prototype = Object.create(EventEmitter.prototype);
             Http2ServerResponse.prototype.constructor = Http2ServerResponse;
+            Object.defineProperty(Http2ServerResponse.prototype, 'headersSent', {
+                get: function() { return this._headersSent; }
+            });
+            Http2ServerResponse.prototype.flushHeaders = function() {
+                if (!this._headersSent) {
+                    this.writeHead(this.statusCode);
+                }
+            };
+            Http2ServerResponse.prototype.destroy = function(err) {
+                this.finished = true;
+                this.writable = false;
+                if (err) this.emit('error', err);
+                this.emit('close');
+                return this;
+            };
 
             Http2ServerResponse.prototype.setHeader = function(name, value) {
                 this._headers[name.toLowerCase()] = value;
@@ -310,9 +339,13 @@ public struct HTTP2Module: NodeModule {
             Http2Server.prototype.ref = function() { return this; };
             Http2Server.prototype.unref = function() { return this; };
 
-            Http2Server.prototype._handleRequest = function(reqId, method, url, headersObj, httpVersion, bodyStr) {
-                var req = new Http2ServerRequest(reqId, method, url, headersObj, httpVersion);
+            Http2Server.prototype._handleRequest = function(reqId, method, url, headersObj, httpVersion, bodyStr, rawHeaders) {
+                var req = new Http2ServerRequest(reqId, method, url, headersObj, httpVersion, rawHeaders || []);
                 var res = new Http2ServerResponse(reqId);
+                res.on('finish', function() {
+                    res.writableFinished = true;
+                    res.writable = false;
+                });
                 if (bodyStr && bodyStr.length > 0) {
                     req._body.push(bodyStr);
                 }
@@ -321,6 +354,7 @@ public struct HTTP2Module: NodeModule {
                     req.emit('data', req._body[i]);
                 }
                 req._ended = true;
+                req.complete = true;
                 req.emit('end');
             };
 
@@ -698,6 +732,8 @@ final class HTTP2BridgeHandler: ChannelInboundHandler, @unchecked Sendable {
 
                 guard let jsServer = self.server.jsServer, let ctx = jsServer.context else { return }
                 let headersObj = JSValue(newObjectIn: ctx)!
+                let rawHeadersArr = JSValue(newArrayIn: ctx)!
+                var rawIdx: Int = 0
                 for (name, value) in headerPairs {
                     let lname = name.lowercased()
                     if let existing = headersObj.forProperty(lname), !existing.isUndefined {
@@ -705,9 +741,12 @@ final class HTTP2BridgeHandler: ChannelInboundHandler, @unchecked Sendable {
                     } else {
                         headersObj.setValue(value, forProperty: lname)
                     }
+                    rawHeadersArr.setValue(name, at: rawIdx)
+                    rawHeadersArr.setValue(value, at: rawIdx + 1)
+                    rawIdx += 2
                 }
                 jsServer.invokeMethod("_handleRequest", withArguments: [
-                    reqId, method, uri, headersObj, "2.0", bodyStr,
+                    reqId, method, uri, headersObj, "2.0", bodyStr, rawHeadersArr,
                 ])
             }
 

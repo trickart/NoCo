@@ -118,7 +118,7 @@ public struct HTTPModule: NodeModule {
         (function(http) {
             var EventEmitter = this.__NoCo_EventEmitter;
 
-            function IncomingMessage(reqId, method, url, headers, httpVersion) {
+            function IncomingMessage(reqId, method, url, headers, httpVersion, rawHeaders) {
                 this._events = Object.create(null);
                 this._maxListeners = 10;
                 this._reqId = reqId;
@@ -130,10 +130,20 @@ public struct HTTPModule: NodeModule {
                 this._encoding = null;
                 this._body = [];
                 this._ended = false;
+                this.complete = false;
+                this.errored = null;
+                this.rawHeaders = rawHeaders || [];
+                this.socket = { encrypted: false, remoteAddress: '127.0.0.1', remotePort: 0 };
             }
             IncomingMessage.prototype = Object.create(EventEmitter.prototype);
             IncomingMessage.prototype.constructor = IncomingMessage;
             IncomingMessage.prototype.setEncoding = function(enc) { this._encoding = enc; return this; };
+            IncomingMessage.prototype.destroy = function(err) {
+                this._ended = true;
+                if (err) this.errored = err;
+                this.emit('close');
+                return this;
+            };
 
             function ServerResponse(reqId) {
                 this._events = Object.create(null);
@@ -143,9 +153,26 @@ public struct HTTPModule: NodeModule {
                 this._headers = {};
                 this._headersSent = false;
                 this.finished = false;
+                this.writable = true;
+                this.writableFinished = false;
             }
             ServerResponse.prototype = Object.create(EventEmitter.prototype);
             ServerResponse.prototype.constructor = ServerResponse;
+            Object.defineProperty(ServerResponse.prototype, 'headersSent', {
+                get: function() { return this._headersSent; }
+            });
+            ServerResponse.prototype.flushHeaders = function() {
+                if (!this._headersSent) {
+                    this.writeHead(this.statusCode);
+                }
+            };
+            ServerResponse.prototype.destroy = function(err) {
+                this.finished = true;
+                this.writable = false;
+                if (err) this.emit('error', err);
+                this.emit('close');
+                return this;
+            };
 
             ServerResponse.prototype.setHeader = function(name, value) {
                 this._headers[name.toLowerCase()] = value;
@@ -231,9 +258,13 @@ public struct HTTPModule: NodeModule {
             Server.prototype.ref = function() { return this; };
             Server.prototype.unref = function() { return this; };
 
-            Server.prototype._handleRequest = function(reqId, method, url, headersObj, httpVersion, bodyStr) {
-                var req = new IncomingMessage(reqId, method, url, headersObj, httpVersion);
+            Server.prototype._handleRequest = function(reqId, method, url, headersObj, httpVersion, bodyStr, rawHeaders) {
+                var req = new IncomingMessage(reqId, method, url, headersObj, httpVersion, rawHeaders || []);
                 var res = new ServerResponse(reqId);
+                res.on('finish', function() {
+                    res.writableFinished = true;
+                    res.writable = false;
+                });
                 if (bodyStr && bodyStr.length > 0) {
                     req._body.push(bodyStr);
                 }
@@ -242,6 +273,7 @@ public struct HTTPModule: NodeModule {
                     req.emit('data', req._body[i]);
                 }
                 req._ended = true;
+                req.complete = true;
                 req.emit('end');
             };
 
@@ -601,6 +633,8 @@ final class HTTPBridgeHandler: ChannelInboundHandler, @unchecked Sendable {
 
                 guard let jsServer = self.server.jsServer, let ctx = jsServer.context else { return }
                 let headersObj = JSValue(newObjectIn: ctx)!
+                let rawHeadersArr = JSValue(newArrayIn: ctx)!
+                var rawIdx: Int = 0
                 for (name, value) in headerPairs {
                     let lname = name.lowercased()
                     if let existing = headersObj.forProperty(lname), !existing.isUndefined {
@@ -608,9 +642,12 @@ final class HTTPBridgeHandler: ChannelInboundHandler, @unchecked Sendable {
                     } else {
                         headersObj.setValue(value, forProperty: lname)
                     }
+                    rawHeadersArr.setValue(name, at: rawIdx)
+                    rawHeadersArr.setValue(value, at: rawIdx + 1)
+                    rawIdx += 2
                 }
                 jsServer.invokeMethod("_handleRequest", withArguments: [
-                    reqId, method, uri, headersObj, "1.1", bodyStr,
+                    reqId, method, uri, headersObj, "1.1", bodyStr, rawHeadersArr,
                 ])
             }
 

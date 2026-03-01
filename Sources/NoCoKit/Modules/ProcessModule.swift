@@ -144,9 +144,14 @@ public struct ProcessModule: NodeModule {
 
         context.setObject(process, forKeyedSubscript: "process" as NSString)
 
-        // Also set global
-        context.setObject(process, forKeyedSubscript: "global" as NSString)
-        context.evaluateScript("global.process = process; global.global = global;")
+        // Set global to the actual global object (not process)
+        context.evaluateScript("""
+            (function() {
+                var g = this;
+                g.global = g;
+                g.process = process;
+            })();
+        """)
 
         return process
     }
