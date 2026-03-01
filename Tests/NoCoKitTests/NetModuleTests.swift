@@ -263,3 +263,40 @@ func netCreateServerEcho() async throws {
     #expect(hasListeningEcho)
     #expect(messages.contains("echo:hello"))
 }
+
+@Test(.timeLimit(.minutes(1)))
+func netAndHttpDualServerListening() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in
+        messages.append(msg)
+    }
+
+    runtime.evaluate("""
+        var net = require('net');
+        var http = require('http');
+
+        var tcpServer = net.createServer(function(socket) {});
+        tcpServer.listen(0, function() {
+            var addr = tcpServer.address();
+            console.log('tcp-listening:' + addr.port);
+            tcpServer.close();
+        });
+
+        var httpServer = http.createServer(function(req, res) {
+            res.end('ok');
+        });
+        httpServer.listen(0, '127.0.0.1', function() {
+            var addr = httpServer.address();
+            console.log('http-listening:' + addr.port);
+            httpServer.close();
+        });
+    """)
+
+    await runEventLoopAsync(runtime, timeout: 10)
+
+    let hasTcp = messages.contains { $0.hasPrefix("tcp-listening:") }
+    let hasHttp = messages.contains { $0.hasPrefix("http-listening:") }
+    #expect(hasTcp, "TCP server listen callback should fire")
+    #expect(hasHttp, "HTTP server listen callback should fire")
+}

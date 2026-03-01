@@ -55,6 +55,10 @@ public final class NodeRuntime: @unchecked Sendable {
         setupExceptionHandler()
         installBuiltinModules()
 
+        eventLoop.onUncaughtException = { [weak self] in
+            self?.checkException()
+        }
+
         configure?(self)
     }
 
@@ -136,7 +140,7 @@ public final class NodeRuntime: @unchecked Sendable {
     /// Check for an unhandled JS exception, log it, and clear it.
     /// Returns `true` if there was an exception.
     @discardableResult
-    internal func checkException() -> Bool {
+    public func checkException() -> Bool {
         guard let exception = context.exception else { return false }
         context.exception = nil
         let message = exception.toString() ?? "Unknown JS error"
