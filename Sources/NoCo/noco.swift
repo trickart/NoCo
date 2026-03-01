@@ -33,7 +33,7 @@ struct NoCo: ParsableCommand {
             argv.append(contentsOf: userArgs)
             let runtime = NodeRuntime(argv: argv)
             runtime.evaluate(code)
-            runtime.runEventLoop()
+            runtime.runEventLoop(timeout: .infinity)
         } else if let script = script {
             let path = (script as NSString).standardizingPath
             let absPath: String
@@ -51,7 +51,7 @@ struct NoCo: ParsableCommand {
             argv.append(contentsOf: userArgs)
             let runtime = NodeRuntime(argv: argv)
             runtime.moduleLoader.loadFile(at: absPath)
-            runtime.runEventLoop()
+            runtime.runEventLoop(timeout: .infinity)
         }
     }
 }
