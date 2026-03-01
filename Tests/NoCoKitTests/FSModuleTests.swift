@@ -211,7 +211,9 @@ func fsReadFileAsyncDuringEventLoop() async throws {
 
     runtime.evaluate("""
         var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 10000);
         fs.readFile('\(tmpPath)', 'utf8', function(err, data) {
+            clearTimeout(keepAlive);
             if (err) { console.log('error:' + err.message); }
             else { console.log('result:' + data); }
         });
