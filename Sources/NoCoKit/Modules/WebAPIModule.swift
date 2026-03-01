@@ -405,6 +405,18 @@ public struct WebAPIModule {
                 this.bodyUsed = true;
                 if (this.body === null || this.body === undefined) return Promise.resolve('');
                 if (typeof this.body === 'string') return Promise.resolve(this.body);
+                if (this.body instanceof ReadableStream) {
+                    var reader = this.body.getReader();
+                    var chunks = [];
+                    function pump() {
+                        return reader.read().then(function(result) {
+                            if (result.done) return chunks.join('');
+                            chunks.push(typeof result.value === 'string' ? result.value : new TextDecoder().decode(result.value));
+                            return pump();
+                        });
+                    }
+                    return pump();
+                }
                 return Promise.resolve(String(this.body));
             };
             Request.prototype.json = function() {
@@ -455,6 +467,18 @@ public struct WebAPIModule {
                 this.bodyUsed = true;
                 if (this.body === null || this.body === undefined) return Promise.resolve('');
                 if (typeof this.body === 'string') return Promise.resolve(this.body);
+                if (this.body instanceof ReadableStream) {
+                    var reader = this.body.getReader();
+                    var chunks = [];
+                    function pump() {
+                        return reader.read().then(function(result) {
+                            if (result.done) return chunks.join('');
+                            chunks.push(typeof result.value === 'string' ? result.value : new TextDecoder().decode(result.value));
+                            return pump();
+                        });
+                    }
+                    return pump();
+                }
                 return Promise.resolve(String(this.body));
             };
             Response.prototype.json = function() {
