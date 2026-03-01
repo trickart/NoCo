@@ -314,7 +314,8 @@ public struct FSModule: NodeModule {
             let resolved = (path as NSString).standardizingPath
             DispatchQueue.global().async {
                 let data = FileManager.default.contents(atPath: resolved)
-                runtime.perform { ctx in
+                runtime.eventLoop.enqueueCallback {
+                    let ctx = runtime.context
                     if let data = data {
                         if let enc = encoding, (enc.lowercased() == "utf8" || enc.lowercased() == "utf-8") {
                             let str = String(data: data, encoding: .utf8) ?? ""
@@ -362,7 +363,8 @@ public struct FSModule: NodeModule {
 
             DispatchQueue.global().async {
                 FileManager.default.createFile(atPath: resolved, contents: writeData, attributes: nil)
-                runtime.perform { ctx in
+                runtime.eventLoop.enqueueCallback {
+                    let ctx = runtime.context
                     callback.call(withArguments: [JSValue(nullIn: ctx)!])
                 }
             }
@@ -372,7 +374,8 @@ public struct FSModule: NodeModule {
         // fs.stat(path, callback)
         let stat: @convention(block) (String, JSValue) -> Void = { path, callback in
             DispatchQueue.global().async {
-                runtime.perform { ctx in
+                runtime.eventLoop.enqueueCallback {
+                    let ctx = runtime.context
                     // Reuse statSync logic by calling it
                     let fsObj = ctx.objectForKeyedSubscript("require" as NSString)?.call(withArguments: ["fs"])
                     if let statResult = fsObj?.invokeMethod("statSync", withArguments: [path]) {

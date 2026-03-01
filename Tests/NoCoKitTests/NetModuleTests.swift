@@ -200,3 +200,66 @@ func netSocketTimeout() async throws {
 
     #expect(messages.contains("timeout"))
 }
+
+// MARK: - net.createServer Tests
+
+@Test(.timeLimit(.minutes(1)))
+func netCreateServerListening() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var net = require('net');
+        var server = net.createServer(function(socket) {});
+        server.listen(0, '127.0.0.1', function() {
+            var addr = server.address();
+            console.log('listening:' + addr.port);
+            server.close();
+        });
+    """)
+
+    await runEventLoopAsync(runtime, timeout: 10)
+
+    let hasListening = messages.contains { $0.hasPrefix("listening:") }
+    #expect(hasListening)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func netCreateServerEcho() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in
+        messages.append(msg)
+        print("[JS] \(msg)")
+    }
+
+    runtime.evaluate("""
+        var net = require('net');
+        var server = net.createServer(function(socket) {
+            socket.on('data', function(data) {
+                socket.write(data); // echo
+            });
+        });
+        server.listen(0, '127.0.0.1', function() {
+            var addr = server.address();
+            console.log('listening:' + addr.port);
+
+            var client = net.connect(addr.port, '127.0.0.1');
+            client.on('connect', function() {
+                client.write('hello');
+            });
+            client.on('data', function(buf) {
+                console.log('echo:' + buf.toString());
+                client.destroy();
+                server.close();
+            });
+        });
+    """)
+
+    await runEventLoopAsync(runtime, timeout: 10)
+
+    let hasListeningEcho = messages.contains { $0.hasPrefix("listening:") }
+    #expect(hasListeningEcho)
+    #expect(messages.contains("echo:hello"))
+}

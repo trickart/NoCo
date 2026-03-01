@@ -109,7 +109,7 @@ public final class EventLoop: @unchecked Sendable {
     /// Run the event loop until no pending work or timeout.
     func run(timeout: TimeInterval = 30) {
         running = true
-        let deadline = Date().addingTimeInterval(timeout)
+        let deadline = timeout.isInfinite ? Date.distantFuture : Date().addingTimeInterval(timeout)
 
         while running && hasPendingWork && Date() < deadline {
             drainNextTick()
