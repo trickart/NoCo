@@ -10,9 +10,11 @@ NoCo implements CommonJS module resolution and a subset of Node.js built-in modu
 
 - **JavaScriptCore-powered** — Uses Apple's built-in JS engine; no V8 dependency
 - **CommonJS `require()`** — Full module resolution: built-in modules → cache → `node_modules` → filesystem
-- **Node.js built-in modules** — `fs`, `path`, `crypto`, `http`, `stream`, `net`, `url`, `zlib`, and more
-- **HTTP/TCP servers** — `http.createServer()` and `net.createServer()` powered by [SwiftNIO](https://github.com/apple/swift-nio)
+- **Node.js built-in modules** — `fs`, `path`, `crypto`, `http`, `http2`, `stream`, `net`, `url`, `zlib`, and more
+- **Web Platform APIs** — `Headers`, `Request`, `Response`, `ReadableStream`, `AbortController` etc. for Fetch API compatibility
+- **HTTP/TCP servers** — `http.createServer()`, `http2.createServer()`, and `net.createServer()` powered by [SwiftNIO](https://github.com/apple/swift-nio)
 - **Event loop** — `setTimeout`, `setInterval`, `process.nextTick`, and async I/O
+- **Web framework support** — Run frameworks like [Hono](https://hono.dev/) on NoCo
 - **npm compatibility** — Works with real-world npm packages (tested with `pngjs`, `receiptline`, `iconv-lite`, etc.)
 - **Embeddable** — Use `NoCoKit` as a library in your own Swift apps
 
@@ -82,6 +84,27 @@ server.listen(8080, () => {
 noco server.js
 ```
 
+### Run Hono
+
+```javascript
+// app.js
+const { Hono } = require('hono');
+const { serve } = require('@hono/node-server');
+
+const app = new Hono();
+app.get('/', (c) => c.text('Hello from Hono on NoCo!'));
+app.get('/json', (c) => c.json({ runtime: 'NoCo', engine: 'JavaScriptCore' }));
+
+serve({ fetch: app.fetch, port: 3000 }, (info) => {
+    console.log('Listening on http://localhost:' + info.port);
+});
+```
+
+```bash
+npm install hono @hono/node-server
+noco app.js
+```
+
 ### Embed in a Swift app
 
 ```swift
@@ -103,6 +126,20 @@ runtime.runEventLoop(timeout: .infinity)
 | `timers` | `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval` |
 | `Buffer` | Node.js-compatible Buffer class (Uint8Array-based) |
 | `EventEmitter` | Event emitter class |
+| `URL` / `URLSearchParams` | WHATWG URL API |
+
+### Web Platform APIs (available as globals)
+
+| API | Description |
+|-----|-------------|
+| `Headers` | HTTP headers manipulation (Fetch API) |
+| `Request` | HTTP request representation (Fetch API) |
+| `Response` | HTTP response representation, including `Response.json()`, `Response.redirect()` |
+| `ReadableStream` | WHATWG Streams API readable stream |
+| `AbortController` / `AbortSignal` | Request cancellation API |
+| `DOMException` | Web standard exception |
+| `structuredClone` | Deep clone objects |
+| `queueMicrotask` | Schedule microtask |
 
 ### Require-able
 
@@ -112,8 +149,9 @@ runtime.runEventLoop(timeout: .infinity)
 | `fs` | `readFileSync`, `writeFileSync`, `existsSync`, `statSync`, `readdirSync`, `mkdirSync`, `unlinkSync`, `renameSync`, `appendFileSync`, and async variants |
 | `fs/promises` | Promise-based versions of `fs` methods |
 | `crypto` | `createHash`, `createHmac`, `randomBytes`, `randomUUID` (SHA-1, SHA-256, SHA-512, MD5) |
-| `stream` | `Readable`, `Writable`, `Transform`, `Duplex`, `PassThrough` |
+| `stream` | `Readable`, `Writable`, `Transform`, `Duplex`, `PassThrough`, `Readable.toWeb()` |
 | `http` | `createServer`, `request`, `get`, `Server`, `IncomingMessage`, `ServerResponse` (server: SwiftNIO, client: URLSession) |
+| `http2` | `createServer`, `createSecureServer`, `connect`, `getDefaultSettings`, `constants` (server: SwiftNIO + NIOHTTP2) |
 | `net` | `createServer`, `connect`, `Socket`, `Server`, `isIP`, `isIPv4`, `isIPv6` (server: SwiftNIO, client: NWConnection) |
 | `url` | `parse`, `format`, `resolve` |
 | `zlib` | `gzip`, `gunzip`, `deflate`, `inflate`, `deflateRaw`, `inflateRaw` |
@@ -141,7 +179,7 @@ NoCo
     └── Utilities            JSValue extensions, error handling
 ```
 
-All JS operations go through a serial `DispatchQueue` (`jsQueue`) for thread safety. HTTP/TCP servers use [SwiftNIO](https://github.com/apple/swift-nio) with [NIOTransportServices](https://github.com/apple/swift-nio-transport-services) (Network.framework) for the transport layer and NIOHTTP1 for HTTP codec. NIO events are bridged to the JS event loop via `eventLoop.enqueueCallback`.
+All JS operations go through a serial `DispatchQueue` (`jsQueue`) for thread safety. HTTP/TCP servers use [SwiftNIO](https://github.com/apple/swift-nio) with [NIOTransportServices](https://github.com/apple/swift-nio-transport-services) (Network.framework) for the transport layer, NIOHTTP1 for HTTP/1.1, and NIOHTTP2 for HTTP/2 codec. NIO events are bridged to the JS event loop via `eventLoop.enqueueCallback`.
 
 ## Testing
 
