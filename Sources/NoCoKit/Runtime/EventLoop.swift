@@ -15,6 +15,9 @@ public final class EventLoop: @unchecked Sendable {
     /// Number of active I/O handles (e.g. TCP sockets) keeping the loop alive.
     private var _activeHandles: Int = 0
 
+    /// Called after each callback execution to check/clear uncaught JS exceptions.
+    var onUncaughtException: (() -> Void)?
+
     struct TimerEntry {
         let id: Int
         let callback: JSValue
@@ -82,7 +85,10 @@ public final class EventLoop: @unchecked Sendable {
             cbs = pendingCallbacks
             pendingCallbacks.removeAll()
         }
-        for cb in cbs { cb() }
+        for cb in cbs {
+            cb()
+            onUncaughtException?()
+        }
     }
 
     /// Increment active I/O handle count. Thread-safe.

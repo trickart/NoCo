@@ -51,6 +51,7 @@ struct NoCo: ParsableCommand {
             argv.append(contentsOf: userArgs)
             let runtime = NodeRuntime(argv: argv)
             runtime.moduleLoader.loadFile(at: absPath)
+            runtime.checkException()
             runtime.runEventLoop(timeout: .infinity)
         }
     }
