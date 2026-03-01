@@ -67,3 +67,26 @@ jobs:
             noco.artifactbundle.zip \
             --generate-notes \
             --notes-file release-notes.md
+
+      - name: Update Homebrew Formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          CHECKSUM="${{ env.CHECKSUM }}"
+          URL="https://github.com/aspect-apps/NoCo/releases/download/${VERSION}/noco.artifactbundle.zip"
+
+          gh repo clone trickart/homebrew-tap /tmp/homebrew-tap
+
+          sed -i '' \
+            -e "s|url \".*\"|url \"${URL}\"|" \
+            -e "s|sha256 \".*\"|sha256 \"${CHECKSUM}\"|" \
+            /tmp/homebrew-tap/Formula/noco.rb
+
+          cd /tmp/homebrew-tap
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/trickart/homebrew-tap.git"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/noco.rb
+          git commit -m "noco ${VERSION} に更新"
+          git push
