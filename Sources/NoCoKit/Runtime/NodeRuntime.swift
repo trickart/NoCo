@@ -175,7 +175,43 @@ public final class NodeRuntime: @unchecked Sendable {
             global.global = global;
             """)
 
-        // Minimal browser-compat globals (URL.createObjectURL, Blob)
+        // __urlParse bridge: parse a URL string using Foundation.URLComponents
+        let urlParseBlock: @convention(block) (String) -> JSValue = { href in
+            let ctx = JSContext.current()!
+            let result = JSValue(newObjectIn: ctx)!
+            guard let comp = URLComponents(string: href) else {
+                result.setValue(href, forProperty: "href")
+                return result
+            }
+            let scheme = comp.scheme ?? ""
+            let hostname = comp.host ?? ""
+            let port = comp.port.map { String($0) } ?? ""
+            let pathname = comp.path.isEmpty ? "/" : comp.path
+            let search = comp.query.map { "?\($0)" } ?? ""
+            let hash = comp.fragment.map { "#\($0)" } ?? ""
+            let user = comp.user ?? ""
+            let password = comp.password ?? ""
+            let auth = !user.isEmpty ? (password.isEmpty ? user : "\(user):\(password)") : ""
+            let hostWithPort = !port.isEmpty ? "\(hostname):\(port)" : hostname
+            let origin = !scheme.isEmpty ? "\(scheme)://\(hostWithPort)" : ""
+
+            result.setValue(href, forProperty: "href")
+            result.setValue(!scheme.isEmpty ? scheme + ":" : "", forProperty: "protocol")
+            result.setValue(hostname, forProperty: "hostname")
+            result.setValue(port, forProperty: "port")
+            result.setValue(pathname, forProperty: "pathname")
+            result.setValue(search, forProperty: "search")
+            result.setValue(hash, forProperty: "hash")
+            result.setValue(hostWithPort, forProperty: "host")
+            result.setValue(origin, forProperty: "origin")
+            result.setValue(auth, forProperty: "auth")
+            result.setValue(user, forProperty: "username")
+            result.setValue(password, forProperty: "password")
+            return result
+        }
+        context.setObject(urlParseBlock, forKeyedSubscript: "__urlParse" as NSString)
+
+        // Minimal browser-compat globals (URL, URLSearchParams, Blob)
         context.evaluateScript("""
             (function(g) {
                 if (typeof g.Blob === 'undefined') {
@@ -183,13 +219,86 @@ public final class NodeRuntime: @unchecked Sendable {
                         this._parts = parts || [];
                     };
                 }
-                if (typeof g.URL === 'undefined') {
-                    g.URL = function URL(input, base) {
-                        if (typeof input === 'string') {
-                            this.href = input;
+
+                function URLSearchParams(init) {
+                    this._params = [];
+                    if (typeof init === 'string') {
+                        var s = init.charAt(0) === '?' ? init.slice(1) : init;
+                        if (s) {
+                            var pairs = s.split('&');
+                            for (var i = 0; i < pairs.length; i++) {
+                                var idx = pairs[i].indexOf('=');
+                                if (idx === -1) {
+                                    this._params.push([decodeURIComponent(pairs[i]), '']);
+                                } else {
+                                    this._params.push([
+                                        decodeURIComponent(pairs[i].slice(0, idx)),
+                                        decodeURIComponent(pairs[i].slice(idx + 1))
+                                    ]);
+                                }
+                            }
                         }
-                    };
+                    }
                 }
+                URLSearchParams.prototype.get = function(name) {
+                    for (var i = 0; i < this._params.length; i++) {
+                        if (this._params[i][0] === name) return this._params[i][1];
+                    }
+                    return null;
+                };
+                URLSearchParams.prototype.has = function(name) {
+                    for (var i = 0; i < this._params.length; i++) {
+                        if (this._params[i][0] === name) return true;
+                    }
+                    return false;
+                };
+                URLSearchParams.prototype.toString = function() {
+                    return this._params.map(function(p) {
+                        return encodeURIComponent(p[0]) + '=' + encodeURIComponent(p[1]);
+                    }).join('&');
+                };
+                URLSearchParams.prototype.forEach = function(cb) {
+                    for (var i = 0; i < this._params.length; i++) {
+                        cb(this._params[i][1], this._params[i][0], this);
+                    }
+                };
+                g.URLSearchParams = URLSearchParams;
+
+                g.URL = function URL(input, base) {
+                    if (!(this instanceof URL)) return new URL(input, base);
+                    var href;
+                    if (base !== undefined) {
+                        var baseStr = (typeof base === 'object' && base && base.href) ? base.href : String(base);
+                        // Simple base URL resolution
+                        if (/^[a-zA-Z][a-zA-Z0-9+\\-.]*:\\/\\//.test(input)) {
+                            href = input; // absolute URL
+                        } else if (input.charAt(0) === '/') {
+                            var m = baseStr.match(/^([a-zA-Z][a-zA-Z0-9+\\-.]*:\\/\\/[^/]*)/);
+                            href = m ? m[1] + input : input;
+                        } else {
+                            var idx = baseStr.lastIndexOf('/');
+                            href = baseStr.slice(0, idx + 1) + input;
+                        }
+                    } else {
+                        href = String(input);
+                    }
+                    var parsed = __urlParse(href);
+                    this.href = parsed.href || href;
+                    this.protocol = parsed.protocol || '';
+                    this.hostname = parsed.hostname || '';
+                    this.port = parsed.port || '';
+                    this.pathname = parsed.pathname || '/';
+                    this.search = parsed.search || '';
+                    this.hash = parsed.hash || '';
+                    this.host = parsed.host || '';
+                    this.origin = parsed.origin || '';
+                    this.username = parsed.username || '';
+                    this.password = parsed.password || '';
+                    this.searchParams = new URLSearchParams(this.search);
+                };
+                g.URL.prototype.toString = function() { return this.href; };
+                g.URL.prototype.toJSON = function() { return this.href; };
+
                 if (!g.URL.createObjectURL) {
                     g.URL.createObjectURL = function(blob) {
                         var hex = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
