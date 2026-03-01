@@ -123,6 +123,7 @@ runtime.runEventLoop(timeout: .infinity)
 | `string_decoder` | `StringDecoder` |
 | `buffer` | `Buffer` |
 | `os` | `arch`, `platform`, `type`, `release`, `version`, `hostname`, `homedir`, `tmpdir`, `totalmem`, `freemem`, `cpus`, `loadavg`, `uptime`, `endianness`, `networkInterfaces`, `userInfo`, `EOL`, `constants` |
+| `querystring` | `parse`/`decode`, `stringify`/`encode`, `escape`, `unescape` |
 | `timers` | `setTimeout`, `setInterval` |
 
 ## Architecture
