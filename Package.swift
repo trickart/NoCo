@@ -18,6 +18,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.7.0"),
         .package(url: "https://github.com/apple/swift-nio", from: "2.95.0"),
         .package(url: "https://github.com/apple/swift-nio-transport-services", from: "1.26.0"),
+        .package(url: "https://github.com/apple/swift-nio-http2", from: "1.34.0"),
     ],
     targets: [
         .target(
@@ -27,6 +28,7 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOTransportServices", package: "swift-nio-transport-services"),
+                .product(name: "NIOHTTP2", package: "swift-nio-http2"),
             ],
             linkerSettings: [
                 .linkedFramework("JavaScriptCore"),
@@ -41,7 +43,13 @@ let package = Package(
         ),
         .testTarget(
             name: "NoCoKitTests",
-            dependencies: ["NoCoKit"],
+            dependencies: [
+                "NoCoKit",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOHTTP2", package: "swift-nio-http2"),
+            ],
             resources: [
                 .copy("Fixtures"),
             ]
