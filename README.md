@@ -11,6 +11,7 @@ NoCo implements CommonJS module resolution and a subset of Node.js built-in modu
 - **JavaScriptCore-powered** — Uses Apple's built-in JS engine; no V8 dependency
 - **CommonJS `require()`** — Full module resolution: built-in modules → cache → `node_modules` → filesystem
 - **Node.js built-in modules** — `fs`, `path`, `crypto`, `http`, `stream`, `net`, `url`, `zlib`, and more
+- **HTTP/TCP servers** — `http.createServer()` and `net.createServer()` powered by [SwiftNIO](https://github.com/apple/swift-nio)
 - **Event loop** — `setTimeout`, `setInterval`, `process.nextTick`, and async I/O
 - **npm compatibility** — Works with real-world npm packages (tested with `pngjs`, `receiptline`, `iconv-lite`, etc.)
 - **Embeddable** — Use `NoCoKit` as a library in your own Swift apps
@@ -63,6 +64,24 @@ noco -e "console.log(process.argv)" -- hello world
 # process.argv => [execPath, "[eval]", "hello", "world"]
 ```
 
+### Run an HTTP server
+
+```javascript
+// server.js
+const http = require('http');
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Hello from NoCo!');
+});
+server.listen(8080, () => {
+    console.log('Server running at http://127.0.0.1:8080/');
+});
+```
+
+```bash
+noco server.js
+```
+
 ### Embed in a Swift app
 
 ```swift
@@ -70,7 +89,7 @@ import NoCoKit
 
 let runtime = NodeRuntime()
 runtime.evaluate("console.log('Hello from NoCoKit')")
-runtime.runEventLoop()
+runtime.runEventLoop(timeout: .infinity)
 ```
 
 ## Built-in Modules
@@ -94,8 +113,8 @@ runtime.runEventLoop()
 | `fs/promises` | Promise-based versions of `fs` methods |
 | `crypto` | `createHash`, `createHmac`, `randomBytes`, `randomUUID` (SHA-1, SHA-256, SHA-512, MD5) |
 | `stream` | `Readable`, `Writable`, `Transform`, `Duplex`, `PassThrough` |
-| `http` | `http.request`, `http.get` (backed by URLSession) |
-| `net` | `net.connect`, `Socket` (backed by NWConnection) |
+| `http` | `createServer`, `request`, `get`, `Server`, `IncomingMessage`, `ServerResponse` (server: SwiftNIO, client: URLSession) |
+| `net` | `createServer`, `connect`, `Socket`, `Server`, `isIP`, `isIPv4`, `isIPv6` (server: SwiftNIO, client: NWConnection) |
 | `url` | `parse`, `format`, `resolve` |
 | `zlib` | `gzip`, `gunzip`, `deflate`, `inflate`, `deflateRaw`, `inflateRaw` |
 | `util` | `inherits`, `deprecate`, `format` |
@@ -120,7 +139,7 @@ NoCo
     └── Utilities            JSValue extensions, error handling
 ```
 
-All JS operations go through `NodeRuntime.perform { context in ... }` to ensure thread safety via a serial `DispatchQueue`.
+All JS operations go through a serial `DispatchQueue` (`jsQueue`) for thread safety. HTTP/TCP servers use [SwiftNIO](https://github.com/apple/swift-nio) with [NIOTransportServices](https://github.com/apple/swift-nio-transport-services) (Network.framework) for the transport layer and NIOHTTP1 for HTTP codec. NIO events are bridged to the JS event loop via `eventLoop.enqueueCallback`.
 
 ## Testing
 
