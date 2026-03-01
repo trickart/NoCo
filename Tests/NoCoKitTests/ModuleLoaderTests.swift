@@ -137,3 +137,37 @@ private func fixturesPath() -> String {
     let result = runtime.evaluate("require('\(dirPath)').source")
     #expect(result?.toString() == "dir_mod_index")
 }
+
+// MARK: - Module Resolution: file vs directory with same name
+
+@Test func requireFileWhenSameNameDirectoryExists() async throws {
+    // request.js と request/ が共存する場合、request.js が優先される
+    let runtime = NodeRuntime()
+    let fixturePath = fixturesPath() + "/importer.js"
+    let result = runtime.evaluate("require('\(fixturePath)').requestSource")
+    #expect(result?.toString() == "request_file")
+}
+
+@Test func requireFileWithExplicitExtensionWhenDirectoryExists() async throws {
+    // 明示的に .js を付けた場合も正しく解決される
+    let runtime = NodeRuntime()
+    let filePath = fixturesPath() + "/request.js"
+    let result = runtime.evaluate("require('\(filePath)').source")
+    #expect(result?.toString() == "request_file")
+}
+
+@Test func requireSubfileInsideDirectory() async throws {
+    // request/constants.js を明示的に require できる
+    let runtime = NodeRuntime()
+    let filePath = fixturesPath() + "/request/constants"
+    let result = runtime.evaluate("require('\(filePath)').source")
+    #expect(result?.toString() == "request_dir_constants")
+}
+
+@Test func requireDirectoryWithPackageJsonMain() async throws {
+    // ディレクトリに package.json の main フィールドがある場合それを使う
+    let runtime = NodeRuntime()
+    let dirPath = fixturesPath() + "/pkg_mod"
+    let result = runtime.evaluate("require('\(dirPath)').source")
+    #expect(result?.toString() == "pkg_mod_main")
+}

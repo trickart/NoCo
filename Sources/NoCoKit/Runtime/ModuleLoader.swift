@@ -204,19 +204,10 @@ public final class ModuleLoader {
         }
         candidate = (candidate as NSString).standardizingPath
 
-        // Try exact path
-        if fm.fileExists(atPath: candidate) {
-            var isDir: ObjCBool = false
-            fm.fileExists(atPath: candidate, isDirectory: &isDir)
-            if !isDir.boolValue {
-                return candidate
-            }
-            // It's a directory, try index.js
-            let indexPath = (candidate as NSString).appendingPathComponent("index.js")
-            if fm.fileExists(atPath: indexPath) {
-                return indexPath
-            }
-            return nil
+        // Try exact path (file, not directory)
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: candidate, isDirectory: &isDir) && !isDir.boolValue {
+            return candidate
         }
 
         // Try with .js extension
@@ -231,7 +222,20 @@ public final class ModuleLoader {
             return withJson
         }
 
-        // Try as directory with index.js
+        // Try as directory with index.js (or package.json main)
+        if isDir.boolValue {
+            if let main = readPackageJsonMain(at: candidate) {
+                if let resolved = resolveRelativePath("./" + main, from: candidate) {
+                    return resolved
+                }
+            }
+            let indexPath = (candidate as NSString).appendingPathComponent("index.js")
+            if fm.fileExists(atPath: indexPath) {
+                return indexPath
+            }
+        }
+
+        // Try candidate/index.js even if the directory wasn't detected above
         let dirIndex = (candidate as NSString).appendingPathComponent("index.js")
         if fm.fileExists(atPath: dirIndex) {
             return dirIndex
