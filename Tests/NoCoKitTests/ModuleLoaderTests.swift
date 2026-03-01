@@ -171,3 +171,27 @@ private func fixturesPath() -> String {
     let result = runtime.evaluate("require('\(dirPath)').source")
     #expect(result?.toString() == "pkg_mod_main")
 }
+
+// MARK: - package.json exports フィールド
+
+@Test func requirePackageExportsMainEntry() async throws {
+    let runtime = NodeRuntime()
+    let fixturePath = fixturesPath()
+    let tmp = fixturePath + "/__test_\(UUID().uuidString).js"
+    try "module.exports = require('mock-exports-pkg').name;".write(
+        toFile: tmp, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+    let result = runtime.moduleLoader.loadFile(at: tmp)
+    #expect(result.toString() == "main")
+}
+
+@Test func requirePackageExportsSubpath() async throws {
+    let runtime = NodeRuntime()
+    let fixturePath = fixturesPath()
+    let tmp = fixturePath + "/__test_\(UUID().uuidString).js"
+    try "module.exports = require('mock-exports-pkg/cors').name;".write(
+        toFile: tmp, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+    let result = runtime.moduleLoader.loadFile(at: tmp)
+    #expect(result.toString() == "cors")
+}

@@ -256,26 +256,84 @@ public final class ModuleLoader {
         return main
     }
 
+    /// Resolve a subpath using the "exports" field in package.json.
+    private func resolvePackageExports(at dir: String, subpath: String) -> String? {
+        let packageJsonPath = (dir as NSString).appendingPathComponent("package.json")
+        guard let data = FileManager.default.contents(atPath: packageJsonPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let exports = json["exports"] as? [String: Any]
+        else { return nil }
+
+        guard let entry = exports[subpath] else { return nil }
+
+        // 値が文字列ならそのまま
+        if let str = entry as? String { return str }
+        // 値がオブジェクトなら "require" > "default" の優先順
+        if let obj = entry as? [String: Any] {
+            if let req = obj["require"] as? String { return req }
+            if let def = obj["default"] as? String { return def }
+        }
+        return nil
+    }
+
     /// Resolve a bare module name by walking up the directory tree looking for node_modules.
     private func resolveNodeModules(_ name: String, from startDir: String) -> String? {
         let fm = FileManager.default
         var dir = (startDir as NSString).standardizingPath
 
+        // パッケージ名とサブパスを分離
+        let packageName: String
+        let exportSubpath: String  // "." or "./cors" 形式
+        if name.hasPrefix("@") {
+            // スコープパッケージ: "@scope/pkg/sub" → "@scope/pkg" + "./sub"
+            let parts = name.split(separator: "/", maxSplits: 2)
+            if parts.count > 2 {
+                packageName = "\(parts[0])/\(parts[1])"
+                exportSubpath = "./\(parts[2])"
+            } else {
+                packageName = name
+                exportSubpath = "."
+            }
+        } else if let slashIdx = name.firstIndex(of: "/") {
+            // 通常パッケージ: "hono/cors" → "hono" + "./cors"
+            packageName = String(name[..<slashIdx])
+            exportSubpath = "." + String(name[slashIdx...])
+        } else {
+            packageName = name
+            exportSubpath = "."
+        }
+
         while true {
             // Skip if this directory is itself named "node_modules"
             if (dir as NSString).lastPathComponent != "node_modules" {
-                let moduleDir = (dir as NSString).appendingPathComponent("node_modules/\(name)")
+                let moduleDir = (dir as NSString).appendingPathComponent("node_modules/\(packageName)")
                 if fm.fileExists(atPath: moduleDir) {
-                    // Try package.json main field
-                    if let main = readPackageJsonMain(at: moduleDir) {
-                        if let resolved = resolveRelativePath("./" + main, from: moduleDir) {
+                    // 1. exports フィールドを試みる
+                    if let exportedPath = resolvePackageExports(at: moduleDir, subpath: exportSubpath) {
+                        if let resolved = resolveRelativePath(
+                            exportedPath.hasPrefix("./") ? exportedPath : "./" + exportedPath,
+                            from: moduleDir
+                        ) {
                             return resolved
                         }
                     }
-                    // Try index.js
-                    let indexPath = (moduleDir as NSString).appendingPathComponent("index.js")
-                    if fm.fileExists(atPath: indexPath) {
-                        return indexPath
+
+                    if exportSubpath == "." {
+                        // 2. メインエントリ: main フィールド → index.js フォールバック
+                        if let main = readPackageJsonMain(at: moduleDir) {
+                            if let resolved = resolveRelativePath("./" + main, from: moduleDir) {
+                                return resolved
+                            }
+                        }
+                        let indexPath = (moduleDir as NSString).appendingPathComponent("index.js")
+                        if fm.fileExists(atPath: indexPath) {
+                            return indexPath
+                        }
+                    } else {
+                        // 3. サブパス: 直接ファイルパスとしてフォールバック
+                        if let resolved = resolveRelativePath(exportSubpath, from: moduleDir) {
+                            return resolved
+                        }
                     }
                 }
             }
