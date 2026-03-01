@@ -55,136 +55,133 @@ private func startTCPServer(handler: @escaping @Sendable (NWConnection) -> Void)
     return (listener, serverPort)
 }
 
-@Suite(.serialized)
-struct NetConnectionTests {
-    @Test(.timeLimit(.minutes(1)))
-    func connectAndEcho() async throws {
-        let (listener, port) = try startTCPServer { conn in
-            conn.start(queue: .global())
-            @Sendable func receive() {
-                conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, _ in
-                    if let data = data, !data.isEmpty {
-                        conn.send(content: data, completion: .contentProcessed { _ in
-                            if !isComplete { receive() }
-                        })
-                    }
-                    if isComplete {
-                        conn.cancel()
-                    }
+@Test(.timeLimit(.minutes(1)))
+func netConnectAndEcho() async throws {
+    let (listener, port) = try startTCPServer { conn in
+        conn.start(queue: .global())
+        @Sendable func receive() {
+            conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, _ in
+                if let data = data, !data.isEmpty {
+                    conn.send(content: data, completion: .contentProcessed { _ in
+                        if !isComplete { receive() }
+                    })
+                }
+                if isComplete {
+                    conn.cancel()
                 }
             }
-            receive()
         }
-        defer { listener.cancel() }
-
-        let runtime = NodeRuntime()
-        var messages: [String] = []
-        runtime.consoleHandler = { _, msg in messages.append(msg) }
-
-        runtime.evaluate("""
-            var net = require('net');
-            var conn = net.connect(\(port), '127.0.0.1');
-            conn.on('connect', function() {
-                console.log('connected');
-                conn.write('hello');
-            });
-            conn.on('data', function(buf) {
-                console.log('data:' + buf.toString());
-                conn.destroy();
-            });
-            conn.on('close', function() {
-                console.log('closed');
-            });
-        """)
-
-        runtime.runEventLoop(timeout: 5)
-
-        #expect(messages.contains("connected"))
-        #expect(messages.contains("data:hello"))
-        #expect(messages.contains("closed"))
+        receive()
     }
+    defer { listener.cancel() }
 
-    @Test(.timeLimit(.minutes(1)))
-    func connectRefused() async throws {
-        let runtime = NodeRuntime()
-        var messages: [String] = []
-        runtime.consoleHandler = { _, msg in messages.append(msg) }
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
 
-        // Connect to a port that should be unused
-        runtime.evaluate("""
-            var net = require('net');
-            var conn = net.connect(19999, '127.0.0.1');
-            conn.on('error', function(err) {
-                console.log('error:' + err.message);
-            });
-            conn.on('close', function() {
-                console.log('closed');
-            });
-        """)
+    runtime.evaluate("""
+        var net = require('net');
+        var conn = net.connect(\(port), '127.0.0.1');
+        conn.on('connect', function() {
+            console.log('connected');
+            conn.write('hello');
+        });
+        conn.on('data', function(buf) {
+            console.log('data:' + buf.toString());
+            conn.destroy();
+        });
+        conn.on('close', function() {
+            console.log('closed');
+        });
+    """)
 
-        runtime.runEventLoop(timeout: 5)
+    runtime.runEventLoop(timeout: 5)
 
-        let hasError = messages.contains { $0.hasPrefix("error:") }
-        #expect(hasError)
+    #expect(messages.contains("connected"))
+    #expect(messages.contains("data:hello"))
+    #expect(messages.contains("closed"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func netConnectRefused() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    // Connect to a port that should be unused
+    runtime.evaluate("""
+        var net = require('net');
+        var conn = net.connect(19999, '127.0.0.1');
+        conn.on('error', function(err) {
+            console.log('error:' + err.message);
+        });
+        conn.on('close', function() {
+            console.log('closed');
+        });
+    """)
+
+    runtime.runEventLoop(timeout: 5)
+
+    let hasError = messages.contains { $0.hasPrefix("error:") }
+    #expect(hasError)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func netDrainEvent() async throws {
+    let (listener, port) = try startTCPServer { conn in
+        conn.start(queue: .global())
+        // Accept but do nothing
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { _, _, _, _ in }
     }
+    defer { listener.cancel() }
 
-    @Test(.timeLimit(.minutes(1)))
-    func drainEvent() async throws {
-        let (listener, port) = try startTCPServer { conn in
-            conn.start(queue: .global())
-            // Accept but do nothing
-            conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { _, _, _, _ in }
-        }
-        defer { listener.cancel() }
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
 
-        let runtime = NodeRuntime()
-        var messages: [String] = []
-        runtime.consoleHandler = { _, msg in messages.append(msg) }
+    runtime.evaluate("""
+        var net = require('net');
+        var conn = net.connect(\(port), '127.0.0.1');
+        conn.on('connect', function() {
+            conn.write('test');
+        });
+        conn.on('drain', function() {
+            console.log('drain');
+            conn.destroy();
+        });
+    """)
 
-        runtime.evaluate("""
-            var net = require('net');
-            var conn = net.connect(\(port), '127.0.0.1');
-            conn.on('connect', function() {
-                conn.write('test');
-            });
-            conn.on('drain', function() {
-                console.log('drain');
-                conn.destroy();
-            });
-        """)
+    runtime.runEventLoop(timeout: 5)
 
-        runtime.runEventLoop(timeout: 5)
+    #expect(messages.contains("drain"))
+}
 
-        #expect(messages.contains("drain"))
+@Test(.timeLimit(.minutes(1)))
+func netSocketTimeout() async throws {
+    let (listener, port) = try startTCPServer { conn in
+        conn.start(queue: .global())
+        // Accept but never send data
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { _, _, _, _ in }
     }
+    defer { listener.cancel() }
 
-    @Test(.timeLimit(.minutes(1)))
-    func socketTimeout() async throws {
-        let (listener, port) = try startTCPServer { conn in
-            conn.start(queue: .global())
-            // Accept but never send data
-            conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { _, _, _, _ in }
-        }
-        defer { listener.cancel() }
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
 
-        let runtime = NodeRuntime()
-        var messages: [String] = []
-        runtime.consoleHandler = { _, msg in messages.append(msg) }
+    runtime.evaluate("""
+        var net = require('net');
+        var conn = net.connect(\(port), '127.0.0.1');
+        conn.on('connect', function() {
+            conn.setTimeout(200);
+        });
+        conn.on('timeout', function() {
+            console.log('timeout');
+            conn.destroy();
+        });
+    """)
 
-        runtime.evaluate("""
-            var net = require('net');
-            var conn = net.connect(\(port), '127.0.0.1');
-            conn.on('connect', function() {
-                conn.setTimeout(200);
-            });
-            conn.on('timeout', function() {
-                console.log('timeout');
-                conn.destroy();
-            });
-        """)
+    runtime.runEventLoop(timeout: 5)
 
-        runtime.runEventLoop(timeout: 5)
-
-        #expect(messages.contains("timeout"))
-    }
+    #expect(messages.contains("timeout"))
 }
