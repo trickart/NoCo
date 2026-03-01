@@ -101,6 +101,11 @@ public struct HTTPModule: NodeModule {
             if !dataVal.isNull && !dataVal.isUndefined {
                 if dataVal.isString, let str = dataVal.toString() {
                     state.responseBody.append(contentsOf: str.utf8)
+                } else if let bufData = dataVal.forProperty("_data") {
+                    let len = Int(bufData.forProperty("length")?.toInt32() ?? 0)
+                    for i in 0..<len {
+                        state.responseBody.append(UInt8(bufData.atIndex(i).toInt32() & 0xFF))
+                    }
                 }
             }
             state.sendResponse()

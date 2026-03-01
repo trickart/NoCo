@@ -202,3 +202,47 @@ func httpCreateServerPOST() async throws {
     runtime.eventLoop.stop()
     await eventLoopTask.value
 }
+
+@Test(.timeLimit(.minutes(1)))
+func httpCreateServerBufferResponse() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {
+            var buf = Buffer.from([72, 101, 108, 108, 111]);
+            res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+            res.end(buf);
+        });
+        server.listen(0, '127.0.0.1', function() {
+            console.log('listening:' + server.address().port);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackground(runtime, timeout: 10)
+    }
+
+    var port = 0
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if let msg = messages.first(where: { $0.hasPrefix("listening:") }) {
+            port = Int(msg.replacingOccurrences(of: "listening:", with: "")) ?? 0
+            break
+        }
+    }
+    #expect(port > 0)
+
+    let url = URL(string: "http://127.0.0.1:\(port)/test")!
+    let (data, response) = try await URLSession.shared.data(from: url)
+    let httpResponse = response as! HTTPURLResponse
+    let body = String(data: data, encoding: .utf8)!
+
+    #expect(httpResponse.statusCode == 200)
+    #expect(body == "Hello")
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+}
