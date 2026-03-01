@@ -10,6 +10,13 @@ public struct ZlibModule: NodeModule {
     public static func install(in context: JSContext, runtime: NodeRuntime) -> JSValue {
         let exports = JSValue(newObjectIn: context)!
 
+        // Per-runtime stream storage (captured by closures below)
+        final class StreamStorage {
+            var streams: [Int: InflateStream] = [:]
+            var nextStreamId: Int = 1
+        }
+        let storage = StreamStorage()
+
         // ── Constants ──
         exports.setValue(0, forProperty: "Z_NO_FLUSH")
         exports.setValue(1, forProperty: "Z_PARTIAL_FLUSH")
@@ -105,7 +112,60 @@ public struct ZlibModule: NodeModule {
         // We install a JS-side Inflate constructor that creates a _handle with a
         // Swift-backed writeSync, plus createDeflate/createInflate that return
         // Transform streams.
-        let nativeWriteSync = createWriteSyncBlock()
+        // __zlib_writeSync — per-runtime via storage capture
+        let nativeWriteSync: @convention(block) (Int, JSValue, Int, Int) -> JSValue = { streamId, inputVal, outLen, flushFlag in
+            let ctx = JSContext.current()!
+            let result = JSValue(newObjectIn: ctx)!
+
+            guard let stream = storage.streams[streamId] else {
+                result.setValue(true, forProperty: "error")
+                result.setValue(JSValue(newArrayIn: ctx), forProperty: "data")
+                result.setValue(0, forProperty: "availIn")
+                return result
+            }
+
+            // Collect input bytes
+            let length = inputVal.forProperty("length")?.toInt32() ?? 0
+            var inputBytes = [UInt8](repeating: 0, count: Int(length))
+            for i in 0..<Int(length) {
+                inputBytes[i] = UInt8(inputVal.atIndex(i).toInt32() & 0xFF)
+            }
+
+            stream.accumulatedInput.append(contentsOf: inputBytes)
+
+            // If Z_FINISH or we have data, try to decompress
+            let isFinish = (flushFlag == 4)
+
+            if isFinish || !stream.accumulatedInput.isEmpty {
+                let inputData = Data(stream.accumulatedInput)
+                if let decompressed = try? (inputData as NSData).decompressed(using: .zlib) as Data {
+                    let outBytes = Array(decompressed)
+                    let jsArr = JSValue(newArrayIn: ctx)!
+                    for (i, b) in outBytes.enumerated() {
+                        jsArr.setValue(b, at: i)
+                    }
+                    result.setValue(false, forProperty: "error")
+                    result.setValue(jsArr, forProperty: "data")
+                    result.setValue(0, forProperty: "availIn")
+
+                    stream.accumulatedInput.removeAll()
+                } else if isFinish {
+                    result.setValue(true, forProperty: "error")
+                    result.setValue(JSValue(newArrayIn: ctx), forProperty: "data")
+                    result.setValue(0, forProperty: "availIn")
+                } else {
+                    result.setValue(false, forProperty: "error")
+                    result.setValue(JSValue(newArrayIn: ctx), forProperty: "data")
+                    result.setValue(0, forProperty: "availIn")
+                }
+            } else {
+                result.setValue(false, forProperty: "error")
+                result.setValue(JSValue(newArrayIn: ctx), forProperty: "data")
+                result.setValue(0, forProperty: "availIn")
+            }
+
+            return result
+        }
         context.setObject(unsafeBitCast(nativeWriteSync, to: AnyObject.self),
                           forKeyedSubscript: "__zlib_writeSync" as NSString)
 
@@ -117,15 +177,58 @@ public struct ZlibModule: NodeModule {
         context.setObject(unsafeBitCast(nativeInflateAll, to: AnyObject.self),
                           forKeyedSubscript: "__zlib_inflateAll" as NSString)
 
-        let nativeStreamInit = createStreamInitBlock()
+        // __zlib_streamInit — per-runtime via storage capture
+        let nativeStreamInit: @convention(block) (Bool) -> Int = { isDeflate in
+            let id = storage.nextStreamId
+            storage.nextStreamId += 1
+            storage.streams[id] = InflateStream(isDeflate: isDeflate)
+            return id
+        }
         context.setObject(unsafeBitCast(nativeStreamInit, to: AnyObject.self),
                           forKeyedSubscript: "__zlib_streamInit" as NSString)
 
-        let nativeStreamWrite = createStreamWriteBlock()
+        // __zlib_streamWrite — per-runtime via storage capture
+        let nativeStreamWrite: @convention(block) (Int, JSValue) -> Void = { streamId, chunkVal in
+            guard let stream = storage.streams[streamId] else {
+                return
+            }
+            let length = chunkVal.forProperty("length")?.toInt32() ?? 0
+            for i in 0..<Int(length) {
+                let b = UInt8(chunkVal.atIndex(i).toInt32() & 0xFF)
+                stream.accumulatedInput.append(b)
+            }
+        }
         context.setObject(unsafeBitCast(nativeStreamWrite, to: AnyObject.self),
                           forKeyedSubscript: "__zlib_streamWrite" as NSString)
 
-        let nativeStreamEnd = createStreamEndBlock()
+        // __zlib_streamEnd — per-runtime via storage capture
+        let nativeStreamEnd: @convention(block) (Int, Bool) -> JSValue = { streamId, isDeflate in
+            let ctx = JSContext.current()!
+            let bufferCtor = ctx.objectForKeyedSubscript("Buffer" as NSString)!
+
+            guard let stream = storage.streams[streamId] else {
+                return JSValue(nullIn: ctx)
+            }
+            let inputData = Data(stream.accumulatedInput)
+            storage.streams.removeValue(forKey: streamId)
+
+            let resultData: Data?
+            if isDeflate {
+                resultData = try? (inputData as NSData).compressed(using: .zlib) as Data
+            } else {
+                resultData = try? (inputData as NSData).decompressed(using: .zlib) as Data
+            }
+
+            guard let outputBytes = resultData else {
+                return JSValue(nullIn: ctx)
+            }
+
+            let jsArray = JSValue(newArrayIn: ctx)!
+            for (i, byte) in outputBytes.enumerated() {
+                jsArray.setValue(byte, at: i)
+            }
+            return bufferCtor.invokeMethod("from", withArguments: [jsArray])!
+        }
         context.setObject(unsafeBitCast(nativeStreamEnd, to: AnyObject.self),
                           forKeyedSubscript: "__zlib_streamEnd" as NSString)
 
@@ -400,11 +503,6 @@ public struct ZlibModule: NodeModule {
 
     // MARK: - Stateful Streaming Inflate (for sync-inflate.js _handle.writeSync)
 
-    /// Thread-safe storage for active inflate streams.
-    nonisolated(unsafe) private static var streams: [Int: InflateStream] = [:]
-    nonisolated(unsafe) private static var nextStreamId: Int = 1
-    private static let streamsLock = NSLock()
-
     private class InflateStream {
         var accumulatedInput: [UInt8] = []
         var isDeflate: Bool  // true = deflate, false = inflate
@@ -412,134 +510,6 @@ public struct ZlibModule: NodeModule {
 
         init(isDeflate: Bool) {
             self.isDeflate = isDeflate
-        }
-    }
-
-    /// Create __zlib_streamInit(isDeflate) -> streamId
-    private static func createStreamInitBlock() -> @convention(block) (Bool) -> Int {
-        return { isDeflate in
-            streamsLock.lock()
-            let id = nextStreamId
-            nextStreamId += 1
-            streams[id] = InflateStream(isDeflate: isDeflate)
-            streamsLock.unlock()
-            return id
-        }
-    }
-
-    /// Create __zlib_writeSync(streamId, inputBytes, outLen, flushFlag)
-    /// Returns { data: [UInt8], availIn: Int, error: Bool }
-    private static func createWriteSyncBlock() -> @convention(block) (Int, JSValue, Int, Int) -> JSValue {
-        return { streamId, inputVal, outLen, flushFlag in
-            let ctx = JSContext.current()!
-            let result = JSValue(newObjectIn: ctx)!
-
-            streamsLock.lock()
-            guard let stream = streams[streamId] else {
-                streamsLock.unlock()
-                result.setValue(true, forProperty: "error")
-                result.setValue(JSValue(newArrayIn: ctx), forProperty: "data")
-                result.setValue(0, forProperty: "availIn")
-                return result
-            }
-
-            // Collect input bytes
-            let length = inputVal.forProperty("length")?.toInt32() ?? 0
-            var inputBytes = [UInt8](repeating: 0, count: Int(length))
-            for i in 0..<Int(length) {
-                inputBytes[i] = UInt8(inputVal.atIndex(i).toInt32() & 0xFF)
-            }
-
-            stream.accumulatedInput.append(contentsOf: inputBytes)
-            streamsLock.unlock()
-
-            // If Z_FINISH or we have data, try to decompress
-            let isFinish = (flushFlag == 4)
-
-            if isFinish || !stream.accumulatedInput.isEmpty {
-                let inputData = Data(stream.accumulatedInput)
-                if let decompressed = try? (inputData as NSData).decompressed(using: .zlib) as Data {
-                    let outBytes = Array(decompressed)
-                    let jsArr = JSValue(newArrayIn: ctx)!
-                    for (i, b) in outBytes.enumerated() {
-                        jsArr.setValue(b, at: i)
-                    }
-                    result.setValue(false, forProperty: "error")
-                    result.setValue(jsArr, forProperty: "data")
-                    result.setValue(0, forProperty: "availIn")
-
-                    streamsLock.lock()
-                    stream.accumulatedInput.removeAll()
-                    streamsLock.unlock()
-                } else if isFinish {
-                    // Decompression failed
-                    result.setValue(true, forProperty: "error")
-                    result.setValue(JSValue(newArrayIn: ctx), forProperty: "data")
-                    result.setValue(0, forProperty: "availIn")
-                } else {
-                    // Not enough data yet, need more input
-                    result.setValue(false, forProperty: "error")
-                    result.setValue(JSValue(newArrayIn: ctx), forProperty: "data")
-                    result.setValue(0, forProperty: "availIn")
-                }
-            } else {
-                result.setValue(false, forProperty: "error")
-                result.setValue(JSValue(newArrayIn: ctx), forProperty: "data")
-                result.setValue(0, forProperty: "availIn")
-            }
-
-            return result
-        }
-    }
-
-    /// Create __zlib_streamWrite — for streaming transforms
-    private static func createStreamWriteBlock() -> @convention(block) (Int, JSValue) -> Void {
-        return { streamId, chunkVal in
-            streamsLock.lock()
-            guard let stream = streams[streamId] else {
-                streamsLock.unlock()
-                return
-            }
-            let length = chunkVal.forProperty("length")?.toInt32() ?? 0
-            for i in 0..<Int(length) {
-                let b = UInt8(chunkVal.atIndex(i).toInt32() & 0xFF)
-                stream.accumulatedInput.append(b)
-            }
-            streamsLock.unlock()
-        }
-    }
-
-    /// Create __zlib_streamEnd — finalize and return result
-    private static func createStreamEndBlock() -> @convention(block) (Int, Bool) -> JSValue {
-        return { streamId, isDeflate in
-            let ctx = JSContext.current()!
-            let bufferCtor = ctx.objectForKeyedSubscript("Buffer" as NSString)!
-
-            streamsLock.lock()
-            guard let stream = streams[streamId] else {
-                streamsLock.unlock()
-                return JSValue(nullIn: ctx)
-            }
-            let inputData = Data(stream.accumulatedInput)
-            streams.removeValue(forKey: streamId)
-            streamsLock.unlock()
-
-            let resultData: Data?
-            if isDeflate {
-                resultData = try? (inputData as NSData).compressed(using: .zlib) as Data
-            } else {
-                resultData = try? (inputData as NSData).decompressed(using: .zlib) as Data
-            }
-
-            guard let outputBytes = resultData else {
-                return JSValue(nullIn: ctx)
-            }
-
-            let jsArray = JSValue(newArrayIn: ctx)!
-            for (i, byte) in outputBytes.enumerated() {
-                jsArray.setValue(byte, at: i)
-            }
-            return bufferCtor.invokeMethod("from", withArguments: [jsArray])!
         }
     }
 
