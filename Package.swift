@@ -16,10 +16,18 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.7.0"),
+        .package(url: "https://github.com/apple/swift-nio", from: "2.95.0"),
+        .package(url: "https://github.com/apple/swift-nio-transport-services", from: "1.26.0"),
     ],
     targets: [
         .target(
             name: "NoCoKit",
+            dependencies: [
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOTransportServices", package: "swift-nio-transport-services"),
+            ],
             linkerSettings: [
                 .linkedFramework("JavaScriptCore"),
             ]
