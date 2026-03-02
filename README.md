@@ -132,10 +132,17 @@ runtime.runEventLoop(timeout: .infinity)
 
 | API | Description |
 |-----|-------------|
+| `fetch` | Fetch API (`GET`, `POST`, etc.) backed by URLSession |
 | `Headers` | HTTP headers manipulation (Fetch API) |
 | `Request` | HTTP request representation (Fetch API) |
 | `Response` | HTTP response representation, including `Response.json()`, `Response.redirect()` |
+| `Blob` / `File` | Binary data and file representation |
+| `FormData` | Multipart form data |
 | `ReadableStream` | WHATWG Streams API readable stream |
+| `WritableStream` | WHATWG Streams API writable stream |
+| `TransformStream` | WHATWG Streams API transform stream |
+| `CompressionStream` / `DecompressionStream` | Streaming compression (gzip, deflate, deflate-raw) |
+| `crypto.subtle` | Web Crypto API (AES, RSA, ECDSA, Ed25519, HMAC, HKDF, PBKDF2, SHA) |
 | `AbortController` / `AbortSignal` | Request cancellation API |
 | `DOMException` | Web standard exception |
 | `structuredClone` | Deep clone objects |
@@ -162,6 +169,7 @@ runtime.runEventLoop(timeout: .infinity)
 | `buffer` | `Buffer` |
 | `os` | `arch`, `platform`, `type`, `release`, `version`, `hostname`, `homedir`, `tmpdir`, `totalmem`, `freemem`, `cpus`, `loadavg`, `uptime`, `endianness`, `networkInterfaces`, `userInfo`, `EOL`, `constants` |
 | `querystring` | `parse`/`decode`, `stringify`/`encode`, `escape`, `unescape` |
+| `async_hooks` | `AsyncLocalStorage` |
 | `timers` | `setTimeout`, `setInterval` |
 
 ## Architecture
