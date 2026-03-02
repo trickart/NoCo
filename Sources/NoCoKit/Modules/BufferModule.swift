@@ -62,10 +62,10 @@ public struct BufferModule: NodeModule {
                 var output = '';
                 for (var i = 0, len = input.length; i < len; ) {
                     var a = _b64chars.indexOf(input.charAt(i++));
-                    var b = _b64chars.indexOf(input.charAt(i++));
-                    var c = _b64chars.indexOf(input.charAt(i++));
-                    var d = _b64chars.indexOf(input.charAt(i++));
-                    var bits = (a << 18) | (b << 12) | (c << 6) | d;
+                    var b = i < len ? _b64chars.indexOf(input.charAt(i++)) : -1;
+                    var c = i < len ? _b64chars.indexOf(input.charAt(i++)) : -1;
+                    var d = i < len ? _b64chars.indexOf(input.charAt(i++)) : -1;
+                    var bits = (a << 18) | ((b > 0 ? b : 0) << 12) | ((c > 0 ? c : 0) << 6) | (d > 0 ? d : 0);
                     output += String.fromCharCode((bits >> 16) & 0xFF);
                     if (c !== -1) output += String.fromCharCode((bits >> 8) & 0xFF);
                     if (d !== -1) output += String.fromCharCode(bits & 0xFF);
