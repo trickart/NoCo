@@ -206,3 +206,29 @@ private func fixturesPath() -> String {
     let result = runtime.moduleLoader.loadFile(at: tmp)
     #expect(result.toString() == "cors")
 }
+
+// MARK: - node: prefix support
+
+@Test func requireNodePrefixPath() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("require('node:path').join('a', 'b')")
+    #expect(result?.toString() == "a/b")
+}
+
+@Test func requireNodePrefixCrypto() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        require('node:crypto').createHash('sha256').update('test').digest('hex')
+    """)
+    #expect(result?.toString() == "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")
+}
+
+@Test func requireNodePrefixSameAsWithout() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var p1 = require('path');
+        var p2 = require('node:path');
+        p1 === p2;
+    """)
+    #expect(result?.toBool() == true)
+}

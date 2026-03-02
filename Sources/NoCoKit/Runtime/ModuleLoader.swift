@@ -36,23 +36,31 @@ public final class ModuleLoader {
             return JSValue(undefinedIn: JSContext.current())
         }
 
+        // Strip "node:" prefix (e.g. require('node:path') → require('path'))
+        let resolvedName: String
+        if moduleName.hasPrefix("node:") {
+            resolvedName = String(moduleName.dropFirst(5))
+        } else {
+            resolvedName = moduleName
+        }
+
         // 1. Check builtin modules (including subpath like 'fs/promises')
-        if let moduleType = runtime.registeredModules[moduleName] {
-            if let cached = moduleCache[moduleName] {
+        if let moduleType = runtime.registeredModules[resolvedName] {
+            if let cached = moduleCache[resolvedName] {
                 return cached
             }
             let exports = moduleType.install(in: runtime.context, runtime: runtime)
-            moduleCache[moduleName] = exports
+            moduleCache[resolvedName] = exports
             return exports
         }
 
         // 1b. Handle builtin subpath modules (e.g., 'fs/promises')
-        if moduleName.contains("/") {
-            let parts = moduleName.split(separator: "/", maxSplits: 1)
+        if resolvedName.contains("/") {
+            let parts = resolvedName.split(separator: "/", maxSplits: 1)
             let baseName = String(parts[0])
             let subPath = String(parts[1])
             if let moduleType = runtime.registeredModules[baseName] {
-                let cacheKey = moduleName
+                let cacheKey = resolvedName
                 if let cached = moduleCache[cacheKey] {
                     return cached
                 }
@@ -76,12 +84,12 @@ public final class ModuleLoader {
         }
 
         // 2. Check cache
-        if let cached = moduleCache[moduleName] {
+        if let cached = moduleCache[resolvedName] {
             return cached
         }
 
         // 3. Resolve file path
-        let resolvedPath = resolveFilePath(moduleName)
+        let resolvedPath = resolveFilePath(resolvedName)
 
         guard let path = resolvedPath else {
             let error = runtime.context.createError(
