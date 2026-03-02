@@ -63,6 +63,7 @@ public struct StreamModule: NodeModule {
                     this._readableState = {
                         buffer: [],
                         ended: false,
+                        endEmitted: false,
                         flowing: null,
                         encoding: null
                     };
@@ -74,28 +75,54 @@ public struct StreamModule: NodeModule {
                 read(size) {
                     const state = this._readableState;
                     if (state.buffer.length === 0) {
-                        if (state.ended) return null;
                         return null;
                     }
                     const chunk = state.buffer.shift();
-                    if (state.buffer.length === 0 && state.ended) {
+                    if (state.buffer.length === 0 && state.ended && !state.endEmitted) {
+                        state.endEmitted = true;
                         const self = this;
                         setTimeout(function() { self.emit('end'); }, 0);
                     }
                     return chunk;
                 }
 
+                addListener(event, fn) {
+                    super.addListener(event, fn);
+                    if (event === 'data' && !this._readableState.flowing) {
+                        this._readableState.flowing = true;
+                        // Drain buffer synchronously so data order is preserved
+                        while (this._readableState.buffer.length > 0) {
+                            this.emit('data', this._readableState.buffer.shift());
+                        }
+                        if (this._readableState.ended && !this._readableState.endEmitted) {
+                            this._readableState.endEmitted = true;
+                            var self = this;
+                            setTimeout(function() { self.emit('end'); }, 0);
+                        }
+                    }
+                    return this;
+                }
+
+                on(event, fn) {
+                    return this.addListener(event, fn);
+                }
+
                 push(chunk) {
                     if (chunk === null) {
                         this._readableState.ended = true;
-                        if (this._readableState.buffer.length === 0) {
+                        if (!this._readableState.endEmitted &&
+                            (this._readableState.flowing || this._readableState.buffer.length === 0)) {
+                            this._readableState.endEmitted = true;
                             const self = this;
                             setTimeout(function() { self.emit('end'); }, 0);
                         }
                         return false;
                     }
-                    this._readableState.buffer.push(chunk);
-                    this.emit('data', chunk);
+                    if (this._readableState.flowing) {
+                        this.emit('data', chunk);
+                    } else {
+                        this._readableState.buffer.push(chunk);
+                    }
                     return true;
                 }
 
@@ -126,6 +153,15 @@ public struct StreamModule: NodeModule {
 
                 resume() {
                     this._readableState.flowing = true;
+                    // Drain buffer synchronously
+                    while (this._readableState.buffer.length > 0) {
+                        this.emit('data', this._readableState.buffer.shift());
+                    }
+                    if (this._readableState.ended && !this._readableState.endEmitted) {
+                        this._readableState.endEmitted = true;
+                        var self = this;
+                        setTimeout(function() { self.emit('end'); }, 0);
+                    }
                     return this;
                 }
 
@@ -304,11 +340,13 @@ public struct StreamModule: NodeModule {
                 if (this._flush) {
                     this._flush(function(err) {
                         self._writableState.finished = true;
+                        self.push(null);
                         self.emit('finish');
                         if (callback) callback(err);
                     });
                 } else {
                     this._writableState.finished = true;
+                    this.push(null);
                     this.emit('finish');
                     if (callback) callback();
                 }
