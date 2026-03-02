@@ -962,3 +962,122 @@ import JavaScriptCore
     #expect(messages.contains("gzipMagic:true"))
     #expect(messages.contains("compressed:true"))
 }
+
+// MARK: - Blob Tests
+
+@Test func blobConstructorString() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var blob = new Blob(['hello']);
+        blob.size === 5 && blob.type === '';
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func blobConstructorWithType() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var blob = new Blob(['x'], { type: 'text/plain' });
+        blob.type === 'text/plain';
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func blobArrayBuffer() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var blob = new Blob(['Hi']);
+        blob.arrayBuffer().then(function(ab) {
+            var u8 = new Uint8Array(ab);
+            console.log('len:' + u8.length);
+            console.log('bytes:' + u8[0] + ',' + u8[1]);
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("len:2"))
+    #expect(messages.contains("bytes:72,105"))
+}
+
+@Test func blobText() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var blob = new Blob(['Hello, World!']);
+        blob.text().then(function(t) {
+            console.log('text:' + t);
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("text:Hello, World!"))
+}
+
+@Test func blobMultipleParts() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var blob = new Blob(['ab', 'cd']);
+        console.log('size:' + blob.size);
+        blob.text().then(function(t) {
+            console.log('text:' + t);
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("size:4"))
+    #expect(messages.contains("text:abcd"))
+}
+
+@Test func blobSlice() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var blob = new Blob(['hello']);
+        var sliced = blob.slice(1, 3);
+        console.log('size:' + sliced.size);
+        sliced.text().then(function(t) {
+            console.log('text:' + t);
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("size:2"))
+    #expect(messages.contains("text:el"))
+}
+
+@Test func blobInstanceof() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var blob = new Blob(['test']);
+        blob instanceof Blob;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func blobFromUint8Array() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var blob = new Blob([new Uint8Array([72, 105])]);
+        console.log('size:' + blob.size);
+        blob.text().then(function(t) {
+            console.log('text:' + t);
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("size:2"))
+    #expect(messages.contains("text:Hi"))
+}
