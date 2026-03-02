@@ -81,38 +81,19 @@ public struct HTTPModule: NodeModule {
         }
         context.setObject(writeHeadBlock, forKeyedSubscript: "__httpWriteHead" as NSString)
 
-        // __httpWriteBody(requestId, data)
-        let writeBodyBlock: @convention(block) (Int, JSValue) -> Void = { reqId, dataVal in
-            guard let state = storage.pendingRequests[reqId] else { return }
-            if dataVal.isString, let str = dataVal.toString() {
-                state.responseBody.append(contentsOf: str.utf8)
-            } else {
-                let bufData = dataVal.forProperty("_data")!
-                let source = bufData.isUndefined ? dataVal : bufData
-                let len = Int(source.forProperty("length")?.toInt32() ?? 0)
-                for i in 0..<len {
-                    state.responseBody.append(UInt8(source.atIndex(i).toInt32() & 0xFF))
-                }
-            }
+        // __httpWriteBody(requestId, data) -> Bool (channel.isWritable)
+        let writeBodyBlock: @convention(block) (Int, JSValue) -> Bool = { reqId, dataVal in
+            guard let state = storage.pendingRequests[reqId] else { return true }
+            return state.writeChunk(httpExtractBytes(from: dataVal))
         }
         context.setObject(writeBodyBlock, forKeyedSubscript: "__httpWriteBody" as NSString)
 
         // __httpEnd(requestId, data?)
         let endBlock: @convention(block) (Int, JSValue) -> Void = { reqId, dataVal in
             guard let state = storage.pendingRequests[reqId] else { return }
-            if !dataVal.isNull && !dataVal.isUndefined {
-                if dataVal.isString, let str = dataVal.toString() {
-                    state.responseBody.append(contentsOf: str.utf8)
-                } else {
-                    let bufData = dataVal.forProperty("_data")!
-                    let source = bufData.isUndefined ? dataVal : bufData
-                    let len = Int(source.forProperty("length")?.toInt32() ?? 0)
-                    for i in 0..<len {
-                        state.responseBody.append(UInt8(source.atIndex(i).toInt32() & 0xFF))
-                    }
-                }
-            }
-            state.sendResponse()
+            let finalBytes: [UInt8]? = (!dataVal.isNull && !dataVal.isUndefined)
+                ? httpExtractBytes(from: dataVal) : nil
+            state.sendEnd(withFinalBody: finalBytes)
             storage.pendingRequests.removeValue(forKey: reqId)
         }
         context.setObject(endBlock, forKeyedSubscript: "__httpEnd" as NSString)
@@ -168,6 +149,8 @@ public struct HTTPModule: NodeModule {
                 this.writable = true;
                 this.writableFinished = false;
                 this._closed = false;
+                this._writableNeedDrain = false;
+                this.writableHighWaterMark = 16384;
             }
             ServerResponse.prototype = Object.create(EventEmitter.prototype);
             ServerResponse.prototype.constructor = ServerResponse;
@@ -224,7 +207,11 @@ public struct HTTPModule: NodeModule {
                 if (!this._headersSent) {
                     this.writeHead(this.statusCode);
                 }
-                if (data) __httpWriteBody(this._reqId, data);
+                if (data) {
+                    var ok = __httpWriteBody(this._reqId, data);
+                    if (!ok) this._writableNeedDrain = true;
+                    return ok;
+                }
                 return true;
             };
             ServerResponse.prototype.end = function(data, encoding, callback) {
@@ -310,6 +297,14 @@ public struct HTTPModule: NodeModule {
                 req.complete = true;
                 req._readableState.ended = true;
                 req.emit('end');
+            };
+
+            Server.prototype._emitDrain = function(reqId) {
+                var res = this._responses[reqId];
+                if (res && res._writableNeedDrain) {
+                    res._writableNeedDrain = false;
+                    res.emit('drain');
+                }
             };
 
             Server.prototype._handleRequest = function(reqId, method, url, headersObj, httpVersion, bodyStr, rawHeaders) {
@@ -612,16 +607,35 @@ final class NIOHTTPServer: @unchecked Sendable {
     }
 }
 
+// MARK: - Helper
+
+/// Extract bytes from a JSValue (String, Buffer, or Uint8Array).
+private func httpExtractBytes(from dataVal: JSValue) -> [UInt8] {
+    if dataVal.isString, let str = dataVal.toString() {
+        return Array(str.utf8)
+    }
+    let bufData = dataVal.forProperty("_data")!
+    let source = bufData.isUndefined ? dataVal : bufData
+    let len = Int(source.forProperty("length")?.toInt32() ?? 0)
+    var bytes = [UInt8]()
+    bytes.reserveCapacity(len)
+    for i in 0..<len {
+        bytes.append(UInt8(source.atIndex(i).toInt32() & 0xFF))
+    }
+    return bytes
+}
+
 // MARK: - HTTPRequestState
 
-/// Accumulates request data and sends the HTTP response via NIO channel.
+/// Manages per-request state and streams the HTTP response via NIO channel.
 final class HTTPRequestState: @unchecked Sendable {
     let requestId: Int
     let channel: Channel
     let keepAlive: Bool
     var statusCode: Int = 200
     var responseHeaders: [(String, String)] = []
-    var responseBody: [UInt8] = []
+    private var headSent: Bool = false
+    private var hasWrittenBody: Bool = false
 
     init(requestId: Int, channel: Channel, keepAlive: Bool) {
         self.requestId = requestId
@@ -629,23 +643,72 @@ final class HTTPRequestState: @unchecked Sendable {
         self.keepAlive = keepAlive
     }
 
-    func sendResponse() {
+    /// Send HTTP head to NIO channel (idempotent — only executes on first call).
+    /// Adds `transfer-encoding: chunked` when neither Content-Length nor Transfer-Encoding is set.
+    func sendHead() {
+        guard !headSent else { return }
+        headSent = true
+
         let status = HTTPResponseStatus(statusCode: statusCode)
         var head = HTTPResponseHead(version: .http1_1, status: status)
         for (key, value) in responseHeaders {
             head.headers.add(name: key, value: value)
         }
         if !head.headers.contains(name: "content-length") && !head.headers.contains(name: "transfer-encoding") {
-            head.headers.add(name: "content-length", value: String(responseBody.count))
+            head.headers.add(name: "transfer-encoding", value: "chunked")
         }
         if keepAlive {
             head.headers.replaceOrAdd(name: "connection", value: "keep-alive")
         }
-
         channel.write(HTTPServerResponsePart.head(head), promise: nil)
-        var buf = channel.allocator.buffer(capacity: responseBody.count)
-        buf.writeBytes(responseBody)
-        channel.write(HTTPServerResponsePart.body(.byteBuffer(buf)), promise: nil)
+    }
+
+    /// Write a body chunk immediately to the NIO channel.
+    /// Returns `channel.isWritable` for backpressure signaling.
+    @discardableResult
+    func writeChunk(_ bytes: [UInt8]) -> Bool {
+        sendHead()
+        hasWrittenBody = true
+        if !bytes.isEmpty {
+            var buf = channel.allocator.buffer(capacity: bytes.count)
+            buf.writeBytes(bytes)
+            channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(buf)), promise: nil)
+        }
+        return channel.isWritable
+    }
+
+    /// Finish the response. When no prior `writeChunk` was called, uses Content-Length
+    /// for a single-shot response (avoiding chunked encoding).
+    func sendEnd(withFinalBody bytes: [UInt8]?) {
+        if !hasWrittenBody && !headSent {
+            // Optimization: single-shot response with Content-Length
+            let bodyBytes = bytes ?? []
+            let status = HTTPResponseStatus(statusCode: statusCode)
+            var head = HTTPResponseHead(version: .http1_1, status: status)
+            for (key, value) in responseHeaders {
+                head.headers.add(name: key, value: value)
+            }
+            if !head.headers.contains(name: "content-length") && !head.headers.contains(name: "transfer-encoding") {
+                head.headers.add(name: "content-length", value: String(bodyBytes.count))
+            }
+            if keepAlive {
+                head.headers.replaceOrAdd(name: "connection", value: "keep-alive")
+            }
+            headSent = true
+            channel.write(HTTPServerResponsePart.head(head), promise: nil)
+            if !bodyBytes.isEmpty {
+                var buf = channel.allocator.buffer(capacity: bodyBytes.count)
+                buf.writeBytes(bodyBytes)
+                channel.write(HTTPServerResponsePart.body(.byteBuffer(buf)), promise: nil)
+            }
+        } else {
+            sendHead()
+            if let bytes = bytes, !bytes.isEmpty {
+                var buf = channel.allocator.buffer(capacity: bytes.count)
+                buf.writeBytes(bytes)
+                channel.write(HTTPServerResponsePart.body(.byteBuffer(buf)), promise: nil)
+            }
+        }
         channel.writeAndFlush(HTTPServerResponsePart.end(nil)).whenComplete { [weak self] _ in
             guard let self else { return }
             if !self.keepAlive {
@@ -728,6 +791,15 @@ final class HTTPBridgeHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             requestHead = nil
         }
+    }
+
+    func channelWritabilityChanged(context: ChannelHandlerContext) {
+        guard context.channel.isWritable else { return }
+        guard let reqId = activeRequestId else { return }
+        server.eventLoop.enqueueCallback { [weak self] in
+            self?.server.jsServer?.invokeMethod("_emitDrain", withArguments: [reqId])
+        }
+        context.fireChannelWritabilityChanged()
     }
 
     func channelInactive(context: ChannelHandlerContext) {
