@@ -155,6 +155,7 @@ public struct HTTPModule: NodeModule {
                 this.finished = false;
                 this.writable = true;
                 this.writableFinished = false;
+                this._closed = false;
             }
             ServerResponse.prototype = Object.create(EventEmitter.prototype);
             ServerResponse.prototype.constructor = ServerResponse;
@@ -166,11 +167,16 @@ public struct HTTPModule: NodeModule {
                     this.writeHead(this.statusCode);
                 }
             };
+            ServerResponse.prototype._emitClose = function() {
+                if (this._closed) return;
+                this._closed = true;
+                this.emit('close');
+            };
             ServerResponse.prototype.destroy = function(err) {
                 this.finished = true;
                 this.writable = false;
                 if (err) this.emit('error', err);
-                this.emit('close');
+                this._emitClose();
                 return this;
             };
 
@@ -219,6 +225,7 @@ public struct HTTPModule: NodeModule {
                 __httpEnd(this._reqId, data || null);
                 this.emit('finish');
                 if (callback) callback();
+                this._emitClose();
             };
 
             function Server(requestListener) {
@@ -226,6 +233,7 @@ public struct HTTPModule: NodeModule {
                 this._events = Object.create(null);
                 this._maxListeners = 10;
                 this._serverId = __httpCreateServer();
+                this._responses = {};
                 this.listening = false;
                 if (requestListener) this.on('request', requestListener);
             }
@@ -258,12 +266,22 @@ public struct HTTPModule: NodeModule {
             Server.prototype.ref = function() { return this; };
             Server.prototype.unref = function() { return this; };
 
+            Server.prototype._notifyClose = function(reqId) {
+                var res = this._responses[reqId];
+                if (res) res._emitClose();
+            };
+
             Server.prototype._handleRequest = function(reqId, method, url, headersObj, httpVersion, bodyStr, rawHeaders) {
                 var req = new IncomingMessage(reqId, method, url, headersObj, httpVersion, rawHeaders || []);
                 var res = new ServerResponse(reqId);
+                var self = this;
+                self._responses[reqId] = res;
                 res.on('finish', function() {
                     res.writableFinished = true;
                     res.writable = false;
+                });
+                res.on('close', function() {
+                    delete self._responses[reqId];
                 });
                 if (bodyStr && bodyStr.length > 0) {
                     req._body.push(bodyStr);
@@ -601,6 +619,7 @@ final class HTTPBridgeHandler: ChannelInboundHandler, @unchecked Sendable {
     let server: NIOHTTPServer
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer: Data = Data()
+    private var activeRequestId: Int?
 
     init(server: NIOHTTPServer) {
         self.server = server
@@ -619,6 +638,7 @@ final class HTTPBridgeHandler: ChannelInboundHandler, @unchecked Sendable {
         case .end:
             guard let head = requestHead else { return }
             let reqId = server.nextRequestId()
+            self.activeRequestId = reqId
             let keepAlive = head.isKeepAlive
             let channel = context.channel
             let state = HTTPRequestState(requestId: reqId, channel: channel, keepAlive: keepAlive)
@@ -654,6 +674,15 @@ final class HTTPBridgeHandler: ChannelInboundHandler, @unchecked Sendable {
 
             requestHead = nil
             bodyBuffer = Data()
+        }
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        guard let reqId = activeRequestId else { return }
+        activeRequestId = nil
+        server.eventLoop.enqueueCallback { [weak self] in
+            guard let self else { return }
+            self.server.jsServer?.invokeMethod("_notifyClose", withArguments: [reqId])
         }
     }
 }

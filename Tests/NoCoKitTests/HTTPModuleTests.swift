@@ -384,3 +384,148 @@ func httpCreateServerBufferResponse() async throws {
     runtime.eventLoop.stop()
     await eventLoopTask.value
 }
+
+// MARK: - ServerResponse close Event Tests
+
+@Test func httpServerResponseCloseAfterEnd() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var events = [];
+        server.on('request', function(req, res) {
+            res.on('finish', function() { events.push('finish:wf=' + res.writableFinished); });
+            res.on('close', function() { events.push('close:wf=' + res.writableFinished); });
+            res.end('ok');
+        });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        console.log(events.join(','));
+    """)
+    // _handleRequest の finish リスナー (writableFinished=true) がテストの finish リスナーより先に実行される
+    #expect(messages.contains("finish:wf=true,close:wf=true"))
+}
+
+@Test func httpServerResponseCloseNotEmittedTwice() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var res = new http.ServerResponse(1);
+        var count = 0;
+        res.on('close', function() { count++; });
+        res._emitClose();
+        res._emitClose();
+        res._emitClose();
+        console.log('count:' + count);
+    """)
+    #expect(messages.contains("count:1"))
+}
+
+@Test func httpServerResponseDestroyUsesEmitClose() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var res = new http.ServerResponse(1);
+        var count = 0;
+        res.on('close', function() { count++; });
+        res.destroy();
+        res.destroy();
+        console.log('count:' + count);
+        console.log('closed:' + res._closed);
+    """)
+    #expect(messages.contains("count:1"))
+    #expect(messages.contains("closed:true"))
+}
+
+@Test func httpServerNotifyClosePrematureClose() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var closeWf;
+        server.on('request', function(req, res) {
+            res.on('close', function() { closeWf = res.writableFinished; });
+        });
+        server._handleRequest(42, 'GET', '/', {}, '1.1', '', []);
+        // Simulate premature close (before res.end)
+        server._notifyClose(42);
+        console.log('premature:wf=' + closeWf);
+    """)
+    #expect(messages.contains("premature:wf=false"))
+}
+
+@Test func httpServerResponsesCleanup() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        server.on('request', function(req, res) {
+            res.end('done');
+        });
+        server._handleRequest(99, 'GET', '/', {}, '1.1', '', []);
+        // After end + close, _responses should be cleaned up
+        server._responses[99] === undefined;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func httpServerCloseEventIntegration() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {
+            res.on('close', function() {
+                console.log('close:wf=' + res.writableFinished);
+            });
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            res.end('Hello');
+        });
+        server.listen(0, '127.0.0.1', function() {
+            console.log('listening:' + server.address().port);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackground(runtime, timeout: 10)
+    }
+
+    var port = 0
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if let msg = messages.first(where: { $0.hasPrefix("listening:") }) {
+            port = Int(msg.replacingOccurrences(of: "listening:", with: "")) ?? 0
+            break
+        }
+    }
+    #expect(port > 0)
+
+    let url = URL(string: "http://127.0.0.1:\(port)/test")!
+    let (data, response) = try await URLSession.shared.data(from: url)
+    let httpResponse = response as! HTTPURLResponse
+
+    #expect(httpResponse.statusCode == 200)
+    #expect(String(data: data, encoding: .utf8) == "Hello")
+
+    // Give time for close event to fire
+    try await Task.sleep(nanoseconds: 300_000_000)
+
+    #expect(messages.contains("close:wf=true"))
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+}
