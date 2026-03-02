@@ -63,9 +63,44 @@ import JavaScriptCore
 
 @Test func bufferFromBase64() async throws {
     let runtime = NodeRuntime()
-    // Use a base64 string with no padding to avoid atob polyfill edge case
     let result = runtime.evaluate("Buffer.from('YWJj', 'base64').toString()")
     #expect(result?.toString() == "abc")
+}
+
+@Test func atobNoPadding() async throws {
+    let runtime = NodeRuntime()
+    // 4の倍数 (パディング不要) — "abc" → "YWJj" (4文字)
+    let r1 = runtime.evaluate("atob('YWJj')")
+    #expect(r1?.toString() == "abc")
+
+    // パディング1つ省略 — "ab" → "YWI=" → "YWI" (3文字, len%4==3)
+    let r2 = runtime.evaluate("atob('YWI')")
+    #expect(r2?.toString() == "ab")
+
+    // パディング2つ省略 — "a" → "YQ==" → "YQ" (2文字, len%4==2)
+    let r3 = runtime.evaluate("atob('YQ')")
+    #expect(r3?.toString() == "a")
+}
+
+@Test func atobBase64UrlJwtPayload() async throws {
+    let runtime = NodeRuntime()
+    // JWT ペイロード: 43文字 (len%4==3) のbase64url入力が正しくデコードされること
+    let result = runtime.evaluate("""
+        var b64 = 'eyJzdWIiOiJ1c2VyMSIsImV4cCI6MTc3MjQxNDk0NX0';
+        var decoded = atob(b64.replace(/-/g, '+').replace(/_/g, '/'));
+        decoded;
+    """)
+    #expect(result?.toString() == "{\"sub\":\"user1\",\"exp\":1772414945}")
+}
+
+@Test func atobRoundtrip() async throws {
+    let runtime = NodeRuntime()
+    // btoa → atob のラウンドトリップで元の文字列が復元されること
+    let result = runtime.evaluate("""
+        var original = 'Hello, World! 123';
+        atob(btoa(original)) === original;
+    """)
+    #expect(result?.toBool() == true)
 }
 
 @Test func bufferSlice() async throws {
