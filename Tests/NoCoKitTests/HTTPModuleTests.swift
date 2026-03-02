@@ -844,3 +844,137 @@ func httpCreateServerUint8ArrayWriteAndEnd() async throws {
     runtime.eventLoop.stop()
     await eventLoopTask.value
 }
+
+// MARK: - Backpressure / drain Tests
+
+@Test func httpServerResponseWritableHighWaterMark() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var res = new http.ServerResponse(1);
+        res.writableHighWaterMark === 16384 && res._writableNeedDrain === false;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpServerEmitDrainOnlyWhenNeeded() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var drainCount = 0;
+        server.on('request', function(req, res) {
+            res.on('drain', function() { drainCount++; });
+        });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        // _emitDrain should NOT fire when _writableNeedDrain is false
+        server._emitDrain(1);
+        console.log('drain-no-need:' + drainCount);
+        // Set _writableNeedDrain = true, then _emitDrain should fire
+        server._responses[1]._writableNeedDrain = true;
+        server._emitDrain(1);
+        console.log('drain-needed:' + drainCount);
+        // After firing, _writableNeedDrain should be reset
+        console.log('reset:' + server._responses[1]._writableNeedDrain);
+    """)
+    #expect(messages.contains("drain-no-need:0"))
+    #expect(messages.contains("drain-needed:1"))
+    #expect(messages.contains("reset:false"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func httpCreateServerChunkedStreaming() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            for (var i = 0; i < 5; i++) {
+                res.write('chunk' + i + '\\n');
+            }
+            res.end('done\\n');
+        });
+        server.listen(0, '127.0.0.1', function() {
+            console.log('listening:' + server.address().port);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackground(runtime, timeout: 10)
+    }
+
+    var port = 0
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if let msg = messages.first(where: { $0.hasPrefix("listening:") }) {
+            port = Int(msg.replacingOccurrences(of: "listening:", with: "")) ?? 0
+            break
+        }
+    }
+    #expect(port > 0)
+
+    let url = URL(string: "http://127.0.0.1:\(port)/test")!
+    let (data, response) = try await URLSession.shared.data(from: url)
+    let httpResponse = response as! HTTPURLResponse
+    let body = String(data: data, encoding: .utf8)!
+
+    #expect(httpResponse.statusCode == 200)
+    for i in 0..<5 {
+        #expect(body.contains("chunk\(i)"))
+    }
+    #expect(body.contains("done"))
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+}
+
+@Test(.timeLimit(.minutes(1)))
+func httpCreateServerEndWithDataContentLength() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            res.end('Hello World');
+        });
+        server.listen(0, '127.0.0.1', function() {
+            console.log('listening:' + server.address().port);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackground(runtime, timeout: 10)
+    }
+
+    var port = 0
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if let msg = messages.first(where: { $0.hasPrefix("listening:") }) {
+            port = Int(msg.replacingOccurrences(of: "listening:", with: "")) ?? 0
+            break
+        }
+    }
+    #expect(port > 0)
+
+    let url = URL(string: "http://127.0.0.1:\(port)/test")!
+    let (data, response) = try await URLSession.shared.data(from: url)
+    let httpResponse = response as! HTTPURLResponse
+    let body = String(data: data, encoding: .utf8)!
+
+    #expect(httpResponse.statusCode == 200)
+    #expect(body == "Hello World")
+    let contentLength = httpResponse.value(forHTTPHeaderField: "Content-Length")
+    #expect(contentLength == "11")
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+}
