@@ -44,6 +44,17 @@ public final class ModuleLoader {
             resolvedName = moduleName
         }
 
+        // 0. Global modules accessible via require (process, console, etc.)
+        let globalModules = ["process", "console"]
+        if globalModules.contains(resolvedName) {
+            if let cached = moduleCache[resolvedName] {
+                return cached
+            }
+            let value = runtime.context.objectForKeyedSubscript(resolvedName as NSString)!
+            moduleCache[resolvedName] = value
+            return value
+        }
+
         // 1. Check builtin modules (including subpath like 'fs/promises')
         if let moduleType = runtime.registeredModules[resolvedName] {
             if let cached = moduleCache[resolvedName] {
@@ -271,6 +282,16 @@ public final class ModuleLoader {
         return main
     }
 
+    /// Extract a resolved path string from an exports entry (string or conditional object).
+    private func extractExportPath(_ entry: Any) -> String? {
+        if let str = entry as? String { return str }
+        if let obj = entry as? [String: Any] {
+            if let req = obj["require"] { return extractExportPath(req) }
+            if let def = obj["default"] { return extractExportPath(def) }
+        }
+        return nil
+    }
+
     /// Resolve a subpath using the "exports" field in package.json.
     private func resolvePackageExports(at dir: String, subpath: String) -> String? {
         let packageJsonPath = (dir as NSString).appendingPathComponent("package.json")
@@ -279,15 +300,26 @@ public final class ModuleLoader {
               let exports = json["exports"] as? [String: Any]
         else { return nil }
 
-        guard let entry = exports[subpath] else { return nil }
-
-        // 値が文字列ならそのまま
-        if let str = entry as? String { return str }
-        // 値がオブジェクトなら "require" > "default" の優先順
-        if let obj = entry as? [String: Any] {
-            if let req = obj["require"] as? String { return req }
-            if let def = obj["default"] as? String { return def }
+        // 完全一致
+        if let entry = exports[subpath] {
+            return extractExportPath(entry)
         }
+
+        // ワイルドカードパターン: "./utils/*" → "./dist/cjs/utils/*.js"
+        for (pattern, entry) in exports {
+            guard pattern.contains("*") else { continue }
+            let parts = pattern.split(separator: "*", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { continue }
+            let prefix = String(parts[0])
+            let suffix = String(parts[1])
+            if subpath.hasPrefix(prefix) && subpath.hasSuffix(suffix) {
+                let matched = String(subpath.dropFirst(prefix.count).dropLast(suffix.count))
+                if let template = extractExportPath(entry) {
+                    return template.replacingOccurrences(of: "*", with: matched)
+                }
+            }
+        }
+
         return nil
     }
 
