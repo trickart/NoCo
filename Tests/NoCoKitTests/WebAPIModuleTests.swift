@@ -1081,3 +1081,256 @@ import JavaScriptCore
     #expect(messages.contains("size:2"))
     #expect(messages.contains("text:Hi"))
 }
+
+// MARK: - Fetch Tests
+
+private func runEventLoopInBackground(_ runtime: NodeRuntime, timeout: TimeInterval) async {
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            runtime.runEventLoop(timeout: timeout)
+            continuation.resume()
+        }
+    }
+}
+
+@Test func fetchReturnsPromise() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        typeof fetch === 'function' &&
+        fetch('http://example.com') instanceof Promise;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func fetchAbortedSignalRejects() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var ac = new AbortController();
+        ac.abort();
+        fetch('http://example.com', { signal: ac.signal }).catch(function(err) {
+            console.log('name:' + err.name);
+            console.log('rejected:true');
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("name:AbortError"))
+    #expect(messages.contains("rejected:true"))
+}
+
+@Test func fetchWithRequestObject() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var req = new Request('http://example.com/api', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{"key":"value"}'
+        });
+        var p = fetch(req);
+        p instanceof Promise;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fetchGetFromLocalServer() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ hello: 'world' }));
+        });
+        server.listen(0, '127.0.0.1', function() {
+            var port = server.address().port;
+            console.log('listening:' + port);
+            fetch('http://127.0.0.1:' + port + '/test').then(function(res) {
+                console.log('status:' + res.status);
+                console.log('ok:' + res.ok);
+                console.log('type:' + res.type);
+                return res.json();
+            }).then(function(data) {
+                console.log('hello:' + data.hello);
+                server.close();
+            }).catch(function(err) {
+                console.log('error:' + err.message);
+                server.close();
+            });
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackground(runtime, timeout: 10)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 100_000_000)
+        if messages.contains(where: { $0.starts(with: "hello:") }) {
+            break
+        }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("status:200"))
+    #expect(messages.contains("ok:true"))
+    #expect(messages.contains("type:basic"))
+    #expect(messages.contains("hello:world"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fetchPostWithBody() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {
+            var body = '';
+            req.on('data', function(chunk) { body += chunk; });
+            req.on('end', function() {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ method: req.method, body: body }));
+            });
+        });
+        server.listen(0, '127.0.0.1', function() {
+            var port = server.address().port;
+            console.log('listening:' + port);
+            fetch('http://127.0.0.1:' + port + '/api', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: 'test' })
+            }).then(function(res) {
+                return res.json();
+            }).then(function(data) {
+                console.log('method:' + data.method);
+                console.log('body:' + data.body);
+                server.close();
+            }).catch(function(err) {
+                console.log('error:' + err.message);
+                server.close();
+            });
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackground(runtime, timeout: 10)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 100_000_000)
+        if messages.contains(where: { $0.starts(with: "body:") }) {
+            break
+        }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("method:POST"))
+    #expect(messages.contains("body:{\"name\":\"test\"}"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fetchResponseHeaders() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {
+            res.writeHead(200, {
+                'Content-Type': 'text/plain',
+                'X-Custom': 'hello'
+            });
+            res.end('ok');
+        });
+        server.listen(0, '127.0.0.1', function() {
+            var port = server.address().port;
+            console.log('listening:' + port);
+            fetch('http://127.0.0.1:' + port).then(function(res) {
+                console.log('ct:' + res.headers.get('content-type'));
+                console.log('custom:' + res.headers.get('x-custom'));
+                console.log('hasHeaders:' + (res.headers instanceof Headers));
+                server.close();
+            }).catch(function(err) {
+                console.log('error:' + err.message);
+                server.close();
+            });
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackground(runtime, timeout: 10)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 100_000_000)
+        if messages.contains(where: { $0.starts(with: "hasHeaders:") }) {
+            break
+        }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("ct:text/plain"))
+    #expect(messages.contains("custom:hello"))
+    #expect(messages.contains("hasHeaders:true"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fetchAbortDuringRequest() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {
+            // Delay response to allow abort
+            setTimeout(function() {
+                res.writeHead(200);
+                res.end('late');
+            }, 5000);
+        });
+        server.listen(0, '127.0.0.1', function() {
+            var port = server.address().port;
+            console.log('listening:' + port);
+            var ac = new AbortController();
+            fetch('http://127.0.0.1:' + port, { signal: ac.signal }).catch(function(err) {
+                console.log('abortName:' + err.name);
+                server.close();
+            });
+            // Abort after a short delay
+            setTimeout(function() {
+                ac.abort();
+            }, 100);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackground(runtime, timeout: 10)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 100_000_000)
+        if messages.contains(where: { $0.starts(with: "abortName:") }) {
+            break
+        }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("abortName:AbortError"))
+}
