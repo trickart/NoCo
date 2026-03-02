@@ -352,3 +352,229 @@ import JavaScriptCore
     #expect(messages.contains("flushed"))
     #expect(messages.contains("finish"))
 }
+
+// MARK: - Readable flowing mode
+
+@Test func readableFlowingModeOnData() async throws {
+    let runtime = NodeRuntime()
+    // push before listener → buffer; on('data') drains buffer synchronously
+    let result = runtime.evaluate("""
+        var stream = require('stream');
+        var r = new stream.Readable();
+        r.push('A');
+        r.push('B');
+        var received = [];
+        r.on('data', function(chunk) { received.push(chunk); });
+        // Buffer should be drained synchronously when listener attaches
+        received.join(',');
+    """)
+    #expect(result?.toString() == "A,B")
+}
+
+@Test func readableFlowingModeDataOrder() async throws {
+    let runtime = NodeRuntime()
+    // Data pushed before listener (buffered) must come before data pushed after
+    let result = runtime.evaluate("""
+        var stream = require('stream');
+        var r = new stream.Readable();
+        r.push('FIRST');
+        var received = [];
+        r.on('data', function(chunk) { received.push(chunk); });
+        r.push('SECOND');
+        received.join(',');
+    """)
+    #expect(result?.toString() == "FIRST,SECOND")
+}
+
+@Test func readableFlowingModeDirectEmit() async throws {
+    let runtime = NodeRuntime()
+    // In flowing mode, push() should emit 'data' immediately without buffering
+    let result = runtime.evaluate("""
+        var stream = require('stream');
+        var r = new stream.Readable();
+        var received = [];
+        r.on('data', function(chunk) { received.push(chunk); });
+        r.push('X');
+        r.push('Y');
+        var bufLen = r._readableState.buffer.length;
+        received.join(',') + '|buf:' + bufLen;
+    """)
+    #expect(result?.toString() == "X,Y|buf:0")
+}
+
+@Test func readablePausedModeBuffers() async throws {
+    let runtime = NodeRuntime()
+    // Without a data listener, push() should buffer (not emit)
+    let result = runtime.evaluate("""
+        var stream = require('stream');
+        var r = new stream.Readable();
+        r.push('A');
+        r.push('B');
+        r._readableState.buffer.length + '|' + r._readableState.flowing;
+    """)
+    #expect(result?.toString() == "2|null")
+}
+
+@Test func readableResumesDrainsBuffer() async throws {
+    let runtime = NodeRuntime()
+    // resume() should drain buffered data synchronously
+    let result = runtime.evaluate("""
+        var stream = require('stream');
+        var r = new stream.Readable();
+        r.push('A');
+        r.push('B');
+        var received = [];
+        r.on('data', function(chunk) { received.push(chunk); });
+        // Already flowing from on('data'), but test resume() with paused data
+        r.pause();
+        r.push('C');
+        var beforeResume = received.join(',');
+        r.resume();
+        beforeResume + '|' + received.join(',');
+    """)
+    #expect(result?.toString() == "A,B|A,B,C")
+}
+
+// MARK: - Readable end event deduplication
+
+@Test func readableEndEmittedOnce() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var stream = require('stream');
+        var r = new stream.Readable();
+        var endCount = 0;
+        r.on('data', function(chunk) {});
+        r.on('end', function() {
+            endCount++;
+            console.log('end:' + endCount);
+        });
+        r.push(null);
+    """)
+    runtime.runEventLoop(timeout: 1)
+
+    #expect(messages.filter({ $0.starts(with: "end:") }).count == 1)
+}
+
+// MARK: - Transform end event
+
+@Test func transformEndEventAfterFlush() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var stream = require('stream');
+        var t = new stream.Transform({
+            transform: function(chunk, encoding, callback) {
+                this.push(chunk);
+                callback();
+            },
+            flush: function(callback) {
+                this.push('FOOTER');
+                console.log('flushed');
+                callback();
+            }
+        });
+        t.on('data', function(chunk) {});
+        t.on('end', function() { console.log('end'); });
+        t.on('finish', function() { console.log('finish'); });
+        t.write('data');
+        t.end();
+    """)
+    runtime.runEventLoop(timeout: 1)
+
+    #expect(messages.contains("flushed"))
+    #expect(messages.contains("finish"))
+    #expect(messages.contains("end"))
+}
+
+@Test func transformEndEventWithoutFlush() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var stream = require('stream');
+        var t = new stream.Transform({
+            transform: function(chunk, encoding, callback) {
+                this.push(chunk.toString().toUpperCase());
+                callback();
+            }
+        });
+        t.on('data', function(chunk) {});
+        t.on('end', function() { console.log('end'); });
+        t.on('finish', function() { console.log('finish'); });
+        t.write('hello');
+        t.end();
+    """)
+    runtime.runEventLoop(timeout: 1)
+
+    #expect(messages.contains("finish"))
+    #expect(messages.contains("end"))
+}
+
+@Test func transformConstructDataOrder() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var stream = require('stream');
+        var t = new stream.Transform({
+            construct: function(callback) {
+                this.push('HEADER|');
+                callback();
+            },
+            transform: function(chunk, encoding, callback) {
+                this.push('T:' + chunk + '|');
+                callback();
+            },
+            flush: function(callback) {
+                this.push('FOOTER');
+                callback();
+            }
+        });
+        var output = '';
+        t.on('data', function(chunk) { output += chunk; });
+        t.on('end', function() { console.log(output); });
+        t.write('A');
+        t.end('B');
+    """)
+    runtime.runEventLoop(timeout: 1)
+
+    // construct data (HEADER) must come before transform data
+    #expect(messages.contains("HEADER|T:A|T:B|FOOTER"))
+}
+
+@Test func transformEndEmittedOnce() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var stream = require('stream');
+        var endCount = 0;
+        var t = new stream.Transform({
+            transform: function(chunk, encoding, callback) {
+                this.push(chunk);
+                callback();
+            },
+            flush: function(callback) {
+                callback();
+            }
+        });
+        t.on('data', function(chunk) {});
+        t.on('end', function() {
+            endCount++;
+            console.log('end:' + endCount);
+        });
+        t.write('x');
+        t.end();
+    """)
+    runtime.runEventLoop(timeout: 1)
+
+    #expect(messages.filter({ $0.starts(with: "end:") }).count == 1)
+}
