@@ -973,7 +973,7 @@ public struct WebAPIModule {
                             if (src instanceof Uint8Array) {
                                 controller.enqueue(src);
                             } else {
-                                controller.enqueue(typeof src === 'string' ? src : String(src));
+                                controller.enqueue(new TextEncoder().encode(typeof src === 'string' ? src : String(src)));
                             }
                             controller.close();
                         }
@@ -1092,7 +1092,7 @@ public struct WebAPIModule {
                             if (src instanceof Uint8Array) {
                                 controller.enqueue(src);
                             } else {
-                                controller.enqueue(typeof src === 'string' ? src : String(src));
+                                controller.enqueue(new TextEncoder().encode(typeof src === 'string' ? src : String(src)));
                             }
                             controller.close();
                         }

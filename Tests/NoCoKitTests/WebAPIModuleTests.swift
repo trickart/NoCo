@@ -370,7 +370,7 @@ import JavaScriptCore
         console.log('isStream:' + (res.body instanceof ReadableStream));
         var reader = res.body.getReader();
         reader.read().then(function(r) {
-            console.log('value:' + r.value);
+            console.log('value:' + new TextDecoder().decode(r.value));
             return reader.read();
         }).then(function(r) {
             console.log('done:' + r.done);
@@ -432,7 +432,7 @@ import JavaScriptCore
                     console.log('body:' + chunks.join(''));
                     return;
                 }
-                chunks.push(result.value);
+                chunks.push(new TextDecoder().decode(result.value));
                 return pump();
             });
         }
@@ -441,6 +441,80 @@ import JavaScriptCore
     runtime.runEventLoop(timeout: 2)
 
     #expect(messages.contains("body:{\"cors\":true}"))
+}
+
+@Test func responseBodyStreamEmitsUint8Array() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var res = new Response('Hello');
+        var reader = res.body.getReader();
+        reader.read().then(function(r) {
+            console.log('isUint8Array:' + (r.value instanceof Uint8Array));
+            console.log('decoded:' + new TextDecoder().decode(r.value));
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("isUint8Array:true"))
+    #expect(messages.contains("decoded:Hello"))
+}
+
+@Test func responseCloneBodyDigest() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var res = new Response('Hello World');
+        var clone = res.clone();
+        var reader = clone.body.getReader();
+        var chunks = [];
+        function pump() {
+            return reader.read().then(function(result) {
+                if (result.done) {
+                    var totalLen = 0;
+                    chunks.forEach(function(c) { totalLen += c.length; });
+                    var merged = new Uint8Array(totalLen);
+                    var offset = 0;
+                    chunks.forEach(function(c) { merged.set(c, offset); offset += c.length; });
+                    return crypto.subtle.digest('SHA-1', merged);
+                }
+                chunks.push(result.value);
+                return pump();
+            });
+        }
+        pump().then(function(hashBuf) {
+            var arr = new Uint8Array(hashBuf);
+            var hex = Array.from(arr).map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+            console.log('sha1:' + hex);
+        });
+    """)
+    runtime.runEventLoop(timeout: 3)
+
+    // SHA-1 of "Hello World" = 0a4d55a8d778e5022fab701977c5d840bbc486d0
+    #expect(messages.contains("sha1:0a4d55a8d778e5022fab701977c5d840bbc486d0"))
+}
+
+@Test func requestBodyStreamEmitsUint8Array() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var req = new Request('http://localhost', { method: 'POST', body: 'test data' });
+        var reader = req.body.getReader();
+        reader.read().then(function(r) {
+            console.log('isUint8Array:' + (r.value instanceof Uint8Array));
+            console.log('decoded:' + new TextDecoder().decode(r.value));
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("isUint8Array:true"))
+    #expect(messages.contains("decoded:test data"))
 }
 
 // MARK: - WritableStream Tests
