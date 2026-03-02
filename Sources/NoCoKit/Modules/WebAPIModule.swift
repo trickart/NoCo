@@ -1,5 +1,5 @@
 import Foundation
-import JavaScriptCore
+@preconcurrency import JavaScriptCore
 import Compression
 
 /// Installs Web Platform APIs as globals: Headers, Request, Response,
@@ -28,6 +28,138 @@ public struct WebAPIModule {
             return makeUint8Array(decompressed, in: ctx)
         }
         context.setObject(decompressBlock, forKeyedSubscript: "__decompress" as NSString)
+
+        // ── Fetch bridge functions ──
+        final class FetchStorage: @unchecked Sendable {
+            var activeTasks: [Int: URLSessionDataTask] = [:]
+            var nextTaskId: Int = 1
+        }
+        let fetchStorage = FetchStorage()
+        let noRedirectSession = URLSession(
+            configuration: .default,
+            delegate: NoRedirectDelegate(),
+            delegateQueue: nil
+        )
+
+        // __fetchBridge(url, method, headerPairs, body, redirect, resolve, reject) -> taskId
+        let fetchBridgeBlock: @convention(block) (String, String, JSValue, JSValue, String, JSValue, JSValue) -> Int = { urlStr, method, headerPairsVal, bodyVal, redirectMode, resolve, reject in
+            guard let url = URL(string: urlStr) else {
+                runtime.eventLoop.enqueueCallback {
+                    let ctx = runtime.context
+                    let err = JSValue(newErrorFromMessage: "Invalid URL: \(urlStr)", in: ctx)
+                    reject.call(withArguments: [err as Any])
+                }
+                return 0
+            }
+
+            var request = URLRequest(url: url)
+            request.httpMethod = method
+
+            // Set headers from flat array [key, value, key, value, ...]
+            if !headerPairsVal.isUndefined && !headerPairsVal.isNull {
+                let len = Int(headerPairsVal.forProperty("length")?.toInt32() ?? 0)
+                var i = 0
+                while i < len - 1 {
+                    let key = headerPairsVal.atIndex(i).toString() ?? ""
+                    let value = headerPairsVal.atIndex(i + 1).toString() ?? ""
+                    request.addValue(value, forHTTPHeaderField: key)
+                    i += 2
+                }
+            }
+
+            // Set body
+            if !bodyVal.isUndefined && !bodyVal.isNull {
+                if let bytes = extractUint8Array(bodyVal) {
+                    request.httpBody = Data(bytes)
+                } else if let str = bodyVal.toString() {
+                    request.httpBody = str.data(using: .utf8)
+                }
+            }
+
+            let taskId = fetchStorage.nextTaskId
+            fetchStorage.nextTaskId += 1
+
+            runtime.eventLoop.retainHandle()
+
+            let session = (redirectMode == "follow") ? URLSession.shared : noRedirectSession
+
+            let task = session.dataTask(with: request) { data, response, error in
+                runtime.eventLoop.enqueueCallback {
+                    runtime.eventLoop.releaseHandle()
+                    fetchStorage.activeTasks.removeValue(forKey: taskId)
+
+                    let ctx = runtime.context
+
+                    if let error = error {
+                        let nsError = error as NSError
+                        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+                            // AbortError
+                            let domExCtor = ctx.objectForKeyedSubscript("DOMException" as NSString)
+                            let abortErr = domExCtor?.construct(withArguments: ["The operation was aborted.", "AbortError"])
+                            reject.call(withArguments: [abortErr as Any])
+                        } else {
+                            let err = JSValue(newErrorFromMessage: error.localizedDescription, in: ctx)
+                            reject.call(withArguments: [err as Any])
+                        }
+                        return
+                    }
+
+                    guard let httpResponse = response as? HTTPURLResponse else {
+                        let err = JSValue(newErrorFromMessage: "Network error", in: ctx)
+                        reject.call(withArguments: [err as Any])
+                        return
+                    }
+
+                    // redirect: 'error' mode - reject on 3xx
+                    if redirectMode == "error" && (300...399).contains(httpResponse.statusCode) {
+                        let err = JSValue(newErrorFromMessage: "redirect mode is set to error", in: ctx)
+                        reject.call(withArguments: [err as Any])
+                        return
+                    }
+
+                    let result = JSValue(newObjectIn: ctx)!
+                    result.setValue(httpResponse.statusCode, forProperty: "status")
+                    result.setValue(HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode), forProperty: "statusText")
+                    result.setValue(httpResponse.url?.absoluteString ?? urlStr, forProperty: "url")
+                    result.setValue(httpResponse.url?.absoluteString != urlStr, forProperty: "redirected")
+
+                    // Headers as flat array
+                    let headerArray = JSValue(newArrayIn: ctx)!
+                    var headerIdx = 0
+                    for (key, value) in httpResponse.allHeaderFields {
+                        headerArray.setValue("\(key)", at: headerIdx)
+                        headerIdx += 1
+                        headerArray.setValue("\(value)", at: headerIdx)
+                        headerIdx += 1
+                    }
+                    result.setValue(headerArray, forProperty: "headers")
+
+                    // Body
+                    if let data = data, !data.isEmpty {
+                        if let str = String(data: data, encoding: .utf8) {
+                            result.setValue(str, forProperty: "bodyStr")
+                        } else {
+                            let uint8 = makeUint8Array(Array(data), in: ctx)
+                            result.setValue(uint8, forProperty: "bodyBytes")
+                        }
+                    }
+
+                    resolve.call(withArguments: [result])
+                }
+            }
+
+            fetchStorage.activeTasks[taskId] = task
+            task.resume()
+
+            return taskId
+        }
+        context.setObject(fetchBridgeBlock, forKeyedSubscript: "__fetchBridge" as NSString)
+
+        // __fetchCancel(taskId)
+        let fetchCancelBlock: @convention(block) (Int) -> Void = { taskId in
+            fetchStorage.activeTasks[taskId]?.cancel()
+        }
+        context.setObject(fetchCancelBlock, forKeyedSubscript: "__fetchCancel" as NSString)
 
         let script = """
         (function(g) {
@@ -643,7 +775,11 @@ public struct WebAPIModule {
                     var src = this._bodySource;
                     this._bodyStream = new ReadableStream({
                         start: function(controller) {
-                            controller.enqueue(typeof src === 'string' ? src : String(src));
+                            if (src instanceof Uint8Array) {
+                                controller.enqueue(src);
+                            } else {
+                                controller.enqueue(typeof src === 'string' ? src : String(src));
+                            }
                             controller.close();
                         }
                     });
@@ -672,6 +808,7 @@ public struct WebAPIModule {
                 var body = this._bodySource;
                 if (body === null || body === undefined) return Promise.resolve('');
                 if (typeof body === 'string') return Promise.resolve(body);
+                if (body instanceof Uint8Array) return Promise.resolve(new TextDecoder().decode(body));
                 if (body instanceof ReadableStream) {
                     var reader = body.getReader();
                     var chunks = [];
@@ -690,6 +827,11 @@ public struct WebAPIModule {
                 return this.text().then(function(t) { return JSON.parse(t); });
             };
             Request.prototype.arrayBuffer = function() {
+                var body = this._bodySource;
+                if (body instanceof Uint8Array) {
+                    this.bodyUsed = true;
+                    return Promise.resolve(body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength));
+                }
                 return this.text().then(function(t) {
                     var enc = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
                     if (enc) return enc.encode(t).buffer;
@@ -697,6 +839,11 @@ public struct WebAPIModule {
                 });
             };
             Request.prototype.blob = function() {
+                var body = this._bodySource;
+                if (body instanceof Uint8Array) {
+                    this.bodyUsed = true;
+                    return Promise.resolve(new Blob([body]));
+                }
                 return this.text().then(function(t) { return new Blob([t]); });
             };
             Request.prototype.formData = function() {
@@ -732,7 +879,11 @@ public struct WebAPIModule {
                     var src = this._bodySource;
                     this._bodyStream = new ReadableStream({
                         start: function(controller) {
-                            controller.enqueue(typeof src === 'string' ? src : String(src));
+                            if (src instanceof Uint8Array) {
+                                controller.enqueue(src);
+                            } else {
+                                controller.enqueue(typeof src === 'string' ? src : String(src));
+                            }
                             controller.close();
                         }
                     });
@@ -752,6 +903,7 @@ public struct WebAPIModule {
                 var body = this._bodySource;
                 if (body === null || body === undefined) return Promise.resolve('');
                 if (typeof body === 'string') return Promise.resolve(body);
+                if (body instanceof Uint8Array) return Promise.resolve(new TextDecoder().decode(body));
                 if (body instanceof ReadableStream) {
                     var reader = body.getReader();
                     var chunks = [];
@@ -770,6 +922,11 @@ public struct WebAPIModule {
                 return this.text().then(function(t) { return JSON.parse(t); });
             };
             Response.prototype.arrayBuffer = function() {
+                var body = this._bodySource;
+                if (body instanceof Uint8Array) {
+                    this.bodyUsed = true;
+                    return Promise.resolve(body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength));
+                }
                 return this.text().then(function(t) {
                     var enc = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
                     if (enc) return enc.encode(t).buffer;
@@ -777,6 +934,11 @@ public struct WebAPIModule {
                 });
             };
             Response.prototype.blob = function() {
+                var body = this._bodySource;
+                if (body instanceof Uint8Array) {
+                    this.bodyUsed = true;
+                    return Promise.resolve(new Blob([body]));
+                }
                 return this.text().then(function(t) { return new Blob([t]); });
             };
             Response.prototype.formData = function() {
@@ -806,6 +968,100 @@ public struct WebAPIModule {
                 });
             };
             g.Response = Response;
+
+            // ============================================================
+            // fetch
+            // ============================================================
+            g.fetch = function fetch(input, init) {
+                init = init || {};
+                var url, method, headers, body, signal, redirect;
+
+                if (input instanceof Request) {
+                    url = input.url;
+                    method = init.method || input.method;
+                    headers = new Headers(init.headers || input.headers);
+                    body = init.body !== undefined ? init.body : input._bodySource;
+                    signal = init.signal || input.signal;
+                    redirect = init.redirect || input.redirect || 'follow';
+                } else {
+                    url = String(input instanceof URL ? input.href : input);
+                    method = (init.method || 'GET').toUpperCase();
+                    headers = new Headers(init.headers || {});
+                    body = init.body !== undefined ? init.body : null;
+                    signal = init.signal || null;
+                    redirect = init.redirect || 'follow';
+                }
+
+                // AbortSignal pre-check
+                if (signal && signal.aborted) {
+                    return Promise.reject(signal.reason);
+                }
+
+                // Serialize body to Uint8Array
+                var bodyBytes = null;
+                if (body !== null && body !== undefined) {
+                    if (typeof body === 'string') {
+                        bodyBytes = new TextEncoder().encode(body);
+                        if (!headers.has('content-type')) {
+                            headers.set('content-type', 'text/plain;charset=UTF-8');
+                        }
+                    } else if (body instanceof Uint8Array) {
+                        bodyBytes = body;
+                    } else if (body instanceof ArrayBuffer) {
+                        bodyBytes = new Uint8Array(body);
+                    } else if (typeof Buffer !== 'undefined' && body instanceof Buffer) {
+                        bodyBytes = body._data || new Uint8Array(0);
+                    } else if (typeof Blob !== 'undefined' && body instanceof Blob) {
+                        bodyBytes = body._data || new Uint8Array(0);
+                    }
+                }
+
+                // Serialize headers to flat array
+                var headerPairs = [];
+                var hIt = headers.entries();
+                var hNext;
+                while (!(hNext = hIt.next()).done) {
+                    headerPairs.push(hNext.value[0]);
+                    headerPairs.push(hNext.value[1]);
+                }
+
+                return new Promise(function(resolve, reject) {
+                    var taskId = __fetchBridge(url, method, headerPairs, bodyBytes, redirect,
+                        function onResolve(result) {
+                            var resHeaders = new Headers();
+                            var rh = result.headers;
+                            if (rh) {
+                                var rhLen = rh.length;
+                                for (var i = 0; i < rhLen; i += 2) {
+                                    resHeaders.append(rh[i], rh[i + 1]);
+                                }
+                            }
+
+                            var resBody = null;
+                            if (result.bodyStr !== undefined) resBody = result.bodyStr;
+                            else if (result.bodyBytes) resBody = result.bodyBytes;
+
+                            var res = new Response(resBody, {
+                                status: result.status,
+                                statusText: result.statusText,
+                                headers: resHeaders
+                            });
+                            // Override read-only-like properties
+                            Object.defineProperty(res, 'url', { value: result.url, writable: false });
+                            res.redirected = !!result.redirected;
+                            res.type = 'basic';
+                            resolve(res);
+                        },
+                        function onReject(err) { reject(err); }
+                    );
+
+                    if (signal && taskId > 0) {
+                        signal.addEventListener('abort', function() {
+                            __fetchCancel(taskId);
+                        });
+                    }
+                });
+            };
 
             // ============================================================
             // queueMicrotask
@@ -963,5 +1219,19 @@ public struct WebAPIModule {
             return nil
         }
         return Array(decompressed)
+    }
+}
+
+// MARK: - NoRedirectDelegate
+
+private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
     }
 }
