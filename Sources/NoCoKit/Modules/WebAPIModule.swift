@@ -352,7 +352,172 @@ public struct WebAPIModule {
                     }
                 };
             };
+            ReadableStream.prototype.pipeTo = function(destination, options) {
+                var reader = this.getReader();
+                var writer = destination.getWriter();
+                var preventClose = options && options.preventClose;
+                var preventAbort = options && options.preventAbort;
+                var preventCancel = options && options.preventCancel;
+                function pump() {
+                    return reader.read().then(function(result) {
+                        if (result.done) {
+                            reader.releaseLock();
+                            if (!preventClose) {
+                                return writer.close().then(function() {
+                                    writer.releaseLock();
+                                });
+                            }
+                            writer.releaseLock();
+                            return;
+                        }
+                        return writer.write(result.value).then(pump);
+                    });
+                }
+                return pump();
+            };
+
+            ReadableStream.prototype.pipeThrough = function(transform, options) {
+                this.pipeTo(transform.writable, options);
+                return transform.readable;
+            };
+
             g.ReadableStream = ReadableStream;
+
+            // ============================================================
+            // WritableStream
+            // ============================================================
+            function WritableStreamDefaultWriter(stream) {
+                this._stream = stream;
+                stream._writer = this;
+                var self = this;
+                this.closed = new Promise(function(resolve, reject) {
+                    self._closedResolve = resolve;
+                    self._closedReject = reject;
+                });
+                this.ready = Promise.resolve();
+            }
+            WritableStreamDefaultWriter.prototype.write = function(chunk) {
+                var stream = this._stream;
+                if (stream._closed) return Promise.reject(new TypeError('Cannot write to a closed WritableStream'));
+                if (stream._writeHandler) {
+                    try {
+                        var result = stream._writeHandler(chunk);
+                        if (result && typeof result.then === 'function') return result;
+                    } catch(e) {
+                        return Promise.reject(e);
+                    }
+                }
+                if (stream._underlyingSink && typeof stream._underlyingSink.write === 'function') {
+                    try {
+                        var result = stream._underlyingSink.write(chunk, stream._controller);
+                        if (result && typeof result.then === 'function') return result;
+                    } catch(e) {
+                        return Promise.reject(e);
+                    }
+                }
+                return Promise.resolve();
+            };
+            WritableStreamDefaultWriter.prototype.close = function() {
+                var stream = this._stream;
+                if (stream._closed) return Promise.reject(new TypeError('Cannot close a closed WritableStream'));
+                stream._closed = true;
+                if (stream._closeHandler) {
+                    try {
+                        stream._closeHandler();
+                    } catch(e) {
+                        if (this._closedReject) this._closedReject(e);
+                        return Promise.reject(e);
+                    }
+                }
+                if (stream._underlyingSink && typeof stream._underlyingSink.close === 'function') {
+                    try {
+                        stream._underlyingSink.close();
+                    } catch(e) {
+                        if (this._closedReject) this._closedReject(e);
+                        return Promise.reject(e);
+                    }
+                }
+                if (this._closedResolve) {
+                    this._closedResolve();
+                    this._closedResolve = null;
+                }
+                return Promise.resolve();
+            };
+            WritableStreamDefaultWriter.prototype.abort = function(reason) {
+                this._stream._closed = true;
+                if (this._closedReject) {
+                    this._closedReject(reason);
+                    this._closedReject = null;
+                }
+                return Promise.resolve();
+            };
+            WritableStreamDefaultWriter.prototype.releaseLock = function() {
+                this._stream._writer = null;
+            };
+
+            function WritableStream(underlyingSink) {
+                this._closed = false;
+                this._writer = null;
+                this._underlyingSink = underlyingSink || null;
+                this._writeHandler = null;
+                this._closeHandler = null;
+                this._controller = {};
+                if (underlyingSink && typeof underlyingSink.start === 'function') {
+                    underlyingSink.start(this._controller);
+                }
+            }
+            WritableStream.prototype.getWriter = function() {
+                if (this._writer) {
+                    throw new TypeError('WritableStream is already locked');
+                }
+                return new WritableStreamDefaultWriter(this);
+            };
+            Object.defineProperty(WritableStream.prototype, 'locked', {
+                get: function() { return this._writer !== null; }
+            });
+            WritableStream.prototype.close = function() {
+                if (this._writer) {
+                    return this._writer.close();
+                }
+                this._closed = true;
+                return Promise.resolve();
+            };
+            WritableStream.prototype.abort = function(reason) {
+                this._closed = true;
+                return Promise.resolve();
+            };
+            g.WritableStream = WritableStream;
+
+            // ============================================================
+            // TransformStream
+            // ============================================================
+            function TransformStream(transformer) {
+                var readableController;
+                this.readable = new ReadableStream({
+                    start: function(controller) {
+                        readableController = controller;
+                    }
+                });
+                this.writable = new WritableStream();
+                this.writable._writeHandler = function(chunk) {
+                    if (transformer && typeof transformer.transform === 'function') {
+                        transformer.transform(chunk, {
+                            enqueue: function(c) { readableController.enqueue(c); }
+                        });
+                    } else {
+                        readableController.enqueue(chunk);
+                    }
+                };
+                this.writable._closeHandler = function() {
+                    if (transformer && typeof transformer.flush === 'function') {
+                        transformer.flush({
+                            enqueue: function(c) { readableController.enqueue(c); }
+                        });
+                    }
+                    readableController.close();
+                };
+            }
+            g.TransformStream = TransformStream;
 
             // ============================================================
             // Request
