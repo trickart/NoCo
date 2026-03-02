@@ -1334,3 +1334,280 @@ func fetchAbortDuringRequest() async throws {
 
     #expect(messages.contains("abortName:AbortError"))
 }
+
+// MARK: - File Tests
+
+@Test func fileBasicProperties() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var f = new File(['hello'], 'test.txt', { type: 'text/plain' });
+        var results = [
+            f.name === 'test.txt',
+            f.type === 'text/plain',
+            f.size === 5,
+            typeof f.lastModified === 'number',
+            f.lastModified > 0,
+            f instanceof File,
+            f instanceof Blob
+        ];
+        results.every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func fileCustomLastModified() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var f = new File(['data'], 'a.bin', { lastModified: 1234567890 });
+        f.lastModified === 1234567890;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func fileInheritsBlob() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var f = new File(['ab', 'cd'], 'multi.txt');
+        var results = [
+            f.size === 4,
+            f instanceof Blob,
+            f.name === 'multi.txt'
+        ];
+        results.every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+// MARK: - FormData Tests
+
+@Test func formDataAppendAndGet() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var fd = new FormData();
+        fd.append('key', 'value');
+        fd.get('key') === 'value';
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func formDataGetReturnsNull() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var fd = new FormData();
+        fd.get('nonexistent') === null;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func formDataAppendMultiple() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var fd = new FormData();
+        fd.append('key', 'a');
+        fd.append('key', 'b');
+        var all = fd.getAll('key');
+        var results = [
+            fd.get('key') === 'a',
+            all.length === 2,
+            all[0] === 'a',
+            all[1] === 'b'
+        ];
+        results.every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func formDataSet() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var fd = new FormData();
+        fd.append('key', 'a');
+        fd.append('key', 'b');
+        fd.set('key', 'c');
+        var all = fd.getAll('key');
+        var results = [
+            all.length === 1,
+            all[0] === 'c'
+        ];
+        results.every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func formDataHasAndDelete() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var fd = new FormData();
+        fd.append('key', 'value');
+        var had = fd.has('key');
+        fd.delete('key');
+        var results = [
+            had === true,
+            fd.has('key') === false,
+            fd.get('key') === null
+        ];
+        results.every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func formDataForEach() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var fd = new FormData();
+        fd.append('a', '1');
+        fd.append('b', '2');
+        var keys = [];
+        var values = [];
+        fd.forEach(function(value, key) {
+            keys.push(key);
+            values.push(value);
+        });
+        var results = [
+            keys.length === 2,
+            keys[0] === 'a',
+            keys[1] === 'b',
+            values[0] === '1',
+            values[1] === '2'
+        ];
+        results.every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func formDataIterable() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var fd = new FormData();
+        fd.append('x', '10');
+        fd.append('y', '20');
+        var pairs = [];
+        var iter = fd.entries();
+        var next = iter.next();
+        while (!next.done) {
+            pairs.push(next.value[0] + '=' + next.value[1]);
+            next = iter.next();
+        }
+        pairs.join('&') === 'x=10&y=20';
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func formDataAppendFile() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var fd = new FormData();
+        var f = new File(['content'], 'doc.txt', { type: 'text/plain' });
+        fd.append('file', f);
+        var got = fd.get('file');
+        var results = [
+            got instanceof File,
+            got.name === 'doc.txt',
+            got.type === 'text/plain',
+            got.size === 7
+        ];
+        results.every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func formDataAppendBlobConvertsToFile() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var fd = new FormData();
+        var b = new Blob(['data'], { type: 'application/octet-stream' });
+        fd.append('field', b, 'upload.bin');
+        var got = fd.get('field');
+        var results = [
+            got instanceof File,
+            got.name === 'upload.bin',
+            got.type === 'application/octet-stream'
+        ];
+        results.every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func requestFormDataUrlEncoded() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+    runtime.evaluate("""
+        var req = new Request('http://localhost/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'name=hello+world&age=30'
+        });
+        req.formData().then(function(fd) {
+            console.log('name:' + fd.get('name'));
+            console.log('age:' + fd.get('age'));
+        }).catch(function(e) { console.log('ERROR:' + e); });
+    """)
+    runtime.runEventLoop(timeout: 2)
+    #expect(messages.contains("name:hello world"))
+    #expect(messages.contains("age:30"))
+}
+
+@Test func requestFormDataMultipart() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+    runtime.evaluate("""
+        var boundary = '----WebKitFormBoundary7MA4YWxk';
+        var body = '------WebKitFormBoundary7MA4YWxk\\r\\n' +
+            'Content-Disposition: form-data; name="field1"\\r\\n\\r\\n' +
+            'value1\\r\\n' +
+            '------WebKitFormBoundary7MA4YWxk\\r\\n' +
+            'Content-Disposition: form-data; name="file1"; filename="test.txt"\\r\\n' +
+            'Content-Type: text/plain\\r\\n\\r\\n' +
+            'file content here\\r\\n' +
+            '------WebKitFormBoundary7MA4YWxk--\\r\\n';
+        var req = new Request('http://localhost/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxk' },
+            body: body
+        });
+        req.formData().then(function(fd) {
+            console.log('field1:' + fd.get('field1'));
+            var file = fd.get('file1');
+            console.log('isFile:' + (file instanceof File));
+            console.log('fileName:' + file.name);
+            console.log('fileType:' + file.type);
+        }).catch(function(e) { console.log('ERROR:' + e); });
+    """)
+    runtime.runEventLoop(timeout: 2)
+    #expect(messages.contains("field1:value1"))
+    #expect(messages.contains("isFile:true"))
+    #expect(messages.contains("fileName:test.txt"))
+    #expect(messages.contains("fileType:text/plain"))
+}
+
+@Test func responseFormDataUrlEncoded() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+    runtime.evaluate("""
+        var res = new Response('foo=bar&baz=qux', {
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        });
+        res.formData().then(function(fd) {
+            console.log('foo:' + fd.get('foo'));
+            console.log('baz:' + fd.get('baz'));
+        }).catch(function(e) { console.log('ERROR:' + e); });
+    """)
+    runtime.runEventLoop(timeout: 2)
+    #expect(messages.contains("foo:bar"))
+    #expect(messages.contains("baz:qux"))
+}
+
+@Test func formDataGlobalExists() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var results = [
+            typeof FormData === 'function',
+            typeof File === 'function'
+        ];
+        results.every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}

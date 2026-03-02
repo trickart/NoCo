@@ -156,7 +156,6 @@ public final class NodeRuntime: @unchecked Sendable {
         ProcessModule.install(in: context, runtime: self)
         BufferModule.install(in: context, runtime: self)
         EventEmitterModule.install(in: context, runtime: self)
-        WebAPIModule.install(in: context, runtime: self)
         WebCryptoModule.install(in: context, runtime: self)
 
         // Register require()-able modules
@@ -381,5 +380,8 @@ public final class NodeRuntime: @unchecked Sendable {
                 }
             })(this);
             """)
+
+        // WebAPIModule depends on Blob (for File extends Blob), so install after Blob
+        WebAPIModule.install(in: context, runtime: self)
     }
 }
