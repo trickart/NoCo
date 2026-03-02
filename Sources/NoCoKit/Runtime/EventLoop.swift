@@ -19,6 +19,9 @@ public final class EventLoop: @unchecked Sendable {
     /// Called after each callback execution to check/clear uncaught JS exceptions.
     var onUncaughtException: (() -> Void)?
 
+    /// Called after draining callbacks/timers to flush JSC's internal microtask queue.
+    var drainMicrotasks: (() -> Void)?
+
     struct TimerEntry {
         let id: Int
         let callback: JSValue
@@ -92,6 +95,9 @@ public final class EventLoop: @unchecked Sendable {
             cb()
             onUncaughtException?()
         }
+        if !cbs.isEmpty {
+            drainMicrotasks?()
+        }
     }
 
     /// Increment active I/O handle count. Thread-safe.
@@ -142,6 +148,9 @@ public final class EventLoop: @unchecked Sendable {
                     entry.callback.call(withArguments: [])
                     onUncaughtException?()
                 }
+            }
+            if firedAny {
+                drainMicrotasks?()
             }
 
             let callbacksEmpty = ioLock.sync { [self] in pendingCallbacks.isEmpty }
