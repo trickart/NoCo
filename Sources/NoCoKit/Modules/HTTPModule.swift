@@ -86,10 +86,12 @@ public struct HTTPModule: NodeModule {
             guard let state = storage.pendingRequests[reqId] else { return }
             if dataVal.isString, let str = dataVal.toString() {
                 state.responseBody.append(contentsOf: str.utf8)
-            } else if let bufData = dataVal.forProperty("_data") {
-                let len = Int(bufData.forProperty("length")?.toInt32() ?? 0)
+            } else {
+                let bufData = dataVal.forProperty("_data")!
+                let source = bufData.isUndefined ? dataVal : bufData
+                let len = Int(source.forProperty("length")?.toInt32() ?? 0)
                 for i in 0..<len {
-                    state.responseBody.append(UInt8(bufData.atIndex(i).toInt32() & 0xFF))
+                    state.responseBody.append(UInt8(source.atIndex(i).toInt32() & 0xFF))
                 }
             }
         }
@@ -101,10 +103,12 @@ public struct HTTPModule: NodeModule {
             if !dataVal.isNull && !dataVal.isUndefined {
                 if dataVal.isString, let str = dataVal.toString() {
                     state.responseBody.append(contentsOf: str.utf8)
-                } else if let bufData = dataVal.forProperty("_data") {
-                    let len = Int(bufData.forProperty("length")?.toInt32() ?? 0)
+                } else {
+                    let bufData = dataVal.forProperty("_data")!
+                    let source = bufData.isUndefined ? dataVal : bufData
+                    let len = Int(source.forProperty("length")?.toInt32() ?? 0)
                     for i in 0..<len {
-                        state.responseBody.append(UInt8(bufData.atIndex(i).toInt32() & 0xFF))
+                        state.responseBody.append(UInt8(source.atIndex(i).toInt32() & 0xFF))
                     }
                 }
             }
@@ -631,7 +635,7 @@ final class HTTPRequestState: @unchecked Sendable {
         for (key, value) in responseHeaders {
             head.headers.add(name: key, value: value)
         }
-        if !head.headers.contains(name: "content-length") {
+        if !head.headers.contains(name: "content-length") && !head.headers.contains(name: "transfer-encoding") {
             head.headers.add(name: "content-length", value: String(responseBody.count))
         }
         if keepAlive {

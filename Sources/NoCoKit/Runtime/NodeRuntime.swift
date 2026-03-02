@@ -59,6 +59,10 @@ public final class NodeRuntime: @unchecked Sendable {
             self?.checkException()
         }
 
+        eventLoop.drainMicrotasks = { [weak self] in
+            self?.context.evaluateScript("void 0")
+        }
+
         configure?(self)
     }
 

@@ -400,6 +400,25 @@ public struct WebAPIModule {
                     }
                 });
             }
+            function readableStreamCallPull(stream) {
+                if (!stream._pull || stream._closed) return;
+                if (stream._pulling) {
+                    stream._pullAgain = true;
+                    return;
+                }
+                stream._pulling = true;
+                Promise.resolve(stream._pull(stream._controller)).then(function() {
+                    stream._pulling = false;
+                    if (stream._pullAgain) {
+                        stream._pullAgain = false;
+                        readableStreamCallPull(stream);
+                    }
+                })['catch'](function(e) {
+                    stream._pulling = false;
+                    stream._pullAgain = false;
+                    stream._controller.error(e);
+                });
+            }
             ReadableStreamDefaultReader.prototype.read = function() {
                 var self = this;
                 var stream = this._stream;
@@ -411,16 +430,7 @@ public struct WebAPIModule {
                             self._closedResolve = null;
                         }
                     }
-                    // If we have a pull function and queue is getting low, call it
-                    if (stream._pull && !stream._pulling && !stream._closed) {
-                        stream._pulling = true;
-                        Promise.resolve(stream._pull(stream._controller)).then(function() {
-                            stream._pulling = false;
-                        })['catch'](function(e) {
-                            stream._pulling = false;
-                            stream._controller.error(e);
-                        });
-                    }
+                    readableStreamCallPull(stream);
                     return Promise.resolve({ value: chunk, done: false });
                 }
                 if (stream._closed) {
@@ -433,20 +443,13 @@ public struct WebAPIModule {
                 if (stream._errored) {
                     return Promise.reject(stream._storedError);
                 }
-                // Need to wait for data - also trigger pull if available
-                if (stream._pull && !stream._pulling) {
-                    stream._pulling = true;
-                    Promise.resolve(stream._pull(stream._controller)).then(function() {
-                        stream._pulling = false;
-                    })['catch'](function(e) {
-                        stream._pulling = false;
-                        stream._controller.error(e);
-                    });
-                }
-                return new Promise(function(resolve, reject) {
+                // Create pending Promise first so pull can resolve it synchronously
+                var promise = new Promise(function(resolve, reject) {
                     self._resolve = resolve;
                     self._reject = reject;
                 });
+                readableStreamCallPull(stream);
+                return promise;
             };
             ReadableStreamDefaultReader.prototype.cancel = function(reason) {
                 this._stream._closed = true;
@@ -469,6 +472,7 @@ public struct WebAPIModule {
                 this._reader = null;
                 this._pull = null;
                 this._pulling = false;
+                this._pullAgain = false;
                 this._controller = new ReadableStreamDefaultController(this);
                 if (underlyingSource) {
                     if (typeof underlyingSource.pull === 'function') {
