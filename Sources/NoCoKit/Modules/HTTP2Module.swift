@@ -704,7 +704,7 @@ final class HTTP2BridgeHandler: ChannelInboundHandler, @unchecked Sendable {
 
     let server: NIOHTTP2Server
     private var requestHead: HTTPRequestHead?
-    private var bodyBuffer: Data = Data()
+    private var activeRequestId: Int?
 
     init(server: NIOHTTP2Server) {
         self.server = server
@@ -715,21 +715,14 @@ final class HTTP2BridgeHandler: ChannelInboundHandler, @unchecked Sendable {
         switch part {
         case .head(let head):
             requestHead = head
-            bodyBuffer = Data()
-        case .body(var buf):
-            if let bytes = buf.readBytes(length: buf.readableBytes) {
-                bodyBuffer.append(contentsOf: bytes)
-            }
-        case .end:
-            guard let head = requestHead else { return }
             let reqId = server.nextRequestId()
+            self.activeRequestId = reqId
             let channel = context.channel
             let state = HTTP2RequestState(requestId: reqId, channel: channel)
 
             let method = head.method.rawValue
             let uri = head.uri
             let headerPairs: [(String, String)] = head.headers.map { ($0.name, $0.value) }
-            let bodyStr = String(data: bodyBuffer, encoding: .utf8) ?? ""
 
             server.eventLoop.enqueueCallback { [weak self] in
                 guard let self else { return }
@@ -751,12 +744,28 @@ final class HTTP2BridgeHandler: ChannelInboundHandler, @unchecked Sendable {
                     rawIdx += 2
                 }
                 jsServer.invokeMethod("_handleRequest", withArguments: [
-                    reqId, method, uri, headersObj, "2.0", bodyStr, rawHeadersArr,
+                    reqId, method, uri, headersObj, "2.0", NSNull(), rawHeadersArr,
                 ])
             }
 
+        case .body(var buf):
+            guard let reqId = activeRequestId else { return }
+            if let bytes = buf.readBytes(length: buf.readableBytes) {
+                let str = String(data: Data(bytes), encoding: .utf8)
+                    ?? String(data: Data(bytes), encoding: .isoLatin1) ?? ""
+                server.eventLoop.enqueueCallback { [weak self] in
+                    guard let self else { return }
+                    self.server.jsServer?.invokeMethod("_pushBodyChunk", withArguments: [reqId, str])
+                }
+            }
+
+        case .end:
+            guard let reqId = activeRequestId else { return }
+            server.eventLoop.enqueueCallback { [weak self] in
+                guard let self else { return }
+                self.server.jsServer?.invokeMethod("_endBody", withArguments: [reqId])
+            }
             requestHead = nil
-            bodyBuffer = Data()
         }
     }
 }
