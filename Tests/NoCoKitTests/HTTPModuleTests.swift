@@ -689,6 +689,117 @@ func httpCreateServerUint8ArrayResponse() async throws {
     await eventLoopTask.value
 }
 
+// MARK: - NIO Chunk Streaming Integration Tests
+
+@Test(.timeLimit(.minutes(1)))
+func httpCreateServerStreamingPOST() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {
+            var chunks = [];
+            req.on('data', function(chunk) {
+                chunks.push(typeof chunk === 'string' ? chunk : chunk.toString());
+            });
+            req.on('end', function() {
+                console.log('complete:' + req.complete);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ chunks: chunks, count: chunks.length }));
+            });
+        });
+        server.listen(0, '127.0.0.1', function() {
+            console.log('listening:' + server.address().port);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackground(runtime, timeout: 10)
+    }
+
+    var port = 0
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if let msg = messages.first(where: { $0.hasPrefix("listening:") }) {
+            port = Int(msg.replacingOccurrences(of: "listening:", with: "")) ?? 0
+            break
+        }
+    }
+    #expect(port > 0)
+
+    let url = URL(string: "http://127.0.0.1:\(port)/api")!
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    let payload = #"{"key":"value"}"#
+    request.httpBody = payload.data(using: .utf8)
+
+    let (data, response) = try await URLSession.shared.upload(for: request, from: request.httpBody!)
+    let httpResponse = response as! HTTPURLResponse
+    let body = String(data: data, encoding: .utf8)!
+
+    #expect(httpResponse.statusCode == 200)
+    #expect(body.contains("\"count\":1"))
+    #expect(body.contains("key"))
+    #expect(body.contains("value"))
+    #expect(messages.contains("complete:true"))
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+}
+
+@Test(.timeLimit(.minutes(1)))
+func httpCreateServerStreamingGETNoBody() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {
+            var dataCount = 0;
+            req.on('data', function() { dataCount++; });
+            req.on('end', function() {
+                console.log('dataCount:' + dataCount);
+                console.log('complete:' + req.complete);
+                res.writeHead(200);
+                res.end('ok');
+            });
+        });
+        server.listen(0, '127.0.0.1', function() {
+            console.log('listening:' + server.address().port);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackground(runtime, timeout: 10)
+    }
+
+    var port = 0
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if let msg = messages.first(where: { $0.hasPrefix("listening:") }) {
+            port = Int(msg.replacingOccurrences(of: "listening:", with: "")) ?? 0
+            break
+        }
+    }
+    #expect(port > 0)
+
+    let url = URL(string: "http://127.0.0.1:\(port)/")!
+    let (data, response) = try await URLSession.shared.data(from: url)
+    let httpResponse = response as! HTTPURLResponse
+
+    #expect(httpResponse.statusCode == 200)
+    #expect(String(data: data, encoding: .utf8) == "ok")
+    #expect(messages.contains("complete:true"))
+    #expect(messages.contains("dataCount:0"))
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+}
+
 @Test(.timeLimit(.minutes(1)))
 func httpCreateServerUint8ArrayWriteAndEnd() async throws {
     let runtime = NodeRuntime()
