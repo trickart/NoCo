@@ -539,6 +539,33 @@ public struct WebAPIModule {
                 this.pipeTo(transform.writable, options);
                 return transform.readable;
             };
+            ReadableStream.prototype.tee = function() {
+                var reader = this.getReader();
+                var branch1Controller, branch2Controller;
+                var cancelled1 = false, cancelled2 = false;
+                var branch1 = new ReadableStream({
+                    start: function(c) { branch1Controller = c; },
+                    cancel: function() { cancelled1 = true; if (cancelled2) reader.cancel(); }
+                });
+                var branch2 = new ReadableStream({
+                    start: function(c) { branch2Controller = c; },
+                    cancel: function() { cancelled2 = true; if (cancelled1) reader.cancel(); }
+                });
+                function pump() {
+                    return reader.read().then(function(result) {
+                        if (result.done) {
+                            if (!cancelled1) branch1Controller.close();
+                            if (!cancelled2) branch2Controller.close();
+                            return;
+                        }
+                        if (!cancelled1) branch1Controller.enqueue(result.value);
+                        if (!cancelled2) branch2Controller.enqueue(result.value);
+                        return pump();
+                    });
+                }
+                pump();
+                return [branch1, branch2];
+            };
 
             g.ReadableStream = ReadableStream;
 
@@ -983,10 +1010,17 @@ public struct WebAPIModule {
                 configurable: true
             });
             Request.prototype.clone = function() {
+                var body = this._bodySource;
+                if (body instanceof ReadableStream) {
+                    var teed = body.tee();
+                    this._bodySource = teed[0];
+                    this._bodyStream = undefined;
+                    body = teed[1];
+                }
                 return new Request(this.url, {
                     method: this.method,
                     headers: new Headers(this.headers),
-                    body: this._bodySource,
+                    body: body,
                     signal: this.signal,
                     mode: this.mode,
                     credentials: this.credentials,
@@ -1102,7 +1136,14 @@ public struct WebAPIModule {
                 configurable: true
             });
             Response.prototype.clone = function() {
-                return new Response(this._bodySource, {
+                var body = this._bodySource;
+                if (body instanceof ReadableStream) {
+                    var teed = body.tee();
+                    this._bodySource = teed[0];
+                    this._bodyStream = undefined;
+                    body = teed[1];
+                }
+                return new Response(body, {
                     status: this.status,
                     statusText: this.statusText,
                     headers: new Headers(this.headers)
@@ -1305,6 +1346,142 @@ public struct WebAPIModule {
                     return JSON.parse(JSON.stringify(value));
                 };
             }
+
+            // ============================================================
+            // Cache API (Web Cache API — in-memory implementation)
+            // ============================================================
+            function Cache() {
+                this._entries = {};
+            }
+
+            Cache.prototype._resolveKey = function(request) {
+                if (typeof request === 'string') return request;
+                if (request instanceof URL) return request.href;
+                if (request && typeof request === 'object' && request.url) return request.url;
+                return String(request);
+            };
+
+            Cache.prototype._consumeBody = function(response) {
+                var src = response._bodySource;
+                if (src === null || src === undefined) {
+                    return Promise.resolve(null);
+                }
+                if (typeof src === 'string') {
+                    return Promise.resolve(src);
+                }
+                if (src instanceof Uint8Array) {
+                    return Promise.resolve(new Uint8Array(src));
+                }
+                if (src instanceof ReadableStream) {
+                    var reader = src.getReader();
+                    var chunks = [];
+                    function pump() {
+                        return reader.read().then(function(result) {
+                            if (result.done) {
+                                if (chunks.length === 0) return null;
+                                if (chunks.length === 1) return chunks[0];
+                                var total = 0;
+                                for (var i = 0; i < chunks.length; i++) total += chunks[i].length;
+                                var merged = new Uint8Array(total);
+                                var offset = 0;
+                                for (var j = 0; j < chunks.length; j++) {
+                                    merged.set(chunks[j], offset);
+                                    offset += chunks[j].length;
+                                }
+                                return merged;
+                            }
+                            var chunk = result.value;
+                            if (typeof chunk === 'string') {
+                                chunks.push(new TextEncoder().encode(chunk));
+                            } else if (chunk instanceof Uint8Array) {
+                                chunks.push(chunk);
+                            } else {
+                                chunks.push(new TextEncoder().encode(String(chunk)));
+                            }
+                            return pump();
+                        });
+                    }
+                    return pump();
+                }
+                return Promise.resolve(String(src));
+            };
+
+            Cache.prototype.match = function(request) {
+                var key = this._resolveKey(request);
+                var entry = this._entries[key];
+                if (!entry) return Promise.resolve(undefined);
+                var body = entry.body;
+                if (body !== null && body instanceof Uint8Array) {
+                    body = new Uint8Array(body);
+                }
+                var resp = new Response(body, {
+                    status: entry.status,
+                    statusText: entry.statusText,
+                    headers: new Headers(entry.headers)
+                });
+                return Promise.resolve(resp);
+            };
+
+            Cache.prototype.put = function(request, response) {
+                var key = this._resolveKey(request);
+                var entries = this._entries;
+                var status = response.status;
+                var statusText = response.statusText;
+                var headers = [];
+                response.headers.forEach(function(value, name) {
+                    headers.push([name, value]);
+                });
+                return this._consumeBody(response).then(function(body) {
+                    entries[key] = {
+                        body: body,
+                        status: status,
+                        statusText: statusText,
+                        headers: headers
+                    };
+                });
+            };
+
+            Cache.prototype.delete = function(request) {
+                var key = this._resolveKey(request);
+                var had = key in this._entries;
+                delete this._entries[key];
+                return Promise.resolve(had);
+            };
+
+            Cache.prototype.keys = function() {
+                var self = this;
+                var reqs = Object.keys(this._entries).map(function(url) {
+                    return new Request(url);
+                });
+                return Promise.resolve(reqs);
+            };
+
+            function CacheStorage() {
+                this._caches = {};
+            }
+
+            CacheStorage.prototype.open = function(name) {
+                if (!this._caches[name]) {
+                    this._caches[name] = new Cache();
+                }
+                return Promise.resolve(this._caches[name]);
+            };
+
+            CacheStorage.prototype.has = function(name) {
+                return Promise.resolve(name in this._caches);
+            };
+
+            CacheStorage.prototype.delete = function(name) {
+                var had = name in this._caches;
+                delete this._caches[name];
+                return Promise.resolve(had);
+            };
+
+            CacheStorage.prototype.keys = function() {
+                return Promise.resolve(Object.keys(this._caches));
+            };
+
+            g.caches = new CacheStorage();
         })(this);
         """
         context.evaluateScript(script)

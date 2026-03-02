@@ -1685,3 +1685,152 @@ func fetchAbortDuringRequest() async throws {
     """)
     #expect(result?.toBool() == true)
 }
+
+// MARK: - Cache API Tests
+
+@Test func cacheStorageExists() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var results = [
+            typeof caches === 'object',
+            typeof caches.open === 'function',
+            typeof caches.has === 'function',
+            typeof caches.delete === 'function',
+            typeof caches.keys === 'function'
+        ];
+        results.every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func cacheOpenAndPut() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+    runtime.evaluate("""
+        caches.open('test').then(function(cache) {
+            return cache.put('https://example.com/api', new Response('hello world', {
+                status: 200,
+                headers: { 'Content-Type': 'text/plain' }
+            }));
+        }).then(function() {
+            return caches.open('test');
+        }).then(function(cache) {
+            return cache.match('https://example.com/api');
+        }).then(function(resp) {
+            console.log('status:' + resp.status);
+            console.log('ct:' + resp.headers.get('content-type'));
+            return resp.text();
+        }).then(function(text) {
+            console.log('body:' + text);
+        }).catch(function(e) { console.log('ERROR:' + e); });
+    """)
+    runtime.runEventLoop(timeout: 2)
+    #expect(messages.contains("status:200"))
+    #expect(messages.contains("ct:text/plain"))
+    #expect(messages.contains("body:hello world"))
+}
+
+@Test func cacheMatchMiss() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+    runtime.evaluate("""
+        caches.open('miss-test').then(function(cache) {
+            return cache.match('https://example.com/nonexistent');
+        }).then(function(resp) {
+            console.log('result:' + (resp === undefined ? 'undefined' : 'found'));
+        }).catch(function(e) { console.log('ERROR:' + e); });
+    """)
+    runtime.runEventLoop(timeout: 2)
+    #expect(messages.contains("result:undefined"))
+}
+
+@Test func cacheMultipleEntries() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+    runtime.evaluate("""
+        caches.open('multi').then(function(cache) {
+            return cache.put('/a', new Response('alpha'))
+                .then(function() { return cache.put('/b', new Response('beta')); })
+                .then(function() { return cache; });
+        }).then(function(cache) {
+            return Promise.all([cache.match('/a'), cache.match('/b')]);
+        }).then(function(results) {
+            return Promise.all([results[0].text(), results[1].text()]);
+        }).then(function(texts) {
+            console.log('a:' + texts[0]);
+            console.log('b:' + texts[1]);
+        }).catch(function(e) { console.log('ERROR:' + e); });
+    """)
+    runtime.runEventLoop(timeout: 2)
+    #expect(messages.contains("a:alpha"))
+    #expect(messages.contains("b:beta"))
+}
+
+@Test func cacheDelete() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+    runtime.evaluate("""
+        caches.open('del').then(function(cache) {
+            return cache.put('/x', new Response('data'))
+                .then(function() { return cache.delete('/x'); });
+        }).then(function(deleted) {
+            console.log('deleted:' + deleted);
+            return caches.open('del');
+        }).then(function(cache) {
+            return cache.match('/x');
+        }).then(function(resp) {
+            console.log('after:' + (resp === undefined ? 'gone' : 'found'));
+        }).catch(function(e) { console.log('ERROR:' + e); });
+    """)
+    runtime.runEventLoop(timeout: 2)
+    #expect(messages.contains("deleted:true"))
+    #expect(messages.contains("after:gone"))
+}
+
+@Test func cachePutOverwrites() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+    runtime.evaluate("""
+        caches.open('overwrite').then(function(cache) {
+            return cache.put('/key', new Response('old'))
+                .then(function() { return cache.put('/key', new Response('new')); })
+                .then(function() { return cache; });
+        }).then(function(cache) {
+            return cache.match('/key');
+        }).then(function(resp) {
+            return resp.text();
+        }).then(function(text) {
+            console.log('val:' + text);
+        }).catch(function(e) { console.log('ERROR:' + e); });
+    """)
+    runtime.runEventLoop(timeout: 2)
+    #expect(messages.contains("val:new"))
+}
+
+@Test func cacheStorageMultipleCaches() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+    runtime.evaluate("""
+        Promise.all([caches.open('c1'), caches.open('c2')]).then(function(caches) {
+            return caches[0].put('/k', new Response('from-c1'))
+                .then(function() { return caches[1].put('/k', new Response('from-c2')); })
+                .then(function() { return caches; });
+        }).then(function(caches) {
+            return Promise.all([caches[0].match('/k'), caches[1].match('/k')]);
+        }).then(function(results) {
+            return Promise.all([results[0].text(), results[1].text()]);
+        }).then(function(texts) {
+            console.log('c1:' + texts[0]);
+            console.log('c2:' + texts[1]);
+        }).catch(function(e) { console.log('ERROR:' + e); });
+    """)
+    runtime.runEventLoop(timeout: 2)
+    #expect(messages.contains("c1:from-c1"))
+    #expect(messages.contains("c2:from-c2"))
+}
