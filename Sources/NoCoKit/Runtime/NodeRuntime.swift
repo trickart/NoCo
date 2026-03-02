@@ -157,6 +157,7 @@ public final class NodeRuntime: @unchecked Sendable {
         BufferModule.install(in: context, runtime: self)
         EventEmitterModule.install(in: context, runtime: self)
         WebAPIModule.install(in: context, runtime: self)
+        WebCryptoModule.install(in: context, runtime: self)
 
         // Register require()-able modules
         registerModule(PathModule.self)
