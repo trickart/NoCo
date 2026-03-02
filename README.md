@@ -122,7 +122,7 @@ runtime.runEventLoop(timeout: .infinity)
 | Module | Description |
 |--------|-------------|
 | `console` | `log`, `warn`, `error`, `info`, `debug`, `dir`, `assert`, `time`/`timeEnd` |
-| `process` | `argv`, `env`, `cwd()`, `pid`, `platform`, `arch`, `hrtime()`, `nextTick()`, `stdout`, `exit()` |
+| `process` | `argv`, `env`, `cwd()`, `pid`, `platform`, `arch`, `version`, `versions`, `hrtime()`, `nextTick()`, `stdout`, `exit()` |
 | `timers` | `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval` |
 | `Buffer` | Node.js-compatible Buffer class (Uint8Array-based) |
 | `EventEmitter` | Event emitter class |
@@ -145,17 +145,21 @@ runtime.runEventLoop(timeout: .infinity)
 | `crypto.subtle` | Web Crypto API (AES, RSA, ECDSA, Ed25519, HMAC, HKDF, PBKDF2, SHA) |
 | `AbortController` / `AbortSignal` | Request cancellation API |
 | `DOMException` | Web standard exception |
+| `TextEncoder` / `TextDecoder` | Text encoding/decoding API |
+| `atob` / `btoa` | Base64 encoding/decoding |
+| `crypto.getRandomValues` | Cryptographically secure random values |
 | `structuredClone` | Deep clone objects |
 | `queueMicrotask` | Schedule microtask |
+| `caches` | Web Cache API (in-memory `CacheStorage`) |
 
 ### Require-able
 
 | Module | Key APIs |
 |--------|----------|
 | `path` | `join`, `resolve`, `basename`, `dirname`, `extname`, `relative`, `normalize`, `parse`, `format`, `isAbsolute`, `sep`, `delimiter` |
-| `fs` | `readFileSync`, `writeFileSync`, `existsSync`, `statSync`, `readdirSync`, `mkdirSync`, `unlinkSync`, `renameSync`, `appendFileSync`, and async variants |
+| `fs` | `readFileSync`, `writeFileSync`, `existsSync`, `statSync`, `readdirSync`, `mkdirSync`, `unlinkSync`, `renameSync`, `appendFileSync`, `copyFileSync`, `accessSync`, `chmodSync`, and async variants |
 | `fs/promises` | Promise-based versions of `fs` methods |
-| `crypto` | `createHash`, `createHmac`, `randomBytes`, `randomUUID` (SHA-1, SHA-256, SHA-512, MD5) |
+| `crypto` | `createHash`, `createHmac`, `randomBytes`, `randomUUID` (SHA-1, SHA-256, SHA-384, SHA-512, MD5) |
 | `stream` | `Readable`, `Writable`, `Transform`, `Duplex`, `PassThrough`, `Readable.toWeb()` |
 | `http` | `createServer`, `request`, `get`, `Server`, `IncomingMessage`, `ServerResponse` (server: SwiftNIO, client: URLSession) |
 | `http2` | `createServer`, `createSecureServer`, `connect`, `getDefaultSettings`, `constants` (server: SwiftNIO + NIOHTTP2) |
