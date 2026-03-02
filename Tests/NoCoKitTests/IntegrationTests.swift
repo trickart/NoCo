@@ -153,6 +153,87 @@ import JavaScriptCore
     #expect(!messages.contains("should not run"))
 }
 
+// MARK: - URL Property Setter Tests
+
+@Test func urlPathnameSetterUpdatesHref() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var u = new URL('http://example.com/foo');
+        u.pathname = '/bar';
+        u.href;
+    """)
+    #expect(result?.toString() == "http://example.com/bar")
+}
+
+@Test func urlSearchSetterUpdatesHref() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var u = new URL('http://example.com/path');
+        u.search = '?key=value';
+        u.href;
+    """)
+    #expect(result?.toString() == "http://example.com/path?key=value")
+}
+
+@Test func urlHashSetterUpdatesHref() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var u = new URL('http://example.com/path');
+        u.hash = '#section';
+        u.href;
+    """)
+    #expect(result?.toString() == "http://example.com/path#section")
+}
+
+@Test func urlHostSetterSplitsHostnameAndPort() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var u = new URL('http://example.com/path');
+        u.host = 'other.com:8080';
+        u.hostname + '|' + u.port + '|' + u.href;
+    """)
+    #expect(result?.toString() == "other.com|8080|http://other.com:8080/path")
+}
+
+@Test func urlHrefSetterReparsesAll() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var u = new URL('http://example.com/foo');
+        u.href = 'https://other.org:9090/bar?q=1#h';
+        u.protocol + '|' + u.hostname + '|' + u.port + '|' + u.pathname + '|' + u.search + '|' + u.hash;
+    """)
+    #expect(result?.toString() == "https:|other.org|9090|/bar|?q=1|#h")
+}
+
+@Test func urlToStringReflectsSetterChanges() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var u = new URL('http://example.com/foo');
+        u.pathname = '/updated';
+        u.toString();
+    """)
+    #expect(result?.toString() == "http://example.com/updated")
+}
+
+@Test func urlOriginIsReadonly() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var u = new URL('http://example.com:3000/path');
+        u.origin;
+    """)
+    #expect(result?.toString() == "http://example.com:3000")
+}
+
+@Test func urlSearchSetterSyncsSearchParams() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var u = new URL('http://example.com/path');
+        u.search = '?a=1&b=2';
+        u.searchParams.get('a') + '|' + u.searchParams.get('b');
+    """)
+    #expect(result?.toString() == "1|2")
+}
+
 @Test func integrationErrorPropagation() async throws {
     let runtime = NodeRuntime()
     var errorMessages: [String] = []

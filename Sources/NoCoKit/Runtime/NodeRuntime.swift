@@ -336,6 +336,15 @@ public final class NodeRuntime: @unchecked Sendable {
                 };
                 g.URLSearchParams = URLSearchParams;
 
+                function __urlHref(u) {
+                    var s = u.protocol + '//';
+                    if (u.username) { s += u.username; if (u.password) s += ':' + u.password; s += '@'; }
+                    s += u.hostname;
+                    if (u.port) s += ':' + u.port;
+                    s += u.pathname + u.search + u.hash;
+                    return s;
+                }
+
                 g.URL = function URL(input, base) {
                     if (!(this instanceof URL)) return new URL(input, base);
                     var href;
@@ -355,19 +364,76 @@ public final class NodeRuntime: @unchecked Sendable {
                         href = String(input);
                     }
                     var parsed = __urlParse(href);
-                    this.href = parsed.href || href;
-                    this.protocol = parsed.protocol || '';
-                    this.hostname = parsed.hostname || '';
-                    this.port = parsed.port || '';
-                    this.pathname = parsed.pathname || '/';
-                    this.search = parsed.search || '';
-                    this.hash = parsed.hash || '';
-                    this.host = parsed.host || '';
-                    this.origin = parsed.origin || '';
-                    this.username = parsed.username || '';
-                    this.password = parsed.password || '';
-                    this.searchParams = new URLSearchParams(this.search);
+                    this._ = {
+                        protocol: parsed.protocol || '',
+                        hostname: parsed.hostname || '',
+                        port: parsed.port || '',
+                        pathname: parsed.pathname || '/',
+                        search: parsed.search || '',
+                        hash: parsed.hash || '',
+                        username: parsed.username || '',
+                        password: parsed.password || ''
+                    };
+                    this.searchParams = new URLSearchParams(this._.search);
                 };
+
+                (function() {
+                    var simple = ['protocol','hostname','port','pathname','username','password'];
+                    for (var i = 0; i < simple.length; i++) {
+                        (function(prop) {
+                            Object.defineProperty(g.URL.prototype, prop, {
+                                get: function() { return this._[prop]; },
+                                set: function(v) { this._[prop] = v; },
+                                enumerable: true, configurable: true
+                            });
+                        })(simple[i]);
+                    }
+                    Object.defineProperty(g.URL.prototype, 'search', {
+                        get: function() { return this._.search; },
+                        set: function(v) {
+                            this._.search = v;
+                            this.searchParams = new URLSearchParams(v);
+                        },
+                        enumerable: true, configurable: true
+                    });
+                    Object.defineProperty(g.URL.prototype, 'hash', {
+                        get: function() { return this._.hash; },
+                        set: function(v) { this._.hash = v; },
+                        enumerable: true, configurable: true
+                    });
+                    Object.defineProperty(g.URL.prototype, 'host', {
+                        get: function() {
+                            return this._.port ? this._.hostname + ':' + this._.port : this._.hostname;
+                        },
+                        set: function(v) {
+                            var parts = v.split(':');
+                            this._.hostname = parts[0];
+                            this._.port = parts[1] || '';
+                        },
+                        enumerable: true, configurable: true
+                    });
+                    Object.defineProperty(g.URL.prototype, 'origin', {
+                        get: function() { return this._.protocol + '//' + this.host; },
+                        enumerable: true, configurable: true
+                    });
+                    Object.defineProperty(g.URL.prototype, 'href', {
+                        get: function() { return __urlHref(this._); },
+                        set: function(v) {
+                            var p = __urlParse(v);
+                            this._.protocol = p.protocol || '';
+                            this._.hostname = p.hostname || '';
+                            this._.port = p.port || '';
+                            this._.pathname = p.pathname || '/';
+                            this._.search = p.search || '';
+                            this._.hash = p.hash || '';
+                            this._.username = p.username || '';
+                            this._.password = p.password || '';
+                            this.searchParams = new URLSearchParams(this._.search);
+                        },
+                        enumerable: true, configurable: true
+                    });
+                })();
+
                 g.URL.prototype.toString = function() { return this.href; };
                 g.URL.prototype.toJSON = function() { return this.href; };
 
