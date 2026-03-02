@@ -228,7 +228,64 @@ public final class NodeRuntime: @unchecked Sendable {
             (function(g) {
                 if (typeof g.Blob === 'undefined') {
                     g.Blob = function Blob(parts, options) {
-                        this._parts = parts || [];
+                        options = options || {};
+                        this._type = (options.type || '').toLowerCase();
+                        var chunks = [];
+                        var totalSize = 0;
+                        if (parts) {
+                            for (var i = 0; i < parts.length; i++) {
+                                var part = parts[i];
+                                var bytes;
+                                if (typeof part === 'string') {
+                                    bytes = new Uint8Array(Buffer.from(part, 'utf8'));
+                                } else if (part instanceof ArrayBuffer) {
+                                    bytes = new Uint8Array(part);
+                                } else if (part instanceof Uint8Array) {
+                                    bytes = new Uint8Array(part);
+                                } else if (ArrayBuffer.isView(part)) {
+                                    bytes = new Uint8Array(part.buffer, part.byteOffset, part.byteLength);
+                                } else if (part instanceof Blob) {
+                                    bytes = part._data;
+                                } else {
+                                    bytes = new Uint8Array(Buffer.from(String(part), 'utf8'));
+                                }
+                                chunks.push(bytes);
+                                totalSize += bytes.byteLength;
+                            }
+                        }
+                        this._data = new Uint8Array(totalSize);
+                        var offset = 0;
+                        for (var j = 0; j < chunks.length; j++) {
+                            this._data.set(chunks[j], offset);
+                            offset += chunks[j].byteLength;
+                        }
+                    };
+                    Object.defineProperty(g.Blob.prototype, 'size', {
+                        get: function() { return this._data.byteLength; }
+                    });
+                    Object.defineProperty(g.Blob.prototype, 'type', {
+                        get: function() { return this._type; }
+                    });
+                    g.Blob.prototype.arrayBuffer = function() {
+                        var data = this._data;
+                        return Promise.resolve(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+                    };
+                    g.Blob.prototype.text = function() {
+                        var data = this._data;
+                        return Promise.resolve(Buffer.from(data).toString('utf8'));
+                    };
+                    g.Blob.prototype.slice = function(start, end, contentType) {
+                        var size = this._data.byteLength;
+                        start = start || 0;
+                        end = (end === undefined || end === null) ? size : end;
+                        if (start < 0) start = Math.max(size + start, 0);
+                        if (end < 0) end = Math.max(size + end, 0);
+                        start = Math.min(start, size);
+                        end = Math.min(end, size);
+                        var sliced = this._data.slice(start, end);
+                        var blob = new Blob([], { type: contentType || this._type });
+                        blob._data = sliced;
+                        return blob;
                     };
                 }
 
