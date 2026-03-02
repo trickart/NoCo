@@ -736,6 +736,197 @@ public struct WebAPIModule {
             g.DecompressionStream = DecompressionStream;
 
             // ============================================================
+            // File (extends Blob)
+            // ============================================================
+            function File(parts, name, options) {
+                Blob.call(this, parts, options);
+                this._name = String(name);
+                options = options || {};
+                this._lastModified = options.lastModified !== undefined
+                    ? Number(options.lastModified) : Date.now();
+            }
+            File.prototype = Object.create(Blob.prototype);
+            File.prototype.constructor = File;
+            Object.defineProperty(File.prototype, 'name', {
+                get: function() { return this._name; },
+                enumerable: true, configurable: true
+            });
+            Object.defineProperty(File.prototype, 'lastModified', {
+                get: function() { return this._lastModified; },
+                enumerable: true, configurable: true
+            });
+            g.File = File;
+
+            // ============================================================
+            // FormData
+            // ============================================================
+            function FormData() {
+                this._entries = [];
+            }
+            FormData.prototype.append = function(name, value, filename) {
+                name = String(name);
+                if (value instanceof Blob) {
+                    if (!(value instanceof File)) {
+                        value = new File([value], filename !== undefined ? String(filename) : 'blob', { type: value.type });
+                    } else if (filename !== undefined) {
+                        value = new File([value], String(filename), { type: value.type, lastModified: value.lastModified });
+                    }
+                } else {
+                    value = String(value);
+                }
+                this._entries.push([name, value]);
+            };
+            FormData.prototype.set = function(name, value, filename) {
+                name = String(name);
+                if (value instanceof Blob) {
+                    if (!(value instanceof File)) {
+                        value = new File([value], filename !== undefined ? String(filename) : 'blob', { type: value.type });
+                    } else if (filename !== undefined) {
+                        value = new File([value], String(filename), { type: value.type, lastModified: value.lastModified });
+                    }
+                } else {
+                    value = String(value);
+                }
+                var found = false;
+                var newEntries = [];
+                for (var i = 0; i < this._entries.length; i++) {
+                    if (this._entries[i][0] === name) {
+                        if (!found) {
+                            newEntries.push([name, value]);
+                            found = true;
+                        }
+                    } else {
+                        newEntries.push(this._entries[i]);
+                    }
+                }
+                if (!found) newEntries.push([name, value]);
+                this._entries = newEntries;
+            };
+            FormData.prototype.get = function(name) {
+                name = String(name);
+                for (var i = 0; i < this._entries.length; i++) {
+                    if (this._entries[i][0] === name) return this._entries[i][1];
+                }
+                return null;
+            };
+            FormData.prototype.getAll = function(name) {
+                name = String(name);
+                var result = [];
+                for (var i = 0; i < this._entries.length; i++) {
+                    if (this._entries[i][0] === name) result.push(this._entries[i][1]);
+                }
+                return result;
+            };
+            FormData.prototype.has = function(name) {
+                name = String(name);
+                for (var i = 0; i < this._entries.length; i++) {
+                    if (this._entries[i][0] === name) return true;
+                }
+                return false;
+            };
+            FormData.prototype['delete'] = function(name) {
+                name = String(name);
+                var newEntries = [];
+                for (var i = 0; i < this._entries.length; i++) {
+                    if (this._entries[i][0] !== name) newEntries.push(this._entries[i]);
+                }
+                this._entries = newEntries;
+            };
+            FormData.prototype.forEach = function(callback, thisArg) {
+                for (var i = 0; i < this._entries.length; i++) {
+                    callback.call(thisArg, this._entries[i][1], this._entries[i][0], this);
+                }
+            };
+            FormData.prototype.entries = function() {
+                var entries = this._entries;
+                var index = 0;
+                return {
+                    next: function() {
+                        if (index < entries.length) {
+                            var entry = entries[index++];
+                            return { value: [entry[0], entry[1]], done: false };
+                        }
+                        return { value: undefined, done: true };
+                    }
+                };
+            };
+            FormData.prototype.entries.prototype = undefined;
+            FormData.prototype.keys = function() {
+                var entries = this._entries;
+                var index = 0;
+                return {
+                    next: function() {
+                        if (index < entries.length) {
+                            return { value: entries[index++][0], done: false };
+                        }
+                        return { value: undefined, done: true };
+                    }
+                };
+            };
+            FormData.prototype.values = function() {
+                var entries = this._entries;
+                var index = 0;
+                return {
+                    next: function() {
+                        if (index < entries.length) {
+                            return { value: entries[index++][1], done: false };
+                        }
+                        return { value: undefined, done: true };
+                    }
+                };
+            };
+            if (typeof Symbol !== 'undefined' && Symbol.iterator) {
+                FormData.prototype[Symbol.iterator] = FormData.prototype.entries;
+            }
+            g.FormData = FormData;
+
+            // ── multipart/form-data parser ──
+            function __parseMultipart(bodyText, boundary) {
+                var fd = new FormData();
+                var delimiter = '--' + boundary;
+                var parts = bodyText.split(delimiter);
+                // skip first (preamble) and last (epilogue with --)
+                for (var i = 1; i < parts.length; i++) {
+                    var part = parts[i];
+                    if (part.indexOf('--') === 0) break; // closing delimiter
+                    // split headers from body at first CRLF CRLF
+                    var headerEnd = part.indexOf('\\r\\n\\r\\n');
+                    if (headerEnd === -1) continue;
+                    var headerSection = part.substring(0, headerEnd);
+                    var body = part.substring(headerEnd + 4);
+                    // remove trailing \r\n
+                    if (body.length >= 2 && body.substring(body.length - 2) === '\\r\\n') {
+                        body = body.substring(0, body.length - 2);
+                    }
+                    // parse headers
+                    var headers = {};
+                    var headerLines = headerSection.split('\\r\\n');
+                    for (var h = 0; h < headerLines.length; h++) {
+                        var line = headerLines[h];
+                        var colonIdx = line.indexOf(':');
+                        if (colonIdx !== -1) {
+                            var key = line.substring(0, colonIdx).trim().toLowerCase();
+                            var val = line.substring(colonIdx + 1).trim();
+                            headers[key] = val;
+                        }
+                    }
+                    var disposition = headers['content-disposition'] || '';
+                    var nameMatch = disposition.match(/name="([^"]*)"/);
+                    if (!nameMatch) continue;
+                    var fieldName = nameMatch[1];
+                    var filenameMatch = disposition.match(/filename="([^"]*)"/);
+                    if (filenameMatch) {
+                        var contentType = headers['content-type'] || 'application/octet-stream';
+                        var file = new File([body], filenameMatch[1], { type: contentType });
+                        fd.append(fieldName, file);
+                    } else {
+                        fd.append(fieldName, body);
+                    }
+                }
+                return fd;
+            }
+
+            // ============================================================
             // Request
             // ============================================================
             function Request(input, init) {
@@ -847,7 +1038,22 @@ public struct WebAPIModule {
                 return this.text().then(function(t) { return new Blob([t]); });
             };
             Request.prototype.formData = function() {
-                return Promise.reject(new TypeError('formData() is not supported'));
+                var self = this;
+                return this.text().then(function(bodyText) {
+                    var ct = self.headers.get('content-type') || '';
+                    if (ct.indexOf('application/x-www-form-urlencoded') !== -1) {
+                        var params = new URLSearchParams(bodyText.replace(/\\+/g, '%20'));
+                        var fd = new FormData();
+                        params.forEach(function(value, key) { fd.append(key, value); });
+                        return fd;
+                    }
+                    if (ct.indexOf('multipart/form-data') !== -1) {
+                        var m = ct.match(/boundary="?([^\\s";]+)"?/);
+                        if (!m) throw new TypeError('multipart/form-data missing boundary');
+                        return __parseMultipart(bodyText, m[1]);
+                    }
+                    throw new TypeError('Could not parse content as FormData');
+                });
             };
             g.Request = Request;
 
@@ -942,7 +1148,22 @@ public struct WebAPIModule {
                 return this.text().then(function(t) { return new Blob([t]); });
             };
             Response.prototype.formData = function() {
-                return Promise.reject(new TypeError('formData() is not supported'));
+                var self = this;
+                return this.text().then(function(bodyText) {
+                    var ct = self.headers.get('content-type') || '';
+                    if (ct.indexOf('application/x-www-form-urlencoded') !== -1) {
+                        var params = new URLSearchParams(bodyText.replace(/\\+/g, '%20'));
+                        var fd = new FormData();
+                        params.forEach(function(value, key) { fd.append(key, value); });
+                        return fd;
+                    }
+                    if (ct.indexOf('multipart/form-data') !== -1) {
+                        var m = ct.match(/boundary="?([^\\s";]+)"?/);
+                        if (!m) throw new TypeError('multipart/form-data missing boundary');
+                        return __parseMultipart(bodyText, m[1]);
+                    }
+                    throw new TypeError('Could not parse content as FormData');
+                });
             };
             Response.redirect = function(url, status) {
                 return new Response(null, {
