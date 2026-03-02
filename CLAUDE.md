@@ -1,8 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Build & Test Commands
+## Build & Test
 
 ```bash
 swift build                              # Build
@@ -15,74 +13,48 @@ swift run noco -e "console.log('hi')"    # Evaluate inline JS
 
 ## Architecture
 
-NoCo is a Node.js-compatible runtime built on Apple's JavaScriptCore framework, written in Swift. It implements CommonJS module resolution and a subset of Node.js built-in modules. Network servers use SwiftNIO (NIOHTTP1 + NIOTransportServices).
+NoCo is a Node.js-compatible runtime built on JavaScriptCore (Swift). CommonJS module resolution + SwiftNIO (NIOHTTP1 + NIOTransportServices) for networking.
 
-### Two Targets
+### Targets
 
-- **NoCoKit** — Library containing the runtime, module loader, event loop, and all built-in modules
-- **NoCo** — CLI executable using ArgumentParser that wraps NoCoKit
+- **NoCoKit** — Library: runtime, module loader, event loop, all built-in modules
+- **NoCo** — CLI executable (ArgumentParser)
 
 ### Core Runtime (`Sources/NoCoKit/Runtime/`)
 
-- **NodeRuntime** — Central class wrapping `JSContext`. All JS operations go through a serial `DispatchQueue` (`jsQueue`) for thread safety. Use `runtime.perform { context in ... }` to execute JS safely from any thread. Provides `URL` constructor and `URLSearchParams` via `__urlParse` bridge.
-- **ModuleLoader** — CommonJS `require()` implementation. Resolution order: builtin → cache → node_modules → filesystem. Wraps file modules in `(function(exports, require, module, __filename, __dirname) { ... })`. Caches by absolute path; handles circular requires by caching before execution.
-- **EventLoop** — Manages timers (setTimeout/setInterval), nextTick queue, and I/O handles. Has its own `ioLock` separate from jsQueue to avoid deadlocks. Loop: drain nextTick → drain callbacks → fire timers. Idle time is `DispatchSemaphore` wait (not polling); `enqueueCallback()` and `stop()` call `wakeup.signal()` for instant wakeup. Supports `timeout: .infinity` for long-running servers. `onUncaughtException` handler checks and clears JS exceptions after each callback in `drainCallbacks()`, preventing one failed callback from blocking subsequent ones.
-- **NodeModule** — Protocol for all modules: `static var moduleName: String` + `static func install(in:runtime:) -> JSValue`.
+- **NodeRuntime** — `JSContext` wrapper. All JS ops run on `jsQueue` (serial DispatchQueue). `runtime.perform { context in ... }` for thread-safe access.
+- **ModuleLoader** — CommonJS `require()`. Resolution: builtin → cache → node_modules → filesystem. Supports `node:` prefix and wildcard exports. Circular requires handled via cache-before-execute.
+- **EventLoop** — Timers, nextTick, I/O callbacks. `DispatchSemaphore` idle wait (no polling). `enqueueCallback()` for instant wakeup. `onUncaughtException` isolates failed callbacks.
+- **NodeModule** — Protocol: `static var moduleName` + `static func install(in:runtime:) -> JSValue`
 
-### Module Types
+### Built-in Modules (`Sources/NoCoKit/Modules/`)
 
-**Global modules** (installed directly on context): console, process, timers, Buffer, EventEmitter.
-
-**Require-able modules** (loaded via `require()`): path, fs, fs/promises, crypto, util, assert, events, string_decoder, stream, http, net, url, zlib.
-
-### Key Patterns
-
-- **Swift→JS closures**: Use `@convention(block)` + `unsafeBitCast` to `AnyObject`
-- **JS arguments**: `JSContext.currentArguments() as? [JSValue] ?? []`
-- **No exceptionHandler on JSContext**: Callers check `context.exception` after evaluation to preserve JS try/catch behavior. `NodeRuntime.checkException()` (public) logs and clears uncaught exceptions; also wired to `EventLoop.onUncaughtException` to isolate failures between callbacks.
-- **JSValue helpers** in `JSValueExtensions.swift`: `JSValue.object(from:in:)`, `.isNullOrUndefined`, `.callSafe()`
-- **Error creation**: `context.createSystemError("msg", code: "ENOENT", syscall: "open", path: "/foo")` for Node.js-style errors
+| Type | Modules |
+|------|---------|
+| Global | console, process, timers, Buffer, EventEmitter |
+| require() | path, fs, fs/promises, crypto, util, assert, events, string_decoder, stream, http, http2, net, url, querystring, os, zlib, async_hooks |
+| Web API | fetch, URL, URLSearchParams, Blob, File, FormData, ReadableStream, WritableStream, TransformStream, CompressionStream/DecompressionStream, crypto.subtle (WebCrypto) |
 
 ### Server Architecture (SwiftNIO)
 
-`http.createServer()` and `net.createServer()` use NIOTransportServices (Network.framework) for transport and NIOHTTP1 for HTTP codec.
+`http.createServer()` / `net.createServer()` use NIOTransportServices + NIOHTTP1. HTTP/2 via swift-nio-http2.
 
-```
-NIOTSListenerBootstrap (NIO thread)          NoCo EventLoop (jsQueue)
-  └─ ChannelPipeline                         ──────────────────────
-       ├─ HTTPRequestDecoder                  drainCallbacks() picks up
-       ├─ HTTPResponseEncoder                 JS request handlers
-       └─ HTTPBridgeHandler ──enqueueCallback──→ JS callback execution
-              ↑                                       │
-              └──── channel.write ────────────────────┘
-```
+NIO thread → `eventLoop.enqueueCallback` → `drainCallbacks()` executes JS on jsQueue. Responses sent back via `Channel.write`. Supports backpressure (`write()` + `drain` event).
 
-Key classes:
-- **NIOHTTPServer / NIOTCPServer** — Manages NIOTSEventLoopGroup and listener bootstrap
-- **HTTPBridgeHandler / TCPBridgeHandler** — NIO ChannelInboundHandler bridging to JS via `eventLoop.enqueueCallback`
-- **HTTPRequestState** — Accumulates request data and sends HTTP response via NIO channel
-- **AtomicCounter** — Thread-safe ID generation using DispatchQueue (avoids macOS 15+ Mutex requirement)
+### Key Patterns
+
+- **Swift→JS**: `@convention(block)` + `unsafeBitCast` to `AnyObject`
+- **JS arguments**: `JSContext.currentArguments() as? [JSValue] ?? []`
+- **Exceptions**: Manual `context.exception` check (no exceptionHandler, preserves try/catch)
+- **JSValue helpers** (`JSValueExtensions.swift`): `.isNullOrUndefined`, `.callSafe()`, `JSValue.object(from:in:)`
+- **Error creation**: `context.createSystemError("msg", code: "ENOENT", syscall: "open", path: "/foo")`
 
 ### Threading Rules
 
-- **jsQueue**: All JS operations must run on this serial queue. The event loop's `run()` blocks this queue.
-- **NIO event loop**: Runs on separate thread. Must NOT call `runtime.perform` (causes deadlock with jsQueue).
-- **Async callbacks from background threads**: Must use `runtime.eventLoop.enqueueCallback { ... }` instead of `runtime.perform { ... }`. The callback is picked up by `drainCallbacks()` on the next event loop iteration. `enqueueCallback` signals the `wakeup` semaphore, so the loop resumes immediately without polling delay. Access `runtime.context` directly inside the callback.
-- **NIO→JS bridge**: Store `Channel` directly (not `ChannelHandlerContext`) for cross-thread access safety.
+- **jsQueue**: All JS operations. EventLoop `run()` blocks this queue.
+- **NIO→JS**: Never call `runtime.perform` (deadlock). Use `eventLoop.enqueueCallback { ... }` and access `runtime.context` directly inside.
+- **Channel safety**: Store `Channel` (not `ChannelHandlerContext`) for cross-thread access.
 
 ### Test Patterns
 
-Tests use Swift Testing framework (`@Test`, `#expect()`). Common pattern: create a `NodeRuntime`, set `runtime.consoleHandler` to capture output, evaluate JS, assert on captured values. File I/O tests create temp files with UUID names and clean up with `defer`. Test fixtures live in `Tests/NoCoKitTests/Fixtures/`.
-
-For server tests, run the event loop on a background thread to avoid blocking Swift concurrency:
-```swift
-private func runEventLoopInBackground(_ runtime: NodeRuntime, timeout: TimeInterval) async {
-    await withCheckedContinuation { continuation in
-        DispatchQueue.global().async {
-            runtime.runEventLoop(timeout: timeout)
-            continuation.resume()
-        }
-    }
-}
-```
-Use `runtime.eventLoop.stop()` for cleanup instead of `server.close()` to avoid deadlocks in tests.
+Swift Testing (`@Test`, `#expect()`). Capture output via `runtime.consoleHandler`. Server tests run event loop on `DispatchQueue.global().async`. Cleanup with `runtime.eventLoop.stop()`. Fixtures in `Tests/NoCoKitTests/Fixtures/`.
