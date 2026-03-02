@@ -173,9 +173,19 @@ public struct FSModule: NodeModule {
             let ctime = attrs[.creationDate] as? Date ?? Date()
 
             stat.setValue(size, forProperty: "size")
-            stat.setValue(mtime.timeIntervalSince1970 * 1000, forProperty: "mtimeMs")
-            stat.setValue(ctime.timeIntervalSince1970 * 1000, forProperty: "ctimeMs")
-            stat.setValue(ctime.timeIntervalSince1970 * 1000, forProperty: "birthtimeMs")
+            let mtimeMs = floor(mtime.timeIntervalSince1970 * 1000)
+            let ctimeMs = floor(ctime.timeIntervalSince1970 * 1000)
+            stat.setValue(mtimeMs, forProperty: "mtimeMs")
+            stat.setValue(ctimeMs, forProperty: "ctimeMs")
+            stat.setValue(ctimeMs, forProperty: "birthtimeMs")
+
+            let dateConstructor = context.objectForKeyedSubscript("Date")!
+            let mtimeDate = dateConstructor.construct(withArguments: [mtimeMs])!
+            let ctimeDate = dateConstructor.construct(withArguments: [ctimeMs])!
+            let birthtimeDate = dateConstructor.construct(withArguments: [ctimeMs])!
+            stat.setValue(mtimeDate, forProperty: "mtime")
+            stat.setValue(ctimeDate, forProperty: "ctime")
+            stat.setValue(birthtimeDate, forProperty: "birthtime")
 
             let isDir = isDirFlag.boolValue
             let isFile = !isDir
@@ -278,6 +288,109 @@ public struct FSModule: NodeModule {
             }
         }
         fs.setValue(unsafeBitCast(appendFileSync, to: AnyObject.self), forProperty: "appendFileSync")
+
+        // fs.createReadStream(path, options?)
+        let createReadStream: @convention(block) (String, JSValue) -> JSValue = { path, options in
+            let highWaterMark: Int
+            var startVal: UInt64 = 0
+            var endVal: Int64 = -1 // -1 means read to EOF
+
+            if options.isObject && !options.isUndefined {
+                if let hwm = options.forProperty("highWaterMark"), !hwm.isUndefined {
+                    highWaterMark = Int(hwm.toInt32())
+                } else {
+                    highWaterMark = 65536
+                }
+                if let s = options.forProperty("start"), !s.isUndefined {
+                    startVal = UInt64(s.toInt32())
+                }
+                if let e = options.forProperty("end"), !e.isUndefined {
+                    endVal = Int64(e.toInt32())
+                }
+            } else {
+                highWaterMark = 65536
+            }
+
+            let start = startVal
+            let end = endVal
+
+            // Create a Readable instance
+            let streamModule = context.objectForKeyedSubscript("require")!.call(withArguments: ["stream"])!
+            let readableCtor = streamModule.forProperty("Readable")!
+            let readable = readableCtor.construct(withArguments: [] as [Any])!
+
+            // Validate path
+            let resolved = (path as NSString).standardizingPath
+            if let root = config.rootDirectory {
+                let rootResolved = (root as NSString).standardizingPath
+                if !resolved.hasPrefix(rootResolved) {
+                    // Emit error on next tick
+                    let errMsg = "Access denied: '\(path)' is outside sandbox"
+                    runtime.eventLoop.enqueueCallback {
+                        let ctx = runtime.context
+                        let err = ctx.createSystemError(errMsg, code: "EACCES", syscall: "open", path: path)
+                        readable.invokeMethod("emit", withArguments: ["error", err as Any])
+                    }
+                    return readable
+                }
+            }
+
+            readable.setValue(resolved, forProperty: "path")
+
+            // Read file in background
+            DispatchQueue.global().async {
+                guard let handle = FileHandle(forReadingAtPath: resolved) else {
+                    runtime.eventLoop.enqueueCallback {
+                        let ctx = runtime.context
+                        let err = ctx.createSystemError(
+                            "ENOENT: no such file or directory, open '\(path)'",
+                            code: "ENOENT", syscall: "open", path: path
+                        )
+                        readable.invokeMethod("emit", withArguments: ["error", err as Any])
+                    }
+                    return
+                }
+
+                handle.seek(toFileOffset: start)
+                var totalRead: Int64 = Int64(start)
+                let endByte = end // inclusive
+
+                while true {
+                    var bytesToRead = highWaterMark
+                    if endByte >= 0 {
+                        let remaining = endByte - totalRead + 1
+                        if remaining <= 0 { break }
+                        bytesToRead = min(bytesToRead, Int(remaining))
+                    }
+
+                    let data = handle.readData(ofLength: bytesToRead)
+                    if data.isEmpty { break }
+
+                    totalRead += Int64(data.count)
+                    let bytes = [UInt8](data)
+
+                    runtime.eventLoop.enqueueCallback {
+                        let ctx = runtime.context
+                        let bufferCtor = ctx.objectForKeyedSubscript("Buffer")!
+                        let fromFn = bufferCtor.objectForKeyedSubscript("from")!
+                        let arr = bytes.map { Int($0) }
+                        let buf = fromFn.call(withArguments: [arr])!
+                        readable.invokeMethod("emit", withArguments: ["data", buf])
+                    }
+
+                    if endByte >= 0 && totalRead > endByte { break }
+                }
+
+                handle.closeFile()
+
+                runtime.eventLoop.enqueueCallback {
+                    readable.invokeMethod("emit", withArguments: ["end"])
+                }
+            }
+
+            return readable
+        }
+        fs.setValue(unsafeBitCast(createReadStream, to: AnyObject.self), forProperty: "createReadStream")
 
         // Async versions using GCD
         installAsyncVersions(fs: fs, context: context, runtime: runtime, config: config)

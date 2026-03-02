@@ -234,3 +234,219 @@ func fsReadFileAsyncDuringEventLoop() async throws {
 
     #expect(messages.contains("result:async hello"))
 }
+
+// MARK: - stat Date Properties
+
+@Test func fsStatSyncDateProperties() async throws {
+    let runtime = NodeRuntime()
+    let tmpPath = NSTemporaryDirectory() + "noco_test_stat_date_\(UUID().uuidString).txt"
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    FileManager.default.createFile(atPath: tmpPath, contents: "test".data(using: .utf8))
+
+    let result = runtime.evaluate("""
+        var fs = require('fs');
+        var stat = fs.statSync('\(tmpPath)');
+        var isDate = (stat.mtime instanceof Date) && (stat.ctime instanceof Date) && (stat.birthtime instanceof Date);
+        var canCall = typeof stat.mtime.toUTCString === 'function';
+        isDate + ':' + canCall;
+    """)
+    #expect(result?.toString() == "true:true")
+}
+
+@Test func fsStatSyncDateConsistency() async throws {
+    let runtime = NodeRuntime()
+    let tmpPath = NSTemporaryDirectory() + "noco_test_stat_date_cons_\(UUID().uuidString).txt"
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    FileManager.default.createFile(atPath: tmpPath, contents: "test".data(using: .utf8))
+
+    let result = runtime.evaluate("""
+        var fs = require('fs');
+        var stat = fs.statSync('\(tmpPath)');
+        (stat.mtime.getTime() === stat.mtimeMs) + ':' + (stat.birthtime.getTime() === stat.birthtimeMs);
+    """)
+    #expect(result?.toString() == "true:true")
+}
+
+// MARK: - createReadStream Tests
+
+@Test(.timeLimit(.minutes(1)))
+func fsCreateReadStreamBasic() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_crs_basic_\(UUID().uuidString).txt"
+    let content = "Hello, createReadStream!"
+    FileManager.default.createFile(atPath: tmpPath, contents: content.data(using: .utf8))
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 10000);
+        var chunks = [];
+        var stream = fs.createReadStream('\(tmpPath)');
+        stream.on('data', function(chunk) {
+            chunks.push(chunk);
+        });
+        stream.on('end', function() {
+            clearTimeout(keepAlive);
+            var result = Buffer.concat(chunks).toString('utf8');
+            console.log('data:' + result);
+        });
+        stream.on('error', function(err) {
+            clearTimeout(keepAlive);
+            console.log('error:' + err.code);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if messages.contains(where: { $0.hasPrefix("data:") || $0.hasPrefix("error:") }) { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("data:\(content)"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fsCreateReadStreamRange() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_crs_range_\(UUID().uuidString).txt"
+    FileManager.default.createFile(atPath: tmpPath, contents: "0123456789abcdef".data(using: .utf8))
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 10000);
+        var chunks = [];
+        var stream = fs.createReadStream('\(tmpPath)', { start: 4, end: 9 });
+        stream.on('data', function(chunk) {
+            chunks.push(chunk);
+        });
+        stream.on('end', function() {
+            clearTimeout(keepAlive);
+            var result = Buffer.concat(chunks).toString('utf8');
+            console.log('range:' + result);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if messages.contains(where: { $0.hasPrefix("range:") }) { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("range:456789"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fsCreateReadStreamNotFound() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 10000);
+        var stream = fs.createReadStream('/nonexistent_file_crs_\(UUID().uuidString).txt');
+        stream.on('error', function(err) {
+            clearTimeout(keepAlive);
+            console.log('err:' + err.code);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if messages.contains(where: { $0.hasPrefix("err:") }) { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("err:ENOENT"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fsCreateReadStreamWithReadableStream() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_crs_rs_\(UUID().uuidString).txt"
+    let content = "serve-static-test-content"
+    FileManager.default.createFile(atPath: tmpPath, contents: content.data(using: .utf8))
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 10000);
+        var nodeStream = fs.createReadStream('\(tmpPath)');
+
+        // Simulate serve-static's createStreamBody pattern
+        var chunks = [];
+        var rs = new ReadableStream({
+            start: function(controller) {
+                nodeStream.on('data', function(chunk) {
+                    controller.enqueue(chunk);
+                });
+                nodeStream.on('end', function() {
+                    controller.close();
+                });
+                nodeStream.on('error', function(err) {
+                    controller.error(err);
+                });
+            }
+        });
+
+        // Read from the ReadableStream using the reader
+        var reader = rs.getReader();
+        function readNext() {
+            reader.read().then(function(result) {
+                if (result.done) {
+                    clearTimeout(keepAlive);
+                    var buf = Buffer.concat(chunks);
+                    console.log('rs:' + buf.toString('utf8'));
+                } else {
+                    chunks.push(Buffer.from(result.value));
+                    readNext();
+                }
+            });
+        }
+        readNext();
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if messages.contains(where: { $0.hasPrefix("rs:") }) { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("rs:\(content)"))
+}
