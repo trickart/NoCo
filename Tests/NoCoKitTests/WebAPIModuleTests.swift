@@ -714,10 +714,251 @@ import JavaScriptCore
             typeof ReadableStream === 'function',
             typeof WritableStream === 'function',
             typeof TransformStream === 'function',
+            typeof CompressionStream === 'function',
+            typeof DecompressionStream === 'function',
             typeof DOMException === 'function',
             typeof queueMicrotask === 'function',
             typeof structuredClone === 'function'
         ].every(function(v) { return v === true; });
     """)
     #expect(result?.toBool() == true)
+}
+
+// MARK: - CompressionStream / DecompressionStream Tests
+
+@Test func compressionStreamGzipBasic() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var rs = new ReadableStream({
+            start: function(c) {
+                c.enqueue(new TextEncoder().encode('Hello World'));
+                c.close();
+            }
+        });
+        var cs = new CompressionStream('gzip');
+        var compressed = rs.pipeThrough(cs);
+        var reader = compressed.getReader();
+        var chunks = [];
+        function pump() {
+            return reader.read().then(function(r) {
+                if (r.done) {
+                    var first = chunks[0];
+                    console.log('magic:' + (first[0] === 0x1f && first[1] === 0x8b));
+                    console.log('hasData:' + (first.length > 0));
+                    return;
+                }
+                chunks.push(r.value);
+                return pump();
+            });
+        }
+        pump();
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("magic:true"))
+    #expect(messages.contains("hasData:true"))
+}
+
+@Test func compressionStreamDeflateBasic() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var rs = new ReadableStream({
+            start: function(c) {
+                c.enqueue(new TextEncoder().encode('Hello World'));
+                c.close();
+            }
+        });
+        var cs = new CompressionStream('deflate');
+        var compressed = rs.pipeThrough(cs);
+        var reader = compressed.getReader();
+        var chunks = [];
+        function pump() {
+            return reader.read().then(function(r) {
+                if (r.done) {
+                    console.log('hasData:' + (chunks.length > 0 && chunks[0].length > 0));
+                    return;
+                }
+                chunks.push(r.value);
+                return pump();
+            });
+        }
+        pump();
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("hasData:true"))
+}
+
+@Test func decompressionStreamGzipRoundtrip() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var original = 'Hello, CompressionStream roundtrip test!';
+        var rs = new ReadableStream({
+            start: function(c) {
+                c.enqueue(new TextEncoder().encode(original));
+                c.close();
+            }
+        });
+        var compressed = rs.pipeThrough(new CompressionStream('gzip'));
+        var decompressed = compressed.pipeThrough(new DecompressionStream('gzip'));
+        var reader = decompressed.getReader();
+        var chunks = [];
+        function pump() {
+            return reader.read().then(function(r) {
+                if (r.done) {
+                    var totalLen = 0;
+                    for (var i = 0; i < chunks.length; i++) totalLen += chunks[i].length;
+                    var combined = new Uint8Array(totalLen);
+                    var off = 0;
+                    for (var i = 0; i < chunks.length; i++) {
+                        combined.set(chunks[i], off);
+                        off += chunks[i].length;
+                    }
+                    var result = new TextDecoder().decode(combined);
+                    console.log('match:' + (result === original));
+                    return;
+                }
+                chunks.push(r.value);
+                return pump();
+            });
+        }
+        pump();
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("match:true"))
+}
+
+@Test func decompressionStreamDeflateRoundtrip() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var original = 'Deflate roundtrip test data 12345';
+        var rs = new ReadableStream({
+            start: function(c) {
+                c.enqueue(new TextEncoder().encode(original));
+                c.close();
+            }
+        });
+        var compressed = rs.pipeThrough(new CompressionStream('deflate'));
+        var decompressed = compressed.pipeThrough(new DecompressionStream('deflate'));
+        var reader = decompressed.getReader();
+        var chunks = [];
+        function pump() {
+            return reader.read().then(function(r) {
+                if (r.done) {
+                    var totalLen = 0;
+                    for (var i = 0; i < chunks.length; i++) totalLen += chunks[i].length;
+                    var combined = new Uint8Array(totalLen);
+                    var off = 0;
+                    for (var i = 0; i < chunks.length; i++) {
+                        combined.set(chunks[i], off);
+                        off += chunks[i].length;
+                    }
+                    var result = new TextDecoder().decode(combined);
+                    console.log('match:' + (result === original));
+                    return;
+                }
+                chunks.push(r.value);
+                return pump();
+            });
+        }
+        pump();
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("match:true"))
+}
+
+@Test func compressionStreamInvalidFormat() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var threw = false;
+        try { new CompressionStream('brotli'); } catch(e) {
+            threw = e instanceof TypeError;
+        }
+        threw;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func compressionStreamPipeThrough() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var rs = new ReadableStream({
+            start: function(c) {
+                c.enqueue(new TextEncoder().encode('pipeThrough test'));
+                c.close();
+            }
+        });
+        var result = rs.pipeThrough(new CompressionStream('gzip'));
+        console.log('isReadable:' + (result instanceof ReadableStream));
+        var reader = result.getReader();
+        reader.read().then(function(r) {
+            console.log('hasChunk:' + (!r.done && r.value.length > 0));
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("isReadable:true"))
+    #expect(messages.contains("hasChunk:true"))
+}
+
+@Test func compressionStreamHonoPattern() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var originalBody = 'Hello World! This is a test body for compression.';
+        var originalResponse = new Response(originalBody, {
+            status: 200,
+            headers: { 'Content-Type': 'text/plain' }
+        });
+        var compressedStream = originalResponse.body.pipeThrough(new CompressionStream('gzip'));
+        var compressedResponse = new Response(compressedStream, {
+            status: originalResponse.status,
+            headers: originalResponse.headers
+        });
+        var reader = compressedResponse.body.getReader();
+        var chunks = [];
+        function pump() {
+            return reader.read().then(function(r) {
+                if (r.done) {
+                    var totalLen = 0;
+                    for (var i = 0; i < chunks.length; i++) totalLen += chunks[i].length;
+                    var combined = new Uint8Array(totalLen);
+                    var off = 0;
+                    for (var i = 0; i < chunks.length; i++) {
+                        combined.set(chunks[i], off);
+                        off += chunks[i].length;
+                    }
+                    console.log('gzipMagic:' + (combined[0] === 0x1f && combined[1] === 0x8b));
+                    console.log('compressed:' + (combined.length > 0));
+                    return;
+                }
+                chunks.push(r.value);
+                return pump();
+            });
+        }
+        pump();
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("gzipMagic:true"))
+    #expect(messages.contains("compressed:true"))
 }
