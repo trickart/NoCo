@@ -443,6 +443,263 @@ import JavaScriptCore
     #expect(messages.contains("body:{\"cors\":true}"))
 }
 
+// MARK: - WritableStream Tests
+
+@Test func writableStreamBasic() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var chunks = [];
+        var ws = new WritableStream({
+            write: function(chunk) { chunks.push(chunk); },
+            close: function() { console.log('chunks:' + chunks.join(',')); }
+        });
+        var writer = ws.getWriter();
+        writer.write('a').then(function() {
+            return writer.write('b');
+        }).then(function() {
+            return writer.close();
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("chunks:a,b"))
+}
+
+@Test func writableStreamLocked() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var ws = new WritableStream();
+        var before = ws.locked;
+        ws.getWriter();
+        var after = ws.locked;
+        before === false && after === true;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func writableStreamAlreadyLocked() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var ws = new WritableStream();
+        ws.getWriter();
+        var threw = false;
+        try { ws.getWriter(); } catch(e) { threw = true; }
+        threw;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func writableStreamReleaseLock() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var ws = new WritableStream();
+        var w1 = ws.getWriter();
+        w1.releaseLock();
+        var w2 = ws.getWriter();
+        ws.locked === true;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+// MARK: - TransformStream Tests
+
+@Test func transformStreamIdentity() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var ts = new TransformStream();
+        var writer = ts.writable.getWriter();
+        var reader = ts.readable.getReader();
+
+        // Write first, then read sequentially
+        writer.write('hello');
+        writer.write('world');
+
+        reader.read().then(function(r) {
+            console.log('v1:' + r.value);
+            return reader.read();
+        }).then(function(r) {
+            console.log('v2:' + r.value);
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("v1:hello"))
+    #expect(messages.contains("v2:world"))
+}
+
+@Test func transformStreamCustomTransform() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var ts = new TransformStream({
+            transform: function(chunk, controller) {
+                controller.enqueue(chunk.toUpperCase());
+            }
+        });
+        var writer = ts.writable.getWriter();
+        var reader = ts.readable.getReader();
+
+        reader.read().then(function(r) { console.log('upper:' + r.value); });
+        writer.write('hello');
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("upper:HELLO"))
+}
+
+@Test func transformStreamClosePropagate() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var ts = new TransformStream();
+        var writer = ts.writable.getWriter();
+        var reader = ts.readable.getReader();
+
+        writer.write('data');
+        writer.close();
+
+        reader.read().then(function(r) { console.log('data:' + r.value); });
+        reader.read().then(function(r) { console.log('done:' + r.done); });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("data:data"))
+    #expect(messages.contains("done:true"))
+}
+
+// MARK: - pipeTo / pipeThrough Tests
+
+@Test func readableStreamPipeTo() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var chunks = [];
+        var rs = new ReadableStream({
+            start: function(c) {
+                c.enqueue('a');
+                c.enqueue('b');
+                c.close();
+            }
+        });
+        var ws = new WritableStream({
+            write: function(chunk) { chunks.push(chunk); },
+            close: function() { console.log('piped:' + chunks.join(',')); }
+        });
+        rs.pipeTo(ws);
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("piped:a,b"))
+}
+
+@Test func readableStreamPipeToPreventClose() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var chunks = [];
+        var closeCalled = false;
+        var rs = new ReadableStream({
+            start: function(c) {
+                c.enqueue('x');
+                c.close();
+            }
+        });
+        var ws = new WritableStream({
+            write: function(chunk) { chunks.push(chunk); },
+            close: function() { closeCalled = true; }
+        });
+        rs.pipeTo(ws, { preventClose: true }).then(function() {
+            console.log('chunks:' + chunks.join(','));
+            console.log('closed:' + closeCalled);
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("chunks:x"))
+    #expect(messages.contains("closed:false"))
+}
+
+@Test func readableStreamPipeThrough() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var rs = new ReadableStream({
+            start: function(c) {
+                c.enqueue('hello');
+                c.close();
+            }
+        });
+        var ts = new TransformStream({
+            transform: function(chunk, ctrl) {
+                ctrl.enqueue(chunk + '!');
+            }
+        });
+        var result = rs.pipeThrough(ts);
+        var reader = result.getReader();
+        reader.read().then(function(r) { console.log('piped:' + r.value); });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("piped:hello!"))
+}
+
+@Test func honoStreamingApiPattern() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        // Simulate Hono's StreamingApi pattern
+        var ts = new TransformStream();
+        var readable = ts.readable;
+        var writable = ts.writable;
+        var writer = writable.getWriter();
+
+        // Read side
+        var reader = readable.getReader();
+        var chunks = [];
+        function pump() {
+            return reader.read().then(function(r) {
+                if (r.done) {
+                    console.log('body:' + chunks.join(''));
+                    return;
+                }
+                chunks.push(r.value);
+                return pump();
+            });
+        }
+        pump();
+
+        // Write side (simulating stream helper)
+        writer.write('Hello').then(function() {
+            return writer.write(' ');
+        }).then(function() {
+            return writer.write('World');
+        }).then(function() {
+            return writer.close();
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("body:Hello World"))
+}
+
 // MARK: - Global Web APIs Existence
 
 @Test func globalWebAPIs() async throws {
@@ -455,6 +712,8 @@ import JavaScriptCore
             typeof AbortController === 'function',
             typeof AbortSignal === 'function',
             typeof ReadableStream === 'function',
+            typeof WritableStream === 'function',
+            typeof TransformStream === 'function',
             typeof DOMException === 'function',
             typeof queueMicrotask === 'function',
             typeof structuredClone === 'function'
