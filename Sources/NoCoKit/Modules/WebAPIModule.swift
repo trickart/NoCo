@@ -1,4 +1,6 @@
+import Foundation
 import JavaScriptCore
+import Compression
 
 /// Installs Web Platform APIs as globals: Headers, Request, Response,
 /// AbortController, AbortSignal, ReadableStream.
@@ -6,6 +8,27 @@ import JavaScriptCore
 /// Node.js HTTP and the Fetch API.
 public struct WebAPIModule {
     public static func install(in context: JSContext, runtime: NodeRuntime) {
+        // ── Compression bridge functions ──
+        let compressBlock: @convention(block) (JSValue, String) -> JSValue = { dataValue, format in
+            let ctx = JSContext.current()!
+            guard let bytes = extractUint8Array(dataValue),
+                  let compressed = performCompress(bytes, format: format) else {
+                return JSValue(nullIn: ctx)
+            }
+            return makeUint8Array(compressed, in: ctx)
+        }
+        context.setObject(compressBlock, forKeyedSubscript: "__compress" as NSString)
+
+        let decompressBlock: @convention(block) (JSValue, String) -> JSValue = { dataValue, format in
+            let ctx = JSContext.current()!
+            guard let bytes = extractUint8Array(dataValue),
+                  let decompressed = performDecompress(bytes, format: format) else {
+                return JSValue(nullIn: ctx)
+            }
+            return makeUint8Array(decompressed, in: ctx)
+        }
+        context.setObject(decompressBlock, forKeyedSubscript: "__decompress" as NSString)
+
         let script = """
         (function(g) {
             // ============================================================
@@ -520,6 +543,67 @@ public struct WebAPIModule {
             g.TransformStream = TransformStream;
 
             // ============================================================
+            // CompressionStream / DecompressionStream
+            // ============================================================
+            function CompressionStream(format) {
+                if (format !== 'gzip' && format !== 'deflate' && format !== 'deflate-raw') {
+                    throw new TypeError("Unsupported compression format: '" + format + "'");
+                }
+                var chunks = [];
+                var totalLength = 0;
+                TransformStream.call(this, {
+                    transform: function(chunk, controller) {
+                        var bytes = (chunk instanceof Uint8Array) ? chunk
+                                  : new TextEncoder().encode(String(chunk));
+                        chunks.push(bytes);
+                        totalLength += bytes.length;
+                    },
+                    flush: function(controller) {
+                        var combined = new Uint8Array(totalLength);
+                        var offset = 0;
+                        for (var i = 0; i < chunks.length; i++) {
+                            combined.set(chunks[i], offset);
+                            offset += chunks[i].length;
+                        }
+                        var compressed = __compress(combined, format);
+                        if (compressed) controller.enqueue(compressed);
+                    }
+                });
+            }
+            CompressionStream.prototype = Object.create(TransformStream.prototype);
+            CompressionStream.prototype.constructor = CompressionStream;
+            g.CompressionStream = CompressionStream;
+
+            function DecompressionStream(format) {
+                if (format !== 'gzip' && format !== 'deflate' && format !== 'deflate-raw') {
+                    throw new TypeError("Unsupported compression format: '" + format + "'");
+                }
+                var chunks = [];
+                var totalLength = 0;
+                TransformStream.call(this, {
+                    transform: function(chunk, controller) {
+                        var bytes = (chunk instanceof Uint8Array) ? chunk
+                                  : new Uint8Array(chunk);
+                        chunks.push(bytes);
+                        totalLength += bytes.length;
+                    },
+                    flush: function(controller) {
+                        var combined = new Uint8Array(totalLength);
+                        var offset = 0;
+                        for (var i = 0; i < chunks.length; i++) {
+                            combined.set(chunks[i], offset);
+                            offset += chunks[i].length;
+                        }
+                        var decompressed = __decompress(combined, format);
+                        if (decompressed) controller.enqueue(decompressed);
+                    }
+                });
+            }
+            DecompressionStream.prototype = Object.create(TransformStream.prototype);
+            DecompressionStream.prototype.constructor = DecompressionStream;
+            g.DecompressionStream = DecompressionStream;
+
+            // ============================================================
             // Request
             // ============================================================
             function Request(input, init) {
@@ -743,5 +827,141 @@ public struct WebAPIModule {
         })(this);
         """
         context.evaluateScript(script)
+    }
+
+    // MARK: - Compression Helpers
+
+    private static func extractUint8Array(_ value: JSValue) -> [UInt8]? {
+        guard let length = value.forProperty("length")?.toInt32(), length >= 0 else {
+            return nil
+        }
+        if length == 0 { return [] }
+        var bytes = [UInt8](repeating: 0, count: Int(length))
+        for i in 0..<Int(length) {
+            bytes[i] = UInt8(value.atIndex(i).toInt32() & 0xFF)
+        }
+        return bytes
+    }
+
+    private static func makeUint8Array(_ bytes: [UInt8], in ctx: JSContext) -> JSValue {
+        let ctor = ctx.objectForKeyedSubscript("Uint8Array" as NSString)!
+        let jsArray = JSValue(newArrayIn: ctx)!
+        for (i, b) in bytes.enumerated() {
+            jsArray.setValue(b, at: i)
+        }
+        return ctor.construct(withArguments: [jsArray])!
+    }
+
+    private static func crc32(_ data: [UInt8]) -> UInt32 {
+        var crc: UInt32 = 0xFFFFFFFF
+        for byte in data {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 {
+                if crc & 1 != 0 {
+                    crc = (crc >> 1) ^ 0xEDB88320
+                } else {
+                    crc >>= 1
+                }
+            }
+        }
+        return crc ^ 0xFFFFFFFF
+    }
+
+    private static func performCompress(_ input: [UInt8], format: String) -> [UInt8]? {
+        if input.isEmpty {
+            // Empty data: return empty compressed result appropriate for format
+            if format == "gzip" {
+                // Minimal valid gzip for empty content
+                let compressed = performCompress([UInt8](), format: "deflate")
+                guard let raw = compressed else { return nil }
+                var result: [UInt8] = [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03]
+                result.append(contentsOf: raw)
+                let crc = crc32([])
+                result.append(UInt8(crc & 0xFF))
+                result.append(UInt8((crc >> 8) & 0xFF))
+                result.append(UInt8((crc >> 16) & 0xFF))
+                result.append(UInt8((crc >> 24) & 0xFF))
+                result.append(contentsOf: [0x00, 0x00, 0x00, 0x00]) // size = 0
+                return result
+            }
+            // For deflate/deflate-raw, return minimal raw deflate for empty
+            let data = Data([UInt8]())
+            guard let c = try? (data as NSData).compressed(using: .zlib) as Data else {
+                return [0x03, 0x00] // minimal empty deflate block
+            }
+            return Array(c)
+        }
+
+        let data = Data(input)
+        guard let compressed = try? (data as NSData).compressed(using: .zlib) as Data else {
+            return nil
+        }
+        let rawDeflate = Array(compressed)
+
+        if format == "gzip" {
+            var result: [UInt8] = [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03]
+            result.append(contentsOf: rawDeflate)
+            let crc = crc32(input)
+            result.append(UInt8(crc & 0xFF))
+            result.append(UInt8((crc >> 8) & 0xFF))
+            result.append(UInt8((crc >> 16) & 0xFF))
+            result.append(UInt8((crc >> 24) & 0xFF))
+            let size = UInt32(truncatingIfNeeded: input.count)
+            result.append(UInt8(size & 0xFF))
+            result.append(UInt8((size >> 8) & 0xFF))
+            result.append(UInt8((size >> 16) & 0xFF))
+            result.append(UInt8((size >> 24) & 0xFF))
+            return result
+        }
+
+        // deflate / deflate-raw: raw deflate
+        return rawDeflate
+    }
+
+    private static func performDecompress(_ input: [UInt8], format: String) -> [UInt8]? {
+        var rawDeflate: [UInt8]
+
+        if format == "gzip" {
+            guard input.count >= 18 else { return nil }
+            guard input[0] == 0x1f && input[1] == 0x8b else { return nil }
+            let flg = input[3]
+            var offset = 10
+
+            // FEXTRA
+            if flg & 0x04 != 0 {
+                guard offset + 2 <= input.count else { return nil }
+                let xlen = Int(input[offset]) | (Int(input[offset + 1]) << 8)
+                offset += 2 + xlen
+            }
+            // FNAME
+            if flg & 0x08 != 0 {
+                while offset < input.count && input[offset] != 0 { offset += 1 }
+                offset += 1
+            }
+            // FCOMMENT
+            if flg & 0x10 != 0 {
+                while offset < input.count && input[offset] != 0 { offset += 1 }
+                offset += 1
+            }
+            // FHCRC
+            if flg & 0x02 != 0 {
+                offset += 2
+            }
+
+            guard offset <= input.count - 8 else { return nil }
+            rawDeflate = Array(input[offset..<(input.count - 8)])
+        } else {
+            rawDeflate = input
+        }
+
+        if rawDeflate.isEmpty {
+            return []
+        }
+
+        let data = Data(rawDeflate)
+        guard let decompressed = try? (data as NSData).decompressed(using: .zlib) as Data else {
+            return nil
+        }
+        return Array(decompressed)
     }
 }
