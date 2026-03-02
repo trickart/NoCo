@@ -205,6 +205,120 @@ func httpServerRawHeaders() async throws {
     await eventLoopTask.value
 }
 
+// MARK: - IncomingMessage Readable Tests
+
+@Test func httpIncomingMessageIsReadable() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var stream = require('stream');
+        var server = http.createServer(function(req, res) {});
+        var captured;
+        server.on('request', function(req, res) { captured = req; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        captured instanceof stream.Readable;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpIncomingMessageHasReadableMethods() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var captured;
+        server.on('request', function(req, res) { captured = req; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        [
+            typeof captured.push === 'function',
+            typeof captured.read === 'function',
+            typeof captured.pipe === 'function',
+            typeof captured.resume === 'function',
+            typeof captured.pause === 'function',
+            typeof captured.destroy === 'function'
+        ].every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpReadableToWeb() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var stream = require('stream');
+        var Readable = stream.Readable;
+        var server = http.createServer(function(req, res) {});
+        var webStream;
+        server.on('request', function(req, res) {
+            webStream = Readable.toWeb(req);
+        });
+        server._handleRequest(1, 'POST', '/api', {}, '1.1', 'hello', []);
+        webStream instanceof ReadableStream;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpStreamingBodyChunks() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var chunks = [];
+        var ended = false;
+        server.on('request', function(req, res) {
+            req.on('data', function(chunk) {
+                chunks.push(typeof chunk === 'string' ? chunk : chunk.toString());
+            });
+            req.on('end', function() {
+                ended = true;
+                console.log('chunks:' + chunks.join(','));
+                console.log('rawBody:' + (req.rawBody ? req.rawBody.toString() : 'undefined'));
+                console.log('complete:' + req.complete);
+            });
+        });
+        // Use streaming mode (bodyStr = null)
+        server._handleRequest(1, 'POST', '/api', {}, '1.1', null, []);
+        server._pushBodyChunk(1, 'hello');
+        server._pushBodyChunk(1, ' world');
+        server._endBody(1);
+        console.log('ended:' + ended);
+    """)
+    #expect(messages.contains("chunks:hello, world"))
+    #expect(messages.contains("rawBody:hello world"))
+    #expect(messages.contains("complete:true"))
+    #expect(messages.contains("ended:true"))
+}
+
+@Test func httpStreamingBodyEmpty() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var dataCount = 0;
+        var ended = false;
+        server.on('request', function(req, res) {
+            req.on('data', function() { dataCount++; });
+            req.on('end', function() {
+                ended = true;
+                console.log('dataCount:' + dataCount);
+                console.log('rawBody:' + (req.rawBody === undefined ? 'undefined' : 'defined'));
+            });
+        });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', null, []);
+        server._endBody(1);
+        console.log('ended:' + ended);
+    """)
+    #expect(messages.contains("dataCount:0"))
+    #expect(messages.contains("rawBody:undefined"))
+    #expect(messages.contains("ended:true"))
+}
+
 // MARK: - rawBody Tests
 
 @Test func httpIncomingMessageRawBody() async throws {

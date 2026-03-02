@@ -117,16 +117,24 @@ public struct HTTPModule: NodeModule {
         let createServerJS = """
         (function(http) {
             var EventEmitter = this.__NoCo_EventEmitter;
+            var Stream = require('stream');
+            var Readable = Stream.Readable;
 
             function IncomingMessage(reqId, method, url, headers, httpVersion, rawHeaders) {
                 this._events = Object.create(null);
                 this._maxListeners = 10;
+                this.readable = true;
+                this._readableState = {
+                    buffer: [],
+                    ended: false,
+                    flowing: null,
+                    encoding: null
+                };
                 this._reqId = reqId;
                 this.method = method;
                 this.url = url;
                 this.headers = headers;
                 this.httpVersion = httpVersion;
-                this.readable = true;
                 this._encoding = null;
                 this._body = [];
                 this._ended = false;
@@ -135,7 +143,7 @@ public struct HTTPModule: NodeModule {
                 this.rawHeaders = rawHeaders || [];
                 this.socket = { encrypted: false, remoteAddress: '127.0.0.1', remotePort: 0 };
             }
-            IncomingMessage.prototype = Object.create(EventEmitter.prototype);
+            IncomingMessage.prototype = Object.create(Readable.prototype);
             IncomingMessage.prototype.constructor = IncomingMessage;
             IncomingMessage.prototype.setEncoding = function(enc) { this._encoding = enc; return this; };
             IncomingMessage.prototype.destroy = function(err) {
@@ -234,6 +242,7 @@ public struct HTTPModule: NodeModule {
                 this._maxListeners = 10;
                 this._serverId = __httpCreateServer();
                 this._responses = {};
+                this._requests = {};
                 this.listening = false;
                 if (requestListener) this.on('request', requestListener);
             }
@@ -268,7 +277,35 @@ public struct HTTPModule: NodeModule {
 
             Server.prototype._notifyClose = function(reqId) {
                 var res = this._responses[reqId];
+                var req = this._requests[reqId];
                 if (res) res._emitClose();
+                if (req && !req._ended) {
+                    req._ended = true;
+                    req._readableState.ended = true;
+                    req.emit('error', new Error('Connection closed'));
+                    req.emit('close');
+                }
+            };
+
+            Server.prototype._pushBodyChunk = function(reqId, chunk) {
+                var req = this._requests[reqId];
+                if (!req || req._ended) return;
+                req._body.push(chunk);
+                req.emit('data', chunk);
+            };
+
+            Server.prototype._endBody = function(reqId) {
+                var req = this._requests[reqId];
+                if (!req || req._ended) return;
+                if (req._body.length > 0) {
+                    req.rawBody = Buffer.concat(req._body.map(function(c) {
+                        return Buffer.isBuffer(c) ? c : Buffer.from(c, 'utf8');
+                    }));
+                }
+                req._ended = true;
+                req.complete = true;
+                req._readableState.ended = true;
+                req.emit('end');
             };
 
             Server.prototype._handleRequest = function(reqId, method, url, headersObj, httpVersion, bodyStr, rawHeaders) {
@@ -276,24 +313,29 @@ public struct HTTPModule: NodeModule {
                 var res = new ServerResponse(reqId);
                 var self = this;
                 self._responses[reqId] = res;
+                self._requests[reqId] = req;
                 res.on('finish', function() {
                     res.writableFinished = true;
                     res.writable = false;
                 });
                 res.on('close', function() {
                     delete self._responses[reqId];
+                    delete self._requests[reqId];
                 });
-                if (bodyStr && bodyStr.length > 0) {
+                if (bodyStr != null && bodyStr.length > 0) {
                     req._body.push(bodyStr);
                     req.rawBody = Buffer.from(bodyStr, 'utf8');
                 }
                 this.emit('request', req, res);
-                for (var i = 0; i < req._body.length; i++) {
-                    req.emit('data', req._body[i]);
+                if (bodyStr != null) {
+                    for (var i = 0; i < req._body.length; i++) {
+                        req.emit('data', req._body[i]);
+                    }
+                    req._ended = true;
+                    req.complete = true;
+                    req._readableState.ended = true;
+                    req.emit('end');
                 }
-                req._ended = true;
-                req.complete = true;
-                req.emit('end');
             };
 
             http.createServer = function(options, requestListener) {
