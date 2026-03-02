@@ -82,6 +82,15 @@ import JavaScriptCore
     #expect(messages.contains("after:before"))
 }
 
+@Test func asyncLocalStorageNodePrefix() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var ah = require('node:async_hooks');
+        typeof ah.AsyncLocalStorage === 'function';
+    """)
+    #expect(result?.toBool() == true)
+}
+
 @Test func asyncLocalStorageObjectStore() async throws {
     let runtime = NodeRuntime()
     var messages: [String] = []
@@ -108,7 +117,7 @@ import JavaScriptCore
     runtime.consoleHandler = { _, msg in messages.append(msg) }
 
     runtime.evaluate("""
-        var AsyncLocalStorage = require('async_hooks').AsyncLocalStorage;
+        var AsyncLocalStorage = require('node:async_hooks').AsyncLocalStorage;
         var als = new AsyncLocalStorage();
 
         // Simulate Hono context-storage middleware pattern
