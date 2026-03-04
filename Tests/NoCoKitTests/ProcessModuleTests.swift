@@ -100,7 +100,7 @@ import JavaScriptCore
 @Test func processStdoutWrite() async throws {
     let runtime = NodeRuntime()
     var messages: [String] = []
-    runtime.consoleHandler = { _, msg in messages.append(msg) }
+    runtime.stdoutHandler = { msg in messages.append(msg) }
 
     runtime.evaluate("process.stdout.write('hello stdout')")
     #expect(messages.contains("hello stdout"))
