@@ -380,17 +380,17 @@ public struct HTTPModule: NodeModule {
             } else {
                 options = args[0]
                 callback = args.count > 1 ? args[1] : nil
-                let proto = options?.forProperty("protocol")?.toString() ?? "http:"
-                let hostname = options?.forProperty("hostname")?.toString()
-                    ?? options?.forProperty("host")?.toString() ?? "localhost"
-                let port = options?.forProperty("port")?.toString()
-                let path = options?.forProperty("path")?.toString() ?? "/"
+                let proto = options?.property("protocol")?.toString() ?? "http:"
+                let hostname = options?.property("hostname")?.toString()
+                    ?? options?.property("host")?.toString() ?? "localhost"
+                let port = options?.property("port")?.toString()
+                let path = options?.property("path")?.toString() ?? "/"
                 let portStr = port != nil ? ":\(port!)" : ""
                 urlString = "\(proto)//\(hostname)\(portStr)\(path)"
             }
 
-            let method = options?.forProperty("method")?.toString()?.uppercased() ?? "GET"
-            let headers = options?.forProperty("headers")
+            let method = options?.property("method")?.toString()?.uppercased() ?? "GET"
+            let headers = options?.property("headers")
             let capturedCallback = callback
 
             let reqScript = """
