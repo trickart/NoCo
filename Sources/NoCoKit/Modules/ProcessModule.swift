@@ -135,8 +135,7 @@ public struct ProcessModule: NodeModule {
 
         let stdout = JSValue(newObjectIn: context)!
         let stdoutWrite: @convention(block) (String) -> Bool = { str in
-            print(str, terminator: "")
-            runtime.consoleHandler(.log, str)
+            runtime.stdoutHandler(str)
             return true
         }
         stdout.setValue(unsafeBitCast(stdoutWrite, to: AnyObject.self), forProperty: "write")
@@ -183,8 +182,7 @@ public struct ProcessModule: NodeModule {
 
         let stderr = JSValue(newObjectIn: context)!
         let stderrWrite: @convention(block) (String) -> Bool = { str in
-            fputs(str, Foundation.stderr)
-            runtime.consoleHandler(.error, str)
+            runtime.stderrHandler(str)
             return true
         }
         stderr.setValue(unsafeBitCast(stderrWrite, to: AnyObject.self), forProperty: "write")

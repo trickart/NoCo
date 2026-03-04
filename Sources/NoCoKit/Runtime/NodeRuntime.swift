@@ -37,6 +37,18 @@ public final class NodeRuntime: @unchecked Sendable {
         case log, info, warn, error, debug
     }
 
+    /// Raw stdout write handler. Called by process.stdout.write().
+    /// Does NOT append newline. Replace to capture stdout output in tests.
+    public var stdoutHandler: (String) -> Void = { str in
+        print(str, terminator: "")
+    }
+
+    /// Raw stderr write handler. Called by process.stderr.write().
+    /// Does NOT append newline. Replace to capture stderr output in tests.
+    public var stderrHandler: (String) -> Void = { str in
+        fputs(str, stderr)
+    }
+
     /// The argument list exposed as `process.argv` in JavaScript.
     /// Defaults to `CommandLine.arguments` but can be overridden to follow
     /// Node.js conventions: `[execPath, scriptPath, ...userArgs]`.
