@@ -105,7 +105,7 @@ public struct HTTPModule: NodeModule {
             var Stream = require('stream');
             var Readable = Stream.Readable;
 
-            function IncomingMessage(reqId, method, url, headers, httpVersion, rawHeaders) {
+            function IncomingMessage(reqId, method, url, headers, httpVersion, rawHeaders, remoteAddr, remotePort) {
                 this._events = Object.create(null);
                 this._maxListeners = 10;
                 this.readable = true;
@@ -126,7 +126,14 @@ public struct HTTPModule: NodeModule {
                 this.complete = false;
                 this.errored = null;
                 this.rawHeaders = rawHeaders || [];
-                this.socket = { encrypted: false, remoteAddress: '127.0.0.1', remotePort: 0 };
+                var addr = remoteAddr || '127.0.0.1';
+                var port = remotePort || 0;
+                this.socket = {
+                    encrypted: false,
+                    remoteAddress: addr,
+                    remotePort: port,
+                    remoteFamily: addr.indexOf(':') !== -1 ? 'IPv6' : 'IPv4'
+                };
             }
             IncomingMessage.prototype = Object.create(Readable.prototype);
             IncomingMessage.prototype.constructor = IncomingMessage;
@@ -307,8 +314,8 @@ public struct HTTPModule: NodeModule {
                 }
             };
 
-            Server.prototype._handleRequest = function(reqId, method, url, headersObj, httpVersion, bodyStr, rawHeaders) {
-                var req = new IncomingMessage(reqId, method, url, headersObj, httpVersion, rawHeaders || []);
+            Server.prototype._handleRequest = function(reqId, method, url, headersObj, httpVersion, bodyStr, rawHeaders, remoteAddr, remotePort) {
+                var req = new IncomingMessage(reqId, method, url, headersObj, httpVersion, rawHeaders || [], remoteAddr, remotePort);
                 var res = new ServerResponse(reqId);
                 var self = this;
                 self._responses[reqId] = res;
@@ -747,6 +754,8 @@ final class HTTPBridgeHandler: ChannelInboundHandler, @unchecked Sendable {
             let method = head.method.rawValue
             let uri = head.uri
             let headerPairs: [(String, String)] = head.headers.map { ($0.name, $0.value) }
+            let remoteAddr = context.remoteAddress?.ipAddress ?? "127.0.0.1"
+            let remotePort = context.remoteAddress?.port ?? 0
 
             server.eventLoop.enqueueCallback { [weak self] in
                 guard let self else { return }
@@ -768,7 +777,7 @@ final class HTTPBridgeHandler: ChannelInboundHandler, @unchecked Sendable {
                     rawIdx += 2
                 }
                 jsServer.invokeMethod("_handleRequest", withArguments: [
-                    reqId, method, uri, headersObj, "1.1", NSNull(), rawHeadersArr,
+                    reqId, method, uri, headersObj, "1.1", NSNull(), rawHeadersArr, remoteAddr, remotePort,
                 ])
             }
 

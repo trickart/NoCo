@@ -124,7 +124,7 @@ public struct HTTP2Module: NodeModule {
             var EventEmitter = this.__NoCo_EventEmitter;
 
             // --- Http2ServerRequest (compatibility API) ---
-            function Http2ServerRequest(reqId, method, url, headers, httpVersion, rawHeaders) {
+            function Http2ServerRequest(reqId, method, url, headers, httpVersion, rawHeaders, remoteAddr, remotePort) {
                 this._events = Object.create(null);
                 this._maxListeners = 10;
                 this._reqId = reqId;
@@ -142,7 +142,14 @@ public struct HTTP2Module: NodeModule {
                 this.rawHeaders = rawHeaders || [];
                 this.authority = headers[':authority'] || headers['host'] || '';
                 this.scheme = headers[':scheme'] || 'https';
-                this.socket = { encrypted: false, remoteAddress: '127.0.0.1', remotePort: 0 };
+                var addr = remoteAddr || '127.0.0.1';
+                var port = remotePort || 0;
+                this.socket = {
+                    encrypted: false,
+                    remoteAddress: addr,
+                    remotePort: port,
+                    remoteFamily: addr.indexOf(':') !== -1 ? 'IPv6' : 'IPv4'
+                };
             }
             Http2ServerRequest.prototype = Object.create(EventEmitter.prototype);
             Http2ServerRequest.prototype.constructor = Http2ServerRequest;
@@ -343,8 +350,8 @@ public struct HTTP2Module: NodeModule {
             Http2Server.prototype.ref = function() { return this; };
             Http2Server.prototype.unref = function() { return this; };
 
-            Http2Server.prototype._handleRequest = function(reqId, method, url, headersObj, httpVersion, bodyStr, rawHeaders) {
-                var req = new Http2ServerRequest(reqId, method, url, headersObj, httpVersion, rawHeaders || []);
+            Http2Server.prototype._handleRequest = function(reqId, method, url, headersObj, httpVersion, bodyStr, rawHeaders, remoteAddr, remotePort) {
+                var req = new Http2ServerRequest(reqId, method, url, headersObj, httpVersion, rawHeaders || [], remoteAddr, remotePort);
                 var res = new Http2ServerResponse(reqId);
                 res.on('finish', function() {
                     res.writableFinished = true;
@@ -723,6 +730,9 @@ final class HTTP2BridgeHandler: ChannelInboundHandler, @unchecked Sendable {
             let method = head.method.rawValue
             let uri = head.uri
             let headerPairs: [(String, String)] = head.headers.map { ($0.name, $0.value) }
+            let parentAddr = context.channel.parent?.remoteAddress
+            let remoteAddr = parentAddr?.ipAddress ?? "127.0.0.1"
+            let remotePort = parentAddr?.port ?? 0
 
             server.eventLoop.enqueueCallback { [weak self] in
                 guard let self else { return }
@@ -744,7 +754,7 @@ final class HTTP2BridgeHandler: ChannelInboundHandler, @unchecked Sendable {
                     rawIdx += 2
                 }
                 jsServer.invokeMethod("_handleRequest", withArguments: [
-                    reqId, method, uri, headersObj, "2.0", NSNull(), rawHeadersArr,
+                    reqId, method, uri, headersObj, "2.0", NSNull(), rawHeadersArr, remoteAddr, remotePort,
                 ])
             }
 
