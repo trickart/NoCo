@@ -5,6 +5,14 @@ import JavaScriptCore
 public struct ProcessModule: NodeModule {
     public static let moduleName = "process"
 
+    private static func getTerminalColumns() -> Int {
+        var ws = winsize()
+        if ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &ws) == 0 && ws.ws_col > 0 {
+            return Int(ws.ws_col)
+        }
+        return 80
+    }
+
     @discardableResult
     public static func install(in context: JSContext, runtime: NodeRuntime) -> JSValue {
         let process = JSValue(newObjectIn: context)!
@@ -103,7 +111,28 @@ public struct ProcessModule: NodeModule {
         }
         process.setValue(unsafeBitCast(hrtime, to: AnyObject.self), forProperty: "hrtime")
 
-        // process.stdout / process.stderr (minimal)
+        // process.execPath
+        process.setValue(ProcessInfo.processInfo.arguments[0], forProperty: "execPath")
+
+        // process.execArgv
+        process.setValue(JSValue(newArrayIn: context), forProperty: "execArgv")
+
+        // process.exitCode (get/set via defineProperty)
+        context.evaluateScript("""
+            (function(p) {
+                var _exitCode = 0;
+                Object.defineProperty(p, 'exitCode', {
+                    get: function() { return _exitCode; },
+                    set: function(v) { _exitCode = v; },
+                    enumerable: true, configurable: true
+                });
+            })
+        """)!.call(withArguments: [process])
+
+        // process.stdout / process.stderr (enhanced)
+        let stdoutIsTTY = isatty(STDOUT_FILENO) != 0
+        let stderrIsTTY = isatty(STDERR_FILENO) != 0
+
         let stdout = JSValue(newObjectIn: context)!
         let stdoutWrite: @convention(block) (String) -> Bool = { str in
             print(str, terminator: "")
@@ -111,6 +140,45 @@ public struct ProcessModule: NodeModule {
             return true
         }
         stdout.setValue(unsafeBitCast(stdoutWrite, to: AnyObject.self), forProperty: "write")
+        stdout.setValue(stdoutIsTTY, forProperty: "isTTY")
+        stdout.setValue(getTerminalColumns(), forProperty: "columns")
+
+        let stdoutHasColors: @convention(block) () -> Bool = {
+            guard stdoutIsTTY else { return false }
+            return ProcessInfo.processInfo.environment["NO_COLOR"] == nil
+        }
+        stdout.setValue(unsafeBitCast(stdoutHasColors, to: AnyObject.self), forProperty: "hasColors")
+
+        // stdout EventEmitter stubs
+        context.evaluateScript("""
+            (function(s) {
+                s._listeners = {};
+                s.on = function(event, fn) {
+                    if (!s._listeners[event]) s._listeners[event] = [];
+                    s._listeners[event].push(fn);
+                    return s;
+                };
+                s.once = function(event, fn) {
+                    fn._once = true;
+                    return s.on(event, fn);
+                };
+                s.emit = function(event) {
+                    var args = Array.prototype.slice.call(arguments, 1);
+                    var fns = s._listeners[event] || [];
+                    var remaining = [];
+                    for (var i = 0; i < fns.length; i++) {
+                        fns[i].apply(s, args);
+                        if (!fns[i]._once) remaining.push(fns[i]);
+                    }
+                    s._listeners[event] = remaining;
+                };
+                s.removeListener = function(event, fn) {
+                    var fns = s._listeners[event] || [];
+                    s._listeners[event] = fns.filter(function(f) { return f !== fn; });
+                    return s;
+                };
+            })
+        """)!.call(withArguments: [stdout])
         process.setValue(stdout, forProperty: "stdout")
 
         let stderr = JSValue(newObjectIn: context)!
@@ -120,6 +188,45 @@ public struct ProcessModule: NodeModule {
             return true
         }
         stderr.setValue(unsafeBitCast(stderrWrite, to: AnyObject.self), forProperty: "write")
+        stderr.setValue(stderrIsTTY, forProperty: "isTTY")
+        stderr.setValue(getTerminalColumns(), forProperty: "columns")
+
+        let stderrHasColors: @convention(block) () -> Bool = {
+            guard stderrIsTTY else { return false }
+            return ProcessInfo.processInfo.environment["NO_COLOR"] == nil
+        }
+        stderr.setValue(unsafeBitCast(stderrHasColors, to: AnyObject.self), forProperty: "hasColors")
+
+        // stderr EventEmitter stubs
+        context.evaluateScript("""
+            (function(s) {
+                s._listeners = {};
+                s.on = function(event, fn) {
+                    if (!s._listeners[event]) s._listeners[event] = [];
+                    s._listeners[event].push(fn);
+                    return s;
+                };
+                s.once = function(event, fn) {
+                    fn._once = true;
+                    return s.on(event, fn);
+                };
+                s.emit = function(event) {
+                    var args = Array.prototype.slice.call(arguments, 1);
+                    var fns = s._listeners[event] || [];
+                    var remaining = [];
+                    for (var i = 0; i < fns.length; i++) {
+                        fns[i].apply(s, args);
+                        if (!fns[i]._once) remaining.push(fns[i]);
+                    }
+                    s._listeners[event] = remaining;
+                };
+                s.removeListener = function(event, fn) {
+                    var fns = s._listeners[event] || [];
+                    s._listeners[event] = fns.filter(function(f) { return f !== fn; });
+                    return s;
+                };
+            })
+        """)!.call(withArguments: [stderr])
         process.setValue(stderr, forProperty: "stderr")
 
         // process.memoryUsage()

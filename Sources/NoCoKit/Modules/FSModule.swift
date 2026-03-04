@@ -392,6 +392,56 @@ public struct FSModule: NodeModule {
         }
         fs.setValue(unsafeBitCast(createReadStream, to: AnyObject.self), forProperty: "createReadStream")
 
+        // fs.realpathSync(path)
+        let realpathSync: @convention(block) (String) -> JSValue = { path in
+            guard let resolved = validatePath(path) else {
+                return JSValue(undefinedIn: context)
+            }
+            let realPath = (resolved as NSString).resolvingSymlinksInPath
+            guard fm.fileExists(atPath: realPath) else {
+                context.exception = context.createSystemError(
+                    "ENOENT: no such file or directory, realpath '\(path)'",
+                    code: "ENOENT", syscall: "realpath", path: path
+                )
+                return JSValue(undefinedIn: context)
+            }
+            return JSValue(object: realPath, in: context)
+        }
+        fs.setValue(unsafeBitCast(realpathSync, to: AnyObject.self), forProperty: "realpathSync")
+
+        // fs.realpath(path, options, callback)
+        let realpath: @convention(block) () -> Void = {
+            let args = JSContext.currentArguments() as? [JSValue] ?? []
+            guard args.count >= 2 else { return }
+            let path = args[0].toString()!
+            let callback = args.count >= 3 ? args[2] : args[1]
+            let resolved = (path as NSString).standardizingPath
+            DispatchQueue.global().async {
+                let realPath = (resolved as NSString).resolvingSymlinksInPath
+                runtime.eventLoop.enqueueCallback {
+                    let ctx = runtime.context
+                    if fm.fileExists(atPath: realPath) {
+                        callback.call(withArguments: [JSValue(nullIn: ctx)!, realPath])
+                    } else {
+                        let err = ctx.createSystemError(
+                            "ENOENT: no such file or directory, realpath '\(path)'",
+                            code: "ENOENT", syscall: "realpath", path: path
+                        )
+                        callback.call(withArguments: [err])
+                    }
+                }
+            }
+        }
+        fs.setValue(unsafeBitCast(realpath, to: AnyObject.self), forProperty: "realpath")
+
+        // fs.realpathSync.native = fs.realpathSync
+        let realpathSyncObj = fs.forProperty("realpathSync")!
+        realpathSyncObj.setValue(realpathSyncObj, forProperty: "native")
+
+        // fs.realpath.native = fs.realpath
+        let realpathObj = fs.forProperty("realpath")!
+        realpathObj.setValue(realpathObj, forProperty: "native")
+
         // Async versions using GCD
         installAsyncVersions(fs: fs, context: context, runtime: runtime, config: config)
 
