@@ -11,6 +11,9 @@ struct NoCo: ParsableCommand {
     @Option(name: [.short, .customLong("eval")], help: "Evaluate the given JavaScript string")
     var eval: String? = nil
 
+    @Flag(name: .customLong("license"), help: "Show license information")
+    var showLicense: Bool = false
+
     @Argument(help: "The JavaScript file to execute")
     var script: String? = nil
 
@@ -18,12 +21,17 @@ struct NoCo: ParsableCommand {
     var scriptArguments: [String] = []
 
     func validate() throws {
-        if eval == nil && script == nil {
+        if !showLicense && eval == nil && script == nil {
             throw ValidationError("Either a script file or --eval (-e) option must be provided.")
         }
     }
 
     func run() throws {
+        if showLicense {
+            print(Licenses.text)
+            return
+        }
+
         let execPath = CommandLine.arguments.first ?? "noco"
         // captureForPassthrough includes the leading "--" terminator; strip it
         let userArgs = scriptArguments.drop(while: { $0 == "--" })
