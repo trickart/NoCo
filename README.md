@@ -21,7 +21,7 @@ NoCo implements CommonJS module resolution and a subset of Node.js built-in modu
 ## Requirements
 
 - Swift 6.2+
-- macOS 13+ / iOS 16+
+- macOS 15+ / iOS 18+
 
 ## Installation
 
