@@ -13,6 +13,14 @@ public struct ProcessModule: NodeModule {
         return 80
     }
 
+    private static func getTerminalRows() -> Int {
+        var ws = winsize()
+        if ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &ws) == 0 && ws.ws_row > 0 {
+            return Int(ws.ws_row)
+        }
+        return 24
+    }
+
     @discardableResult
     public static func install(in context: JSContext, runtime: NodeRuntime) -> JSValue {
         let process = JSValue(newObjectIn: context)!
@@ -141,6 +149,7 @@ public struct ProcessModule: NodeModule {
         stdout.setValue(unsafeBitCast(stdoutWrite, to: AnyObject.self), forProperty: "write")
         stdout.setValue(stdoutIsTTY, forProperty: "isTTY")
         stdout.setValue(getTerminalColumns(), forProperty: "columns")
+        stdout.setValue(getTerminalRows(), forProperty: "rows")
 
         let stdoutHasColors: @convention(block) () -> Bool = {
             guard stdoutIsTTY else { return false }
@@ -188,6 +197,7 @@ public struct ProcessModule: NodeModule {
         stderr.setValue(unsafeBitCast(stderrWrite, to: AnyObject.self), forProperty: "write")
         stderr.setValue(stderrIsTTY, forProperty: "isTTY")
         stderr.setValue(getTerminalColumns(), forProperty: "columns")
+        stderr.setValue(getTerminalRows(), forProperty: "rows")
 
         let stderrHasColors: @convention(block) () -> Bool = {
             guard stderrIsTTY else { return false }
