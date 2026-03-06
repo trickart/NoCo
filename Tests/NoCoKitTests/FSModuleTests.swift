@@ -570,3 +570,121 @@ func fsCreateWriteStreamBytesWritten() async throws {
 
     #expect(messages.contains("bytes:5"))
 }
+
+// MARK: - fd-based API Tests
+
+@Test func fsOpenSyncWriteSyncCloseSync() async throws {
+    let runtime = NodeRuntime()
+    let tmpPath = NSTemporaryDirectory() + "noco_test_fd_write_\(UUID().uuidString).txt"
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    let result = runtime.evaluate("""
+        var fs = require('fs');
+        var fd = fs.openSync('\(tmpPath)', 'w');
+        var written = fs.writeSync(fd, 'hello fd');
+        fs.closeSync(fd);
+        written + ':' + fs.readFileSync('\(tmpPath)', 'utf8');
+    """)
+    #expect(result?.toString() == "8:hello fd")
+}
+
+@Test func fsWriteSyncStdout() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.stdoutHandler = { msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        fs.writeSync(1, 'stdout test');
+    """)
+    #expect(messages.contains("stdout test"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fsOpenWriteCloseAsync() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_fd_async_\(UUID().uuidString).txt"
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 10000);
+        fs.open('\(tmpPath)', 'w', function(err, fd) {
+            if (err) { clearTimeout(keepAlive); console.log('error:' + err.message); return; }
+            fs.write(fd, 'async hello', function(err2, written) {
+                if (err2) { clearTimeout(keepAlive); console.log('error:' + err2.message); return; }
+                fs.close(fd, function() {
+                    clearTimeout(keepAlive);
+                    console.log('result:' + written + ':' + fs.readFileSync('\(tmpPath)', 'utf8'));
+                });
+            });
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if messages.contains(where: { $0.hasPrefix("result:") || $0.hasPrefix("error:") }) { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("result:11:async hello"))
+}
+
+@Test func fsFsyncSyncNoError() async throws {
+    let runtime = NodeRuntime()
+    let tmpPath = NSTemporaryDirectory() + "noco_test_fd_fsync_\(UUID().uuidString).txt"
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    let result = runtime.evaluate("""
+        var fs = require('fs');
+        var fd = fs.openSync('\(tmpPath)', 'w');
+        fs.writeSync(fd, 'fsync test');
+        fs.fsyncSync(fd);
+        fs.closeSync(fd);
+        fs.readFileSync('\(tmpPath)', 'utf8');
+    """)
+    #expect(result?.toString() == "fsync test")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fsMkdirAsync() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpDir = NSTemporaryDirectory() + "noco_test_mkdir_async_\(UUID().uuidString)"
+    defer { try? FileManager.default.removeItem(atPath: tmpDir) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 10000);
+        fs.mkdir('\(tmpDir)', function(err) {
+            clearTimeout(keepAlive);
+            if (err) { console.log('error:' + err.message); return; }
+            console.log('exists:' + fs.existsSync('\(tmpDir)'));
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if messages.contains(where: { $0.hasPrefix("exists:") || $0.hasPrefix("error:") }) { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("exists:true"))
+}

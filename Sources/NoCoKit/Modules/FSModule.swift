@@ -1,5 +1,6 @@
 import Foundation
 @preconcurrency import JavaScriptCore
+import Synchronization
 
 /// Configuration for filesystem sandbox.
 public struct FSConfiguration {
@@ -11,6 +12,33 @@ public struct FSConfiguration {
     public init(rootDirectory: String? = nil, writable: Bool = true) {
         self.rootDirectory = rootDirectory
         self.writable = writable
+    }
+}
+
+/// Manages file descriptor table for fd-based fs APIs.
+/// Thread-safe: accessed from both jsQueue and GCD background queues.
+class FileDescriptorTable: @unchecked Sendable {
+    private struct State {
+        var nextFd = 3 // 0=stdin, 1=stdout, 2=stderr are reserved
+        var table: [Int: FileHandle] = [:]
+    }
+    private let state = Mutex(State())
+
+    func allocate(_ handle: FileHandle) -> Int {
+        state.withLock { state in
+            let fd = state.nextFd
+            state.nextFd += 1
+            state.table[fd] = handle
+            return fd
+        }
+    }
+
+    func get(_ fd: Int) -> FileHandle? {
+        state.withLock { $0.table[fd] }
+    }
+
+    func remove(_ fd: Int) {
+        state.withLock { $0.table.removeValue(forKey: fd) }
     }
 }
 
@@ -630,10 +658,422 @@ public struct FSModule: NodeModule {
         let realpathObj = fs.forProperty("realpath")!
         realpathObj.setValue(realpathObj, forProperty: "native")
 
+        // fd-based APIs
+        installFdAPIs(fs: fs, context: context, runtime: runtime, config: config)
+
         // Async versions using GCD
         installAsyncVersions(fs: fs, context: context, runtime: runtime, config: config)
 
         return fs
+    }
+
+    /// Convert JSValue data to Data for writing
+    private static func jsValueToData(_ data: JSValue, encoding: String? = nil) -> Data {
+        if data.isString {
+            return data.toString().data(using: .utf8) ?? Data()
+        } else {
+            // Buffer/Uint8Array
+            let length = Int(data.forProperty("length")?.toInt32() ?? 0)
+            var bytes = [UInt8]()
+            bytes.reserveCapacity(length)
+            for i in 0..<length {
+                bytes.append(UInt8(data.atIndex(i).toInt32()))
+            }
+            return Data(bytes)
+        }
+    }
+
+    /// Open a file and return a FileHandle based on flags
+    private static func openFile(at path: String, flags: String) throws -> FileHandle {
+        let fm = FileManager.default
+        switch flags {
+        case "r":
+            guard let handle = FileHandle(forReadingAtPath: path) else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOENT),
+                              userInfo: [NSLocalizedDescriptionKey: "ENOENT: no such file or directory, open '\(path)'"])
+            }
+            return handle
+        case "w", "w+":
+            fm.createFile(atPath: path, contents: nil, attributes: nil)
+            guard let handle = FileHandle(forWritingAtPath: path) else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOENT),
+                              userInfo: [NSLocalizedDescriptionKey: "ENOENT: no such file or directory, open '\(path)'"])
+            }
+            handle.truncateFile(atOffset: 0)
+            return handle
+        case "wx", "wx+":
+            if fm.fileExists(atPath: path) {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(EEXIST),
+                              userInfo: [NSLocalizedDescriptionKey: "EEXIST: file already exists, open '\(path)'"])
+            }
+            fm.createFile(atPath: path, contents: nil, attributes: nil)
+            guard let handle = FileHandle(forWritingAtPath: path) else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOENT),
+                              userInfo: [NSLocalizedDescriptionKey: "ENOENT: no such file or directory, open '\(path)'"])
+            }
+            return handle
+        case "a", "a+", "as", "as+":
+            if !fm.fileExists(atPath: path) {
+                fm.createFile(atPath: path, contents: nil, attributes: nil)
+            }
+            guard let handle = FileHandle(forWritingAtPath: path) else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOENT),
+                              userInfo: [NSLocalizedDescriptionKey: "ENOENT: no such file or directory, open '\(path)'"])
+            }
+            handle.seekToEndOfFile()
+            return handle
+        case "ax", "ax+":
+            if fm.fileExists(atPath: path) {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(EEXIST),
+                              userInfo: [NSLocalizedDescriptionKey: "EEXIST: file already exists, open '\(path)'"])
+            }
+            fm.createFile(atPath: path, contents: nil, attributes: nil)
+            guard let handle = FileHandle(forWritingAtPath: path) else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOENT),
+                              userInfo: [NSLocalizedDescriptionKey: "ENOENT: no such file or directory, open '\(path)'"])
+            }
+            return handle
+        default:
+            // Default to read
+            guard let handle = FileHandle(forReadingAtPath: path) else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOENT),
+                              userInfo: [NSLocalizedDescriptionKey: "ENOENT: no such file or directory, open '\(path)'"])
+            }
+            return handle
+        }
+    }
+
+    private static func installFdAPIs(
+        fs: JSValue, context: JSContext, runtime: NodeRuntime, config: FSConfiguration
+    ) {
+        let fdTable = FileDescriptorTable()
+        let fm = FileManager.default
+
+        // Helper: validate path within sandbox
+        func validatePath(_ path: String) -> String? {
+            let resolved = (path as NSString).standardizingPath
+            if let root = config.rootDirectory {
+                let rootResolved = (root as NSString).standardizingPath
+                if !resolved.hasPrefix(rootResolved) {
+                    context.exception = context.createSystemError(
+                        "Access denied: '\(path)' is outside sandbox",
+                        code: "EACCES", syscall: "open", path: path
+                    )
+                    return nil
+                }
+            }
+            return resolved
+        }
+
+        // fs.openSync(path, flags[, mode])
+        let openSync: @convention(block) () -> JSValue = {
+            let args = JSContext.currentArguments() as? [JSValue] ?? []
+            guard args.count >= 2 else {
+                context.exception = JSValue(newErrorFromMessage: "path and flags are required", in: context)
+                return JSValue(undefinedIn: context)
+            }
+
+            let path = args[0].toString()!
+            let flags = args[1].toString() ?? "r"
+            let resolved = (path as NSString).standardizingPath
+
+            if let root = config.rootDirectory {
+                let rootResolved = (root as NSString).standardizingPath
+                if !resolved.hasPrefix(rootResolved) {
+                    context.exception = context.createSystemError(
+                        "Access denied: '\(path)' is outside sandbox",
+                        code: "EACCES", syscall: "open", path: path
+                    )
+                    return JSValue(undefinedIn: context)
+                }
+            }
+
+            do {
+                let handle = try openFile(at: resolved, flags: flags)
+                let fd = fdTable.allocate(handle)
+                return JSValue(int32: Int32(fd), in: context)
+            } catch {
+                let code = flags.contains("x") && fm.fileExists(atPath: resolved) ? "EEXIST" : "ENOENT"
+                context.exception = context.createSystemError(
+                    error.localizedDescription, code: code, syscall: "open", path: path
+                )
+                return JSValue(undefinedIn: context)
+            }
+        }
+        fs.setValue(unsafeBitCast(openSync, to: AnyObject.self), forProperty: "openSync")
+
+        // fs.open(path, flags[, mode], callback)
+        let open: @convention(block) () -> Void = {
+            let args = JSContext.currentArguments() as? [JSValue] ?? []
+            guard args.count >= 3 else { return }
+
+            let path = args[0].toString()!
+            let flags = args[1].toString() ?? "r"
+            // callback is the last argument
+            let callback = args.last!
+            let resolved = (path as NSString).standardizingPath
+
+            DispatchQueue.global().async {
+                do {
+                    let handle = try openFile(at: resolved, flags: flags)
+                    let fd = fdTable.allocate(handle)
+                    runtime.eventLoop.enqueueCallback {
+                        let ctx = runtime.context
+                        callback.call(withArguments: [JSValue(nullIn: ctx)!, fd])
+                    }
+                } catch {
+                    runtime.eventLoop.enqueueCallback {
+                        let ctx = runtime.context
+                        let code = flags.contains("x") && fm.fileExists(atPath: resolved) ? "EEXIST" : "ENOENT"
+                        let err = ctx.createSystemError(
+                            error.localizedDescription, code: code, syscall: "open", path: path
+                        )
+                        callback.call(withArguments: [err])
+                    }
+                }
+            }
+        }
+        fs.setValue(unsafeBitCast(open, to: AnyObject.self), forProperty: "open")
+
+        // fs.writeSync(fd, data[, ...args])
+        // Signatures: writeSync(fd, buffer[, offset[, length[, position]]])
+        //             writeSync(fd, string[, position[, encoding]])
+        let writeSync: @convention(block) () -> JSValue = {
+            let args = JSContext.currentArguments() as? [JSValue] ?? []
+            guard args.count >= 2 else {
+                return JSValue(int32: 0, in: context)
+            }
+
+            let fd = Int(args[0].toInt32())
+            let data = args[1]
+            let writeData = jsValueToData(data)
+            let byteCount = writeData.count
+
+            if fd == 1 {
+                // stdout - use stdoutHandler to avoid double output
+                if let str = String(data: writeData, encoding: .utf8) {
+                    runtime.stdoutHandler(str)
+                } else {
+                    FileHandle.standardOutput.write(writeData)
+                }
+                return JSValue(int32: Int32(byteCount), in: context)
+            } else if fd == 2 {
+                // stderr
+                if let str = String(data: writeData, encoding: .utf8) {
+                    runtime.stderrHandler(str)
+                } else {
+                    FileHandle.standardError.write(writeData)
+                }
+                return JSValue(int32: Int32(byteCount), in: context)
+            }
+
+            guard let handle = fdTable.get(fd) else {
+                context.exception = context.createSystemError(
+                    "EBADF: bad file descriptor, write",
+                    code: "EBADF", syscall: "write"
+                )
+                return JSValue(undefinedIn: context)
+            }
+
+            handle.write(writeData)
+            return JSValue(int32: Int32(byteCount), in: context)
+        }
+        fs.setValue(unsafeBitCast(writeSync, to: AnyObject.self), forProperty: "writeSync")
+
+        // fs.write(fd, data[, ...args], callback)
+        let write: @convention(block) () -> Void = {
+            let args = JSContext.currentArguments() as? [JSValue] ?? []
+            guard args.count >= 3 else { return }
+
+            let fd = Int(args[0].toInt32())
+            let data = args[1]
+            let callback = args.last!
+            let writeData = jsValueToData(data)
+            let byteCount = writeData.count
+
+            if fd == 1 {
+                if let str = String(data: writeData, encoding: .utf8) {
+                    runtime.stdoutHandler(str)
+                } else {
+                    FileHandle.standardOutput.write(writeData)
+                }
+                runtime.eventLoop.enqueueCallback {
+                    let ctx = runtime.context
+                    callback.call(withArguments: [JSValue(nullIn: ctx)!, byteCount, data])
+                }
+                return
+            } else if fd == 2 {
+                if let str = String(data: writeData, encoding: .utf8) {
+                    runtime.stderrHandler(str)
+                } else {
+                    FileHandle.standardError.write(writeData)
+                }
+                runtime.eventLoop.enqueueCallback {
+                    let ctx = runtime.context
+                    callback.call(withArguments: [JSValue(nullIn: ctx)!, byteCount, data])
+                }
+                return
+            }
+
+            guard let handle = fdTable.get(fd) else {
+                runtime.eventLoop.enqueueCallback {
+                    let ctx = runtime.context
+                    let err = ctx.createSystemError(
+                        "EBADF: bad file descriptor, write",
+                        code: "EBADF", syscall: "write"
+                    )
+                    callback.call(withArguments: [err])
+                }
+                return
+            }
+
+            DispatchQueue.global().async {
+                handle.write(writeData)
+                runtime.eventLoop.enqueueCallback {
+                    let ctx = runtime.context
+                    callback.call(withArguments: [JSValue(nullIn: ctx)!, byteCount, data])
+                }
+            }
+        }
+        fs.setValue(unsafeBitCast(write, to: AnyObject.self), forProperty: "write")
+
+        // fs.closeSync(fd)
+        let closeSync: @convention(block) (JSValue) -> Void = { fdVal in
+            let fd = Int(fdVal.toInt32())
+            // Skip stdin/stdout/stderr
+            guard fd > 2 else { return }
+            guard let handle = fdTable.get(fd) else {
+                context.exception = context.createSystemError(
+                    "EBADF: bad file descriptor, close",
+                    code: "EBADF", syscall: "close"
+                )
+                return
+            }
+            handle.closeFile()
+            fdTable.remove(fd)
+        }
+        fs.setValue(unsafeBitCast(closeSync, to: AnyObject.self), forProperty: "closeSync")
+
+        // fs.close(fd, callback)
+        let close: @convention(block) () -> Void = {
+            let args = JSContext.currentArguments() as? [JSValue] ?? []
+            guard args.count >= 1 else { return }
+
+            let fd = Int(args[0].toInt32())
+            let callback = args.count >= 2 ? args[1] : nil
+
+            // Skip stdin/stdout/stderr
+            guard fd > 2 else {
+                if let cb = callback, !cb.isUndefined {
+                    runtime.eventLoop.enqueueCallback {
+                        let ctx = runtime.context
+                        cb.call(withArguments: [JSValue(nullIn: ctx)!])
+                    }
+                }
+                return
+            }
+
+            guard let handle = fdTable.get(fd) else {
+                if let cb = callback, !cb.isUndefined {
+                    runtime.eventLoop.enqueueCallback {
+                        let ctx = runtime.context
+                        let err = ctx.createSystemError(
+                            "EBADF: bad file descriptor, close",
+                            code: "EBADF", syscall: "close"
+                        )
+                        cb.call(withArguments: [err])
+                    }
+                }
+                return
+            }
+
+            DispatchQueue.global().async {
+                handle.closeFile()
+                fdTable.remove(fd)
+                if let cb = callback, !cb.isUndefined {
+                    runtime.eventLoop.enqueueCallback {
+                        let ctx = runtime.context
+                        cb.call(withArguments: [JSValue(nullIn: ctx)!])
+                    }
+                }
+            }
+        }
+        fs.setValue(unsafeBitCast(close, to: AnyObject.self), forProperty: "close")
+
+        // fs.fsyncSync(fd)
+        let fsyncSync: @convention(block) (JSValue) -> Void = { fdVal in
+            let fd = Int(fdVal.toInt32())
+            guard fd > 2, let handle = fdTable.get(fd) else { return }
+            handle.synchronizeFile()
+        }
+        fs.setValue(unsafeBitCast(fsyncSync, to: AnyObject.self), forProperty: "fsyncSync")
+
+        // fs.fsync(fd, callback)
+        let fsync: @convention(block) () -> Void = {
+            let args = JSContext.currentArguments() as? [JSValue] ?? []
+            guard args.count >= 2 else { return }
+
+            let fd = Int(args[0].toInt32())
+            let callback = args[1]
+
+            guard fd > 2, let handle = fdTable.get(fd) else {
+                runtime.eventLoop.enqueueCallback {
+                    let ctx = runtime.context
+                    callback.call(withArguments: [JSValue(nullIn: ctx)!])
+                }
+                return
+            }
+
+            DispatchQueue.global().async {
+                handle.synchronizeFile()
+                runtime.eventLoop.enqueueCallback {
+                    let ctx = runtime.context
+                    callback.call(withArguments: [JSValue(nullIn: ctx)!])
+                }
+            }
+        }
+        fs.setValue(unsafeBitCast(fsync, to: AnyObject.self), forProperty: "fsync")
+
+        // fs.mkdir(path, opts, callback)
+        let mkdir: @convention(block) () -> Void = {
+            let args = JSContext.currentArguments() as? [JSValue] ?? []
+            guard args.count >= 2 else { return }
+
+            let path = args[0].toString()!
+            let callback: JSValue
+            let recursive: Bool
+
+            if args.count >= 3 && !args[2].isUndefined {
+                callback = args[2]
+                recursive = args[1].isObject ? (args[1].forProperty("recursive")?.toBool() ?? false) : false
+            } else {
+                callback = args[1]
+                recursive = false
+            }
+
+            let resolved = (path as NSString).standardizingPath
+
+            DispatchQueue.global().async {
+                do {
+                    try fm.createDirectory(
+                        atPath: resolved, withIntermediateDirectories: recursive, attributes: nil
+                    )
+                    runtime.eventLoop.enqueueCallback {
+                        let ctx = runtime.context
+                        callback.call(withArguments: [JSValue(nullIn: ctx)!])
+                    }
+                } catch {
+                    runtime.eventLoop.enqueueCallback {
+                        let ctx = runtime.context
+                        let err = ctx.createSystemError(
+                            error.localizedDescription, code: "ENOENT", syscall: "mkdir", path: path
+                        )
+                        callback.call(withArguments: [err])
+                    }
+                }
+            }
+        }
+        fs.setValue(unsafeBitCast(mkdir, to: AnyObject.self), forProperty: "mkdir")
     }
 
     private static func installAsyncVersions(
