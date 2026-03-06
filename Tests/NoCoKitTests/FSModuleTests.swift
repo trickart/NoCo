@@ -450,3 +450,123 @@ func fsCreateReadStreamWithReadableStream() async throws {
 
     #expect(messages.contains("rs:\(content)"))
 }
+
+// MARK: - createWriteStream Tests
+
+@Test(.timeLimit(.minutes(1)))
+func fsCreateWriteStreamBasic() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_cws_basic_\(UUID().uuidString).txt"
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 10000);
+        var s = fs.createWriteStream('\(tmpPath)');
+        s.on('close', function() {
+            clearTimeout(keepAlive);
+            var content = fs.readFileSync('\(tmpPath)', 'utf8');
+            console.log('data:' + content);
+            console.log('close:yes');
+        });
+        s.write('hello ');
+        s.write('world');
+        s.end();
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if messages.contains(where: { $0.hasPrefix("data:") }) { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("data:hello world"))
+    #expect(messages.contains("close:yes"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fsCreateWriteStreamAppend() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_cws_append_\(UUID().uuidString).txt"
+    FileManager.default.createFile(atPath: tmpPath, contents: "first ".data(using: .utf8))
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 10000);
+        var s = fs.createWriteStream('\(tmpPath)', {flags: 'a'});
+        s.on('close', function() {
+            clearTimeout(keepAlive);
+            console.log('data:' + fs.readFileSync('\(tmpPath)', 'utf8'));
+        });
+        s.write('second');
+        s.end();
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if messages.contains(where: { $0.hasPrefix("data:") }) { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("data:first second"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fsCreateWriteStreamBytesWritten() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_cws_bytes_\(UUID().uuidString).txt"
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 10000);
+        var s = fs.createWriteStream('\(tmpPath)');
+        s.on('open', function() {
+            s.write('hello', function() {
+                console.log('bytes:' + s.bytesWritten);
+                s.end(function() {
+                    clearTimeout(keepAlive);
+                });
+            });
+        });
+        s.on('close', function() {
+            console.log('done');
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if messages.contains(where: { $0.hasPrefix("bytes:") }) { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("bytes:5"))
+}
