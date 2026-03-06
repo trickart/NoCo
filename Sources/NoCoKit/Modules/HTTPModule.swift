@@ -526,6 +526,16 @@ public struct HTTPModule: NodeModule {
         }
         http.setValue(unsafeBitCast(get, to: AnyObject.self), forProperty: "get")
 
+        // http.METHODS
+        let methods = context.evaluateScript("""
+            ['ACL','BIND','CHECKOUT','CONNECT','COPY','DELETE','GET','HEAD',
+             'LINK','LOCK','M-SEARCH','MERGE','MKACTIVITY','MKCALENDAR',
+             'MKCOL','MOVE','NOTIFY','OPTIONS','PATCH','POST','PROPFIND',
+             'PROPPATCH','PURGE','PUT','REBIND','REPORT','SEARCH','SOURCE',
+             'SUBSCRIBE','TRACE','UNBIND','UNLINK','UNLOCK','UNSUBSCRIBE']
+        """)!
+        http.setValue(methods, forProperty: "METHODS")
+
         // http.STATUS_CODES
         let statusCodes = JSValue(newObjectIn: context)!
         let codes: [Int: String] = [
