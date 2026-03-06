@@ -193,7 +193,9 @@ public final class NodeRuntime: @unchecked Sendable {
         registerModule(OSModule.self)
         registerModule(QuerystringModule.self)
         registerModule(AsyncHooksModule.self)
+        #if os(macOS)
         registerModule(ChildProcessModule.self)
+        #endif
         registerModule(TTYModule.self)
 
         // Ensure global is set (ProcessModule sets it, but guard as fallback)
