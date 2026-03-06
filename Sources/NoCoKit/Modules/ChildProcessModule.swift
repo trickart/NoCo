@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 @preconcurrency import JavaScriptCore
 
@@ -817,3 +818,4 @@ public struct ChildProcessModule: NodeModule {
         return result
     }
 }
+#endif
