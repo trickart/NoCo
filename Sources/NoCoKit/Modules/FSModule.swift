@@ -392,6 +392,194 @@ public struct FSModule: NodeModule {
         }
         fs.setValue(unsafeBitCast(createReadStream, to: AnyObject.self), forProperty: "createReadStream")
 
+        // fs.createWriteStream(path, options?)
+        let createWriteStream: @convention(block) (String, JSValue) -> JSValue = { path, options in
+            var flags = "w"
+            var encodingOpt = "utf8"
+
+            if options.isObject && !options.isUndefined {
+                if let f = options.forProperty("flags"), !f.isUndefined, let s = f.toString() {
+                    flags = s
+                }
+                if let e = options.forProperty("encoding"), !e.isUndefined, let s = e.toString() {
+                    encodingOpt = s
+                }
+            }
+            let encoding = encodingOpt
+
+            // Create a Writable instance
+            let streamModule = context.objectForKeyedSubscript("require")!.call(withArguments: ["stream"])!
+            let writableCtor = streamModule.forProperty("Writable")!
+            let writable = writableCtor.construct(withArguments: [] as [Any])!
+
+            // Validate path
+            let resolved = (path as NSString).standardizingPath
+            if !config.writable {
+                runtime.eventLoop.enqueueCallback {
+                    let ctx = runtime.context
+                    let err = ctx.createSystemError("Write access denied", code: "EACCES", syscall: "open", path: path)
+                    writable.invokeMethod("emit", withArguments: ["error", err as Any])
+                }
+                return writable
+            }
+            if let root = config.rootDirectory {
+                let rootResolved = (root as NSString).standardizingPath
+                if !resolved.hasPrefix(rootResolved) {
+                    runtime.eventLoop.enqueueCallback {
+                        let ctx = runtime.context
+                        let err = ctx.createSystemError(
+                            "Access denied: '\(path)' is outside sandbox",
+                            code: "EACCES", syscall: "open", path: path
+                        )
+                        writable.invokeMethod("emit", withArguments: ["error", err as Any])
+                    }
+                    return writable
+                }
+            }
+
+            writable.setValue(resolved, forProperty: "path")
+            writable.setValue(0, forProperty: "bytesWritten")
+
+            let isAppend = flags == "a"
+
+            // Pending operations before file is open
+            class PendingOp {
+                enum Kind { case write, end }
+                let kind: Kind
+                let args: [JSValue]
+                init(kind: Kind, args: [JSValue]) {
+                    self.kind = kind
+                    self.args = args
+                }
+            }
+            let pendingOps = NSMutableArray()
+
+            // Initial _write buffers until file is open
+            let initialWrite: @convention(block) (JSValue, JSValue, JSValue) -> Void = { chunk, encodingVal, callback in
+                pendingOps.add(PendingOp(kind: .write, args: [chunk, encodingVal, callback]))
+            }
+            writable.setValue(unsafeBitCast(initialWrite, to: AnyObject.self), forProperty: "_write")
+
+            // Buffer end() calls before file is open
+            let origEnd = writable.forProperty("end")!
+            let initialEnd: @convention(block) (JSValue, JSValue, JSValue) -> Void = { _, _, _ in
+                let args = JSContext.currentArguments() as? [JSValue] ?? []
+                pendingOps.add(PendingOp(kind: .end, args: args))
+            }
+            writable.setValue(unsafeBitCast(initialEnd, to: AnyObject.self), forProperty: "end")
+
+            // Open file in background
+            DispatchQueue.global().async {
+                let dir = (resolved as NSString).deletingLastPathComponent
+                if !fm.fileExists(atPath: dir) {
+                    runtime.eventLoop.enqueueCallback {
+                        let ctx = runtime.context
+                        let err = ctx.createSystemError(
+                            "ENOENT: no such file or directory, open '\(path)'",
+                            code: "ENOENT", syscall: "open", path: path
+                        )
+                        writable.invokeMethod("emit", withArguments: ["error", err as Any])
+                    }
+                    return
+                }
+
+                // Create/truncate file for 'w' mode, create if needed for 'a' mode
+                if !isAppend {
+                    fm.createFile(atPath: resolved, contents: nil, attributes: nil)
+                } else if !fm.fileExists(atPath: resolved) {
+                    fm.createFile(atPath: resolved, contents: nil, attributes: nil)
+                }
+
+                guard let handle = FileHandle(forWritingAtPath: resolved) else {
+                    runtime.eventLoop.enqueueCallback {
+                        let ctx = runtime.context
+                        let err = ctx.createSystemError(
+                            "ENOENT: no such file or directory, open '\(path)'",
+                            code: "ENOENT", syscall: "open", path: path
+                        )
+                        writable.invokeMethod("emit", withArguments: ["error", err as Any])
+                    }
+                    return
+                }
+
+                if isAppend {
+                    handle.seekToEndOfFile()
+                }
+
+                runtime.eventLoop.enqueueCallback {
+                    let ctx = runtime.context
+
+                    // Helper: convert chunk to Data
+                    func chunkToData(_ chunk: JSValue) -> Data {
+                        if chunk.isString, let str = chunk.toString() {
+                            return str.data(using: .utf8) ?? Data()
+                        } else {
+                            let length = chunk.forProperty("length")?.toInt32() ?? 0
+                            var bytes = [UInt8]()
+                            for i in 0..<length {
+                                bytes.append(UInt8(chunk.atIndex(Int(i)).toInt32()))
+                            }
+                            return Data(bytes)
+                        }
+                    }
+
+                    // Real _write implementation
+                    let realWrite: @convention(block) (JSValue, JSValue, JSValue) -> Void = { chunk, encodingVal, callback in
+                        let data = chunkToData(chunk)
+
+                        DispatchQueue.global().async {
+                            handle.write(data)
+
+                            runtime.eventLoop.enqueueCallback {
+                                let current = writable.forProperty("bytesWritten")?.toInt32() ?? 0
+                                writable.setValue(Int(current) + data.count, forProperty: "bytesWritten")
+                                callback.call(withArguments: [] as [Any])
+                            }
+                        }
+                    }
+                    writable.setValue(unsafeBitCast(realWrite, to: AnyObject.self), forProperty: "_write")
+
+                    // Restore original end and add close-on-finish behavior
+                    writable.setValue(origEnd, forProperty: "end")
+
+                    let onFinish: @convention(block) () -> Void = {
+                        DispatchQueue.global().async {
+                            handle.closeFile()
+                            runtime.eventLoop.enqueueCallback {
+                                writable.invokeMethod("emit", withArguments: ["close"])
+                            }
+                        }
+                    }
+                    writable.invokeMethod("on", withArguments: ["finish", unsafeBitCast(onFinish, to: AnyObject.self)])
+
+                    // Flush pending operations in order
+                    let pending = pendingOps.copy() as! [Any]
+                    pendingOps.removeAllObjects()
+                    for item in pending {
+                        if let op = item as? PendingOp {
+                            switch op.kind {
+                            case .write:
+                                // Synchronously write pending data (file is open, we're on jsQueue)
+                                let chunk = op.args[0]
+                                let data = chunkToData(chunk)
+                                handle.write(data)
+                                let current = writable.forProperty("bytesWritten")?.toInt32() ?? 0
+                                writable.setValue(Int(current) + data.count, forProperty: "bytesWritten")
+                                op.args[2].call(withArguments: [] as [Any])
+                            case .end:
+                                writable.invokeMethod("end", withArguments: op.args)
+                            }
+                        }
+                    }
+
+                    writable.invokeMethod("emit", withArguments: ["open"])
+                }
+            }
+
+            return writable
+        }
+        fs.setValue(unsafeBitCast(createWriteStream, to: AnyObject.self), forProperty: "createWriteStream")
+
         // fs.realpathSync(path)
         let realpathSync: @convention(block) (String) -> JSValue = { path in
             guard let resolved = validatePath(path) else {
