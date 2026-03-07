@@ -197,6 +197,7 @@ public final class NodeRuntime: @unchecked Sendable {
         registerModule(ChildProcessModule.self)
         #endif
         registerModule(TTYModule.self)
+        registerModule(ReadlineModule.self)
 
         // Ensure global is set (ProcessModule sets it, but guard as fallback)
         context.evaluateScript("""
