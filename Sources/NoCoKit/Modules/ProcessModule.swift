@@ -237,6 +237,70 @@ public struct ProcessModule: NodeModule {
         """)!.call(withArguments: [stderr])
         process.setValue(stderr, forProperty: "stderr")
 
+        // process.stdin
+        let stdinIsTTY = isatty(STDIN_FILENO) != 0
+        let stdin = JSValue(newObjectIn: context)!
+        stdin.setValue(stdinIsTTY, forProperty: "isTTY")
+        stdin.setValue(0, forProperty: "fd")
+        stdin.setValue(true, forProperty: "readable")
+
+        // stdin EventEmitter stubs + resume/pause/setEncoding
+        context.evaluateScript("""
+            (function(s) {
+                s._listeners = {};
+                s.on = function(event, fn) {
+                    if (!s._listeners[event]) s._listeners[event] = [];
+                    s._listeners[event].push(fn);
+                    return s;
+                };
+                s.once = function(event, fn) {
+                    fn._once = true;
+                    return s.on(event, fn);
+                };
+                s.emit = function(event) {
+                    var args = Array.prototype.slice.call(arguments, 1);
+                    var fns = s._listeners[event] || [];
+                    var remaining = [];
+                    for (var i = 0; i < fns.length; i++) {
+                        fns[i].apply(s, args);
+                        if (!fns[i]._once) remaining.push(fns[i]);
+                    }
+                    s._listeners[event] = remaining;
+                    return fns.length > 0;
+                };
+                s.removeListener = function(event, fn) {
+                    var fns = s._listeners[event] || [];
+                    s._listeners[event] = fns.filter(function(f) { return f !== fn; });
+                    return s;
+                };
+                s.resume = function() { return s; };
+                s.pause = function() { return s; };
+                s.setEncoding = function() { return s; };
+            })
+        """)!.call(withArguments: [stdin])
+        process.setValue(stdin, forProperty: "stdin")
+
+        // __NoCo_startStdinReading: reads lines from stdin on a background thread
+        let startStdinReading: @convention(block) (JSValue) -> Void = { callback in
+            let el = runtime.eventLoop
+            DispatchQueue.global(qos: .userInitiated).async {
+                while let line = Swift.readLine(strippingNewline: false) {
+                    let captured = line
+                    el.enqueueCallback {
+                        callback.call(withArguments: [captured])
+                    }
+                }
+                // EOF
+                el.enqueueCallback {
+                    callback.call(withArguments: [JSValue(nullIn: runtime.context)!])
+                }
+            }
+        }
+        context.setObject(
+            unsafeBitCast(startStdinReading, to: AnyObject.self),
+            forKeyedSubscript: "__NoCo_startStdinReading" as NSString
+        )
+
         // process.memoryUsage()
         let memoryUsage: @convention(block) () -> JSValue = {
             var info = mach_task_basic_info()
