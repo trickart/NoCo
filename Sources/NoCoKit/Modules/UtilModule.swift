@@ -66,6 +66,46 @@ public struct UtilModule: NodeModule {
             util.isObject = function(v) { return typeof v === 'object' && v !== null; };
             util.isFunction = function(v) { return typeof v === 'function'; };
 
+            var kCustomPromisifiedSymbol = Symbol.for('nodejs.util.promisify.custom');
+
+            util.promisify = function promisify(original) {
+                if (typeof original !== 'function') {
+                    throw new TypeError('The "original" argument must be of type Function');
+                }
+
+                if (original[kCustomPromisifiedSymbol]) {
+                    var customFn = original[kCustomPromisifiedSymbol];
+                    if (typeof customFn !== 'function') {
+                        throw new TypeError('The "util.promisify.custom" argument must be of type Function');
+                    }
+                    return customFn;
+                }
+
+                function fn() {
+                    var args = Array.prototype.slice.call(arguments);
+                    var self = this;
+                    return new Promise(function(resolve, reject) {
+                        args.push(function(err, val) {
+                            if (err) {
+                                reject(err);
+                            } else if (arguments.length > 2) {
+                                var results = Array.prototype.slice.call(arguments, 1);
+                                resolve(results);
+                            } else {
+                                resolve(val);
+                            }
+                        });
+                        original.apply(self, args);
+                    });
+                }
+
+                return fn;
+            };
+
+            util.promisify.custom = kCustomPromisifiedSymbol;
+
+            util.inspect.custom = Symbol.for('nodejs.util.inspect.custom');
+
             return util;
         })();
         """
