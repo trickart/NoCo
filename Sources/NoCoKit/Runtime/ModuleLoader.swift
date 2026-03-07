@@ -62,6 +62,14 @@ public final class ModuleLoader {
             }
             let exports = moduleType.install(in: runtime.context, runtime: runtime)
             moduleCache[resolvedName] = exports
+
+            // Attach fs.promises property for Node.js compatibility
+            if resolvedName == "fs" {
+                let promises = createPromisifiedFS(exports, context: runtime.context)
+                exports.setValue(promises, forProperty: "promises")
+                moduleCache["fs/promises"] = promises
+            }
+
             return exports
         }
 
