@@ -384,6 +384,87 @@ public struct StreamModule: NodeModule {
             Stream.Transform = Transform;
             Stream.PassThrough = PassThrough;
             Stream.Stream = Stream;
+
+            // stream.pipeline(source, ...transforms, dest, callback)
+            Stream.pipeline = function pipeline() {
+                var args = Array.prototype.slice.call(arguments);
+                var callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
+                var streams = args;
+
+                if (streams.length < 2) {
+                    var err = new Error('Pipeline requires at least 2 streams');
+                    if (callback) { callback(err); return; }
+                    throw err;
+                }
+
+                var error;
+                function destroyer(stream, reading, writing) {
+                    if (stream.destroy) stream.destroy(error);
+                }
+
+                for (var i = 0; i < streams.length - 1; i++) {
+                    streams[i].pipe(streams[i + 1]);
+                }
+
+                var last = streams[streams.length - 1];
+                last.on('finish', function() {
+                    if (callback && !error) callback(null);
+                });
+                last.on('end', function() {
+                    if (callback && !error) callback(null);
+                });
+
+                for (var j = 0; j < streams.length; j++) {
+                    streams[j].on('error', function(err) {
+                        error = err;
+                        if (callback) callback(err);
+                    });
+                }
+
+                return last;
+            };
+
+            // stream.finished(stream, callback)
+            Stream.finished = function finished(stream, opts, callback) {
+                if (typeof opts === 'function') { callback = opts; opts = {}; }
+                opts = opts || {};
+
+                var done = false;
+                function onFinish() {
+                    if (!done) { done = true; if (callback) callback(null); }
+                }
+                function onError(err) {
+                    if (!done) { done = true; if (callback) callback(err); }
+                }
+
+                stream.on('end', onFinish);
+                stream.on('finish', onFinish);
+                stream.on('close', onFinish);
+                stream.on('error', onError);
+
+                return function() {
+                    stream.removeListener('end', onFinish);
+                    stream.removeListener('finish', onFinish);
+                    stream.removeListener('close', onFinish);
+                    stream.removeListener('error', onError);
+                };
+            };
+
+            // stream.Readable.from(iterable)
+            Readable.from = function from(iterable, opts) {
+                var readable = new Readable(opts);
+                var items = Array.isArray(iterable) ? iterable.slice() : [iterable];
+                var idx = 0;
+                readable._read = function() {
+                    if (idx < items.length) {
+                        this.push(items[idx++]);
+                    } else {
+                        this.push(null);
+                    }
+                };
+                return readable;
+            };
+
             return Stream;
         })(this.__NoCo_EventEmitter);
         """
