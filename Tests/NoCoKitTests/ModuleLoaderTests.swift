@@ -207,6 +207,31 @@ private func fixturesPath() -> String {
     #expect(result.toString() == "cors")
 }
 
+// MARK: - package.json exports "node" condition
+
+@Test func requirePackageExportsNodeConditionMain() async throws {
+    let runtime = NodeRuntime()
+    let fixturePath = fixturesPath()
+    let tmp = fixturePath + "/__test_\(UUID().uuidString).js"
+    try "module.exports = require('mock-node-exports-pkg').name;".write(
+        toFile: tmp, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+    let result = runtime.moduleLoader.loadFile(at: tmp)
+    // Should resolve via "node" condition, not "default"
+    #expect(result.toString() == "node-main")
+}
+
+@Test func requirePackageExportsNodeConditionSubpath() async throws {
+    let runtime = NodeRuntime()
+    let fixturePath = fixturesPath()
+    let tmp = fixturePath + "/__test_\(UUID().uuidString).js"
+    try "module.exports = require('mock-node-exports-pkg/utils').name;".write(
+        toFile: tmp, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+    let result = runtime.moduleLoader.loadFile(at: tmp)
+    #expect(result.toString() == "node-utils")
+}
+
 // MARK: - node: prefix support
 
 @Test func requireNodePrefixPath() async throws {
