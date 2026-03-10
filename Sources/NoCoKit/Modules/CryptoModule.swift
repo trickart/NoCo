@@ -48,7 +48,7 @@ public struct CryptoModule: NodeModule {
             hash.setValue(unsafeBitCast(update, to: AnyObject.self), forProperty: "update")
 
             let digest: @convention(block) (JSValue) -> JSValue = { encoding in
-                let enc = encoding.isUndefined ? "hex" : encoding.toString()!
+                let ctx = JSContext.current()!
                 let digestData: Data
 
                 switch algo {
@@ -63,25 +63,34 @@ public struct CryptoModule: NodeModule {
                 case "sha1", "sha-1":
                     digestData = Data(Insecure.SHA1.hash(data: inputData))
                 default:
-                    JSContext.current()!.exception = JSContext.current()!.createError(
+                    ctx.exception = ctx.createError(
                         "Unsupported hash algorithm: \(algo)", code: "ERR_CRYPTO_HASH_UNKNOWN")
-                    return JSValue(undefinedIn: JSContext.current())
+                    return JSValue(undefinedIn: ctx)
                 }
 
-                if enc == "hex" {
-                    let hex = digestData.map { String(format: "%02x", $0) }.joined()
-                    return JSValue(object: hex, in: JSContext.current())
-                } else if enc == "base64" {
-                    return JSValue(object: digestData.base64EncodedString(), in: JSContext.current())
-                } else if enc == "buffer" {
-                    let bufferCtor = JSContext.current()!.objectForKeyedSubscript("Buffer")!
+                // No encoding or undefined → return Buffer (Node.js behavior)
+                if encoding.isUndefined {
+                    let bufferCtor = ctx.objectForKeyedSubscript("Buffer")!
                     let fromFn = bufferCtor.objectForKeyedSubscript("from")!
                     let arr = [UInt8](digestData).map { Int($0) }
                     return fromFn.call(withArguments: [arr])
                 }
-                // Return as hex by default
+
+                let enc = encoding.toString()!
+                if enc == "hex" {
+                    let hex = digestData.map { String(format: "%02x", $0) }.joined()
+                    return JSValue(object: hex, in: ctx)
+                } else if enc == "base64" {
+                    return JSValue(object: digestData.base64EncodedString(), in: ctx)
+                } else if enc == "buffer" {
+                    let bufferCtor = ctx.objectForKeyedSubscript("Buffer")!
+                    let fromFn = bufferCtor.objectForKeyedSubscript("from")!
+                    let arr = [UInt8](digestData).map { Int($0) }
+                    return fromFn.call(withArguments: [arr])
+                }
+                // Unknown encoding: return hex
                 let hex = digestData.map { String(format: "%02x", $0) }.joined()
-                return JSValue(object: hex, in: JSContext.current())
+                return JSValue(object: hex, in: ctx)
             }
             hash.setValue(unsafeBitCast(digest, to: AnyObject.self), forProperty: "digest")
 
@@ -96,14 +105,20 @@ public struct CryptoModule: NodeModule {
             var inputData = Data()
             let algo = algorithm.lowercased()
 
-            let keyData: Data
-            if key.isString {
-                keyData = key.toString()!.data(using: .utf8)!
+            var keyData: Data
+            // Support KeyObject: extract _key (Buffer) if present
+            var actualKey = key
+            if let keyType = key.forProperty("type"), keyType.isString,
+               let innerKey = key.forProperty("_key"), !innerKey.isUndefined {
+                actualKey = innerKey
+            }
+            if actualKey.isString {
+                keyData = actualKey.toString()!.data(using: .utf8)!
             } else {
-                let length = Int(key.forProperty("length")?.toInt32() ?? 0)
+                let length = Int(actualKey.forProperty("length")?.toInt32() ?? 0)
                 var bytes = [UInt8]()
                 for i in 0..<length {
-                    bytes.append(UInt8(key.atIndex(i).toInt32()))
+                    bytes.append(UInt8(actualKey.atIndex(i).toInt32()))
                 }
                 keyData = Data(bytes)
             }
@@ -122,7 +137,7 @@ public struct CryptoModule: NodeModule {
             hmac.setValue(unsafeBitCast(update, to: AnyObject.self), forProperty: "update")
 
             let digest: @convention(block) (JSValue) -> JSValue = { encoding in
-                let enc = encoding.isUndefined ? "hex" : encoding.toString()!
+                let ctx = JSContext.current()!
                 let symmetricKey = SymmetricKey(data: keyData)
                 let digestData: Data
 
@@ -148,19 +163,28 @@ public struct CryptoModule: NodeModule {
                     h.update(data: inputData)
                     digestData = Data(h.finalize())
                 default:
-                    JSContext.current()!.exception = JSContext.current()!.createError(
+                    ctx.exception = ctx.createError(
                         "Unsupported HMAC algorithm: \(algo)", code: "ERR_CRYPTO_HASH_UNKNOWN")
-                    return JSValue(undefinedIn: JSContext.current())
+                    return JSValue(undefinedIn: ctx)
                 }
 
+                // No encoding or undefined → return Buffer (Node.js behavior)
+                if encoding.isUndefined {
+                    let bufferCtor = ctx.objectForKeyedSubscript("Buffer")!
+                    let fromFn = bufferCtor.objectForKeyedSubscript("from")!
+                    let arr = [UInt8](digestData).map { Int($0) }
+                    return fromFn.call(withArguments: [arr])
+                }
+
+                let enc = encoding.toString()!
                 if enc == "hex" {
                     let hex = digestData.map { String(format: "%02x", $0) }.joined()
-                    return JSValue(object: hex, in: JSContext.current())
+                    return JSValue(object: hex, in: ctx)
                 } else if enc == "base64" {
-                    return JSValue(object: digestData.base64EncodedString(), in: JSContext.current())
+                    return JSValue(object: digestData.base64EncodedString(), in: ctx)
                 }
                 let hex = digestData.map { String(format: "%02x", $0) }.joined()
-                return JSValue(object: hex, in: JSContext.current())
+                return JSValue(object: hex, in: ctx)
             }
             hmac.setValue(unsafeBitCast(digest, to: AnyObject.self), forProperty: "digest")
 
@@ -189,6 +213,103 @@ public struct CryptoModule: NodeModule {
             return buf
         }
         crypto.setValue(unsafeBitCast(randomBytes, to: AnyObject.self), forProperty: "randomBytes")
+
+        // crypto.KeyObject class + createSecretKey / createPrivateKey / createPublicKey
+        let keyObjectScript = """
+        (function(crypto) {
+            function KeyObject(type, key) {
+                this.type = type;
+                this._key = key;
+                if (type === 'secret') {
+                    this.symmetricKeySize = key.length;
+                }
+            }
+            KeyObject.prototype.export = function(options) {
+                return this._key;
+            };
+
+            crypto.KeyObject = KeyObject;
+
+            crypto.createSecretKey = function(key) {
+                if (typeof key === 'string') {
+                    key = Buffer.from(key);
+                }
+                return new KeyObject('secret', key);
+            };
+
+            crypto.createPrivateKey = function(key) {
+                var input = key;
+                if (typeof key === 'object' && key !== null && key.key) {
+                    input = key.key;
+                }
+                if (typeof input === 'string') {
+                    if (input.indexOf('-----BEGIN') === -1) {
+                        throw new TypeError('Invalid PEM-encoded private key');
+                    }
+                    return new KeyObject('private', Buffer.from(input));
+                }
+                if (input && typeof input === 'object' && input.type === 'Buffer') {
+                    return new KeyObject('private', input);
+                }
+                if (Buffer.isBuffer && Buffer.isBuffer(input)) {
+                    return new KeyObject('private', input);
+                }
+                throw new TypeError('Invalid key input');
+            };
+
+            crypto.createPublicKey = function(key) {
+                var input = key;
+                if (typeof key === 'object' && key !== null && key.key) {
+                    input = key.key;
+                }
+                if (typeof input === 'string') {
+                    if (input.indexOf('-----BEGIN') === -1) {
+                        throw new TypeError('Invalid PEM-encoded public key');
+                    }
+                    return new KeyObject('public', Buffer.from(input));
+                }
+                if (input && typeof input === 'object' && input.type === 'Buffer') {
+                    return new KeyObject('public', input);
+                }
+                if (Buffer.isBuffer && Buffer.isBuffer(input)) {
+                    return new KeyObject('public', input);
+                }
+                if (input instanceof KeyObject) {
+                    if (input.type === 'private') {
+                        return new KeyObject('public', input._key);
+                    }
+                    return input;
+                }
+                throw new TypeError('Invalid key input');
+            };
+        })
+        """
+        if let installKeyObject = context.evaluateScript(keyObjectScript) {
+            installKeyObject.call(withArguments: [crypto])
+        }
+
+        // crypto.randomFillSync(buffer, offset?, size?)
+        let randomFillSync: @convention(block) () -> JSValue = {
+            let args = JSContext.currentArguments() as? [JSValue] ?? []
+            let ctx = JSContext.current()!
+            guard let buffer = args.first else {
+                return JSValue(undefinedIn: ctx)
+            }
+
+            let offset = args.count > 1 ? Int(args[1].toInt32()) : 0
+            let bufLength = Int(buffer.objectForKeyedSubscript("length")!.toInt32())
+            let size = args.count > 2 ? Int(args[2].toInt32()) : (bufLength - offset)
+
+            var bytes = [UInt8](repeating: 0, count: size)
+            _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+
+            for i in 0..<size {
+                buffer.setValue(Int(bytes[i]), at: offset + i)
+            }
+
+            return buffer
+        }
+        crypto.setValue(unsafeBitCast(randomFillSync, to: AnyObject.self), forProperty: "randomFillSync")
 
         // crypto.randomUUID()
         let randomUUID: @convention(block) () -> String = {

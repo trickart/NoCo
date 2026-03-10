@@ -105,6 +105,166 @@ import JavaScriptCore
     #expect(messages.contains(where: { $0.1.contains("Unsupported") || $0.1.contains("fakealgo") }))
 }
 
+// MARK: - digest() returns Buffer when no encoding specified
+
+@Test func cryptoHashDigestReturnsBufferWithoutEncoding() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var d = require('crypto').createHash('sha256').update('hello').digest();
+        JSON.stringify({ isBuffer: Buffer.isBuffer(d), length: d.length });
+    """)
+    let json = result?.toString() ?? ""
+    #expect(json.contains("\"isBuffer\":true"))
+    #expect(json.contains("\"length\":32"))
+}
+
+@Test func cryptoHashDigestBufferContentMatchesHex() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var crypto = require('crypto');
+        var buf = crypto.createHash('sha256').update('hello').digest();
+        var hex = crypto.createHash('sha256').update('hello').digest('hex');
+        buf.toString('hex') === hex;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func cryptoHmacDigestReturnsBufferWithoutEncoding() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var d = require('crypto').createHmac('sha256', 'key').update('data').digest();
+        JSON.stringify({ isBuffer: Buffer.isBuffer(d), length: d.length });
+    """)
+    let json = result?.toString() ?? ""
+    #expect(json.contains("\"isBuffer\":true"))
+    #expect(json.contains("\"length\":32"))
+}
+
+// MARK: - crypto.randomFillSync
+
+@Test func cryptoRandomFillSyncUint8Array() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var crypto = require('crypto');
+        var buf = new Uint8Array(16);
+        var ret = crypto.randomFillSync(buf);
+        JSON.stringify({ same: ret === buf, length: buf.length, nonZero: buf.some(function(b) { return b !== 0; }) });
+    """)
+    let json = result?.toString() ?? ""
+    #expect(json.contains("\"same\":true"))
+    #expect(json.contains("\"length\":16"))
+    #expect(json.contains("\"nonZero\":true"))
+}
+
+@Test func cryptoRandomFillSyncWithOffset() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var crypto = require('crypto');
+        var buf = new Uint8Array(10);
+        crypto.randomFillSync(buf, 5, 5);
+        var firstFiveZero = buf[0] === 0 && buf[1] === 0 && buf[2] === 0 && buf[3] === 0 && buf[4] === 0;
+        var lastFiveSet = buf.slice(5).some(function(b) { return b !== 0; });
+        JSON.stringify({ firstFiveZero: firstFiveZero, lastFiveSet: lastFiveSet });
+    """)
+    let json = result?.toString() ?? ""
+    #expect(json.contains("\"firstFiveZero\":true"))
+}
+
+@Test func cryptoRandomFillSyncBuffer() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var crypto = require('crypto');
+        var buf = Buffer.alloc(32);
+        crypto.randomFillSync(buf);
+        var hasNonZero = false;
+        for (var i = 0; i < buf.length; i++) { if (buf[i] !== 0) { hasNonZero = true; break; } }
+        JSON.stringify({ isBuffer: Buffer.isBuffer(buf), nonZero: hasNonZero, length: buf.length });
+    """)
+    let json = result?.toString() ?? ""
+    #expect(json.contains("\"nonZero\":true"))
+    #expect(json.contains("\"length\":32"))
+}
+
+// MARK: - crypto.KeyObject / createSecretKey / createPrivateKey / createPublicKey
+
+@Test func cryptoCreateSecretKey() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var crypto = require('crypto');
+        var key = crypto.createSecretKey(Buffer.from('my-secret'));
+        JSON.stringify({ type: key.type, size: key.symmetricKeySize, isKeyObject: key instanceof crypto.KeyObject });
+    """)
+    let json = result?.toString() ?? ""
+    #expect(json.contains("\"type\":\"secret\""))
+    #expect(json.contains("\"isKeyObject\":true"))
+}
+
+@Test func cryptoCreateSecretKeyFromString() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var crypto = require('crypto');
+        var key = crypto.createSecretKey('my-secret');
+        key.type === 'secret' && key instanceof crypto.KeyObject;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func cryptoCreatePrivateKeyRejectsBareString() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var crypto = require('crypto');
+        var threw = false;
+        try { crypto.createPrivateKey('not-a-pem'); } catch(e) { threw = true; }
+        threw;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func cryptoCreatePrivateKeyAcceptsPEM() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var crypto = require('crypto');
+        var key = crypto.createPrivateKey('-----BEGIN PRIVATE KEY-----\\nfake\\n-----END PRIVATE KEY-----');
+        key.type === 'private';
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func cryptoCreatePublicKeyRejectsBareString() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var crypto = require('crypto');
+        var threw = false;
+        try { crypto.createPublicKey('not-a-pem'); } catch(e) { threw = true; }
+        threw;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func cryptoKeyObjectExport() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var crypto = require('crypto');
+        var key = crypto.createSecretKey(Buffer.from('test-key'));
+        key.export().toString() === 'test-key';
+    """)
+    #expect(result?.toBool() == true)
+}
+
+// MARK: - createHmac with KeyObject
+
+@Test func cryptoHmacWithKeyObject() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var crypto = require('crypto');
+        var key = crypto.createSecretKey(Buffer.from('secret'));
+        var hmac1 = crypto.createHmac('sha256', key).update('hello').digest('hex');
+        var hmac2 = crypto.createHmac('sha256', 'secret').update('hello').digest('hex');
+        hmac1 === hmac2;
+    """)
+    #expect(result?.toBool() == true)
+}
+
 @Test func cryptoHashChaining() async throws {
     let runtime = NodeRuntime()
     let result = runtime.evaluate("""
