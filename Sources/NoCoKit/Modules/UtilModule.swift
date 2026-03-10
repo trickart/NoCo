@@ -106,6 +106,9 @@ public struct UtilModule: NodeModule {
 
             util.inspect.custom = Symbol.for('nodejs.util.inspect.custom');
 
+            util.TextDecoder = typeof TextDecoder !== 'undefined' ? TextDecoder : undefined;
+            util.TextEncoder = typeof TextEncoder !== 'undefined' ? TextEncoder : undefined;
+
             return util;
         })();
         """
