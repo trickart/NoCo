@@ -254,6 +254,40 @@ func fsReadFileAsyncDuringEventLoop() async throws {
     #expect(result?.toString() == "true:true")
 }
 
+@Test func fsStatSyncHasInodeAndMode() async throws {
+    let runtime = NodeRuntime()
+    let tmpPath = NSTemporaryDirectory() + "noco_test_stat_ino_\(UUID().uuidString).txt"
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    FileManager.default.createFile(atPath: tmpPath, contents: "test".data(using: .utf8))
+
+    let result = runtime.evaluate("""
+        var fs = require('fs');
+        var stat = fs.statSync('\(tmpPath)');
+        var results = [
+            typeof stat.ino === 'number' && stat.ino > 0,
+            typeof stat.dev === 'number',
+            typeof stat.nlink === 'number' && stat.nlink >= 1,
+            typeof stat.mode === 'number' && stat.mode > 0
+        ];
+        results.every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func fsStatSyncModeIncludesFileType() async throws {
+    let runtime = NodeRuntime()
+
+    let result = runtime.evaluate("""
+        var fs = require('fs');
+        var fileStat = fs.statSync('/tmp');
+        // /tmp is a directory: mode should have S_IFDIR (0o040000) bit set
+        var isDirMode = (fileStat.mode & 0o170000) === 0o040000;
+        isDirMode;
+    """)
+    #expect(result?.toBool() == true)
+}
+
 @Test func fsStatSyncDateConsistency() async throws {
     let runtime = NodeRuntime()
     let tmpPath = NSTemporaryDirectory() + "noco_test_stat_date_cons_\(UUID().uuidString).txt"
