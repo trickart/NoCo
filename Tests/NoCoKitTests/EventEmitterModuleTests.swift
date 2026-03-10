@@ -163,3 +163,48 @@ import JavaScriptCore
     """)
     #expect(result?.toString() == "foo,bar")
 }
+
+// MARK: - EventEmitter Lazy Initialization (mixin pattern)
+
+@Test func eventEmitterLazyInitOnMixin() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var EE = require('events');
+        // Simulate Express-style mixin: copy methods without calling constructor
+        var obj = {};
+        Object.getOwnPropertyNames(EE.prototype).forEach(function(key) {
+            if (key !== 'constructor') obj[key] = EE.prototype[key];
+        });
+        // _events is not initialized (no constructor call)
+        // These should not throw due to lazy init
+        obj.on('test', function() {});
+        obj.emit('test');
+        obj.listenerCount('test');
+    """)
+    #expect(result?.toInt32() == 1)
+}
+
+@Test func eventEmitterLazyInitAllMethods() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var EE = require('events');
+        var obj = {};
+        Object.getOwnPropertyNames(EE.prototype).forEach(function(key) {
+            if (key !== 'constructor') obj[key] = EE.prototype[key];
+        });
+        var results = [];
+        // Test each method works without constructor
+        results.push(obj.eventNames().length === 0);
+        results.push(obj.listeners('x').length === 0);
+        results.push(obj.rawListeners('x').length === 0);
+        results.push(obj.listenerCount('x') === 0);
+        obj.setMaxListeners(20);
+        results.push(obj.getMaxListeners() === 20);
+        obj.prependListener('x', function() {});
+        results.push(obj.listenerCount('x') === 1);
+        obj.removeAllListeners();
+        results.push(obj.listenerCount('x') === 0);
+        results.every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}

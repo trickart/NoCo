@@ -16,6 +16,12 @@ public struct EventEmitterModule: NodeModule {
                     this._maxListeners = EventEmitter.defaultMaxListeners;
                 }
 
+                // Lazy initialization for mixin pattern (e.g. Express copies methods without calling constructor)
+                _initEvents() {
+                    if (!this._events) this._events = Object.create(null);
+                    if (this._maxListeners === undefined) this._maxListeners = EventEmitter.defaultMaxListeners;
+                }
+
                 static get defaultMaxListeners() {
                     return EventEmitter._defaultMaxListeners || 10;
                 }
@@ -25,15 +31,18 @@ public struct EventEmitterModule: NodeModule {
                 }
 
                 setMaxListeners(n) {
+                    this._initEvents();
                     this._maxListeners = n;
                     return this;
                 }
 
                 getMaxListeners() {
+                    this._initEvents();
                     return this._maxListeners;
                 }
 
                 emit(event) {
+                    this._initEvents();
                     const listeners = this._events[event];
                     if (!listeners || listeners.length === 0) {
                         if (event === 'error') {
@@ -61,6 +70,7 @@ public struct EventEmitterModule: NodeModule {
                 }
 
                 addListener(event, listener) {
+                    this._initEvents();
                     if (typeof listener !== 'function') {
                         throw new TypeError('The "listener" argument must be of type Function.');
                     }
@@ -85,6 +95,7 @@ public struct EventEmitterModule: NodeModule {
                 }
 
                 removeListener(event, listener) {
+                    this._initEvents();
                     const listeners = this._events[event];
                     if (!listeners) return this;
 
@@ -104,6 +115,7 @@ public struct EventEmitterModule: NodeModule {
                 }
 
                 removeAllListeners(event) {
+                    this._initEvents();
                     if (event !== undefined) {
                         delete this._events[event];
                     } else {
@@ -113,23 +125,28 @@ public struct EventEmitterModule: NodeModule {
                 }
 
                 listeners(event) {
+                    this._initEvents();
                     return this._events[event] ? this._events[event].slice() : [];
                 }
 
                 rawListeners(event) {
+                    this._initEvents();
                     return this._events[event] ? this._events[event].slice() : [];
                 }
 
                 listenerCount(event) {
+                    this._initEvents();
                     const listeners = this._events[event];
                     return listeners ? listeners.length : 0;
                 }
 
                 eventNames() {
+                    this._initEvents();
                     return Object.keys(this._events);
                 }
 
                 prependListener(event, listener) {
+                    this._initEvents();
                     if (!this._events[event]) {
                         this._events[event] = [];
                     }
