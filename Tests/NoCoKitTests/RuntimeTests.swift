@@ -71,3 +71,76 @@ import JavaScriptCore
 
     #expect(messages.contains(where: { $0.0 == .error && $0.1.contains("test exception") }))
 }
+
+// MARK: - Error.captureStackTrace / Error.prepareStackTrace
+
+@Test func errorCaptureStackTraceExists() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        typeof Error.captureStackTrace === 'function' && typeof Error.stackTraceLimit === 'number';
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func errorCaptureStackTraceAddsStack() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var obj = {};
+        Error.captureStackTrace(obj);
+        typeof obj.stack === 'string';
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func errorPrepareStackTraceCallSiteObjects() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        (function() {
+            var callSites;
+            Error.prepareStackTrace = function(err, stack) {
+                callSites = stack;
+                return stack;
+            };
+            function inner() {
+                var obj = {};
+                Error.captureStackTrace(obj);
+                return obj.stack;
+            }
+            inner();
+            Error.prepareStackTrace = undefined;
+            // callSites should be an array of call site objects
+            var ok = Array.isArray(callSites) && callSites.length > 0;
+            if (!ok) return false;
+            var site = callSites[0];
+            ok = ok && typeof site.getFileName === 'function';
+            ok = ok && typeof site.getLineNumber === 'function';
+            ok = ok && typeof site.getColumnNumber === 'function';
+            ok = ok && typeof site.getFunctionName === 'function';
+            ok = ok && typeof site.isEval === 'function';
+            ok = ok && typeof site.isNative === 'function';
+            ok = ok && typeof site.toString === 'function';
+            return ok;
+        })();
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func errorCaptureStackTraceWithPrepare() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        // Simulate depd pattern: override prepareStackTrace to get raw call sites
+        function getStack() {
+            var prep = Error.prepareStackTrace;
+            Error.prepareStackTrace = function(obj, stack) { return stack; };
+            var obj = {};
+            Error.captureStackTrace(obj);
+            var stack = obj.stack;
+            Error.prepareStackTrace = prep;
+            return stack;
+        }
+        function caller() { return getStack(); }
+        var stack = caller();
+        Array.isArray(stack) && stack.length > 0;
+    """)
+    #expect(result?.toBool() == true)
+}
