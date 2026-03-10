@@ -65,6 +65,43 @@ import JavaScriptCore
     #expect(result?.toBool() == true)
 }
 
+// MARK: - util.formatWithOptions
+
+@Test func utilFormatWithOptionsBasic() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var util = require('util');
+        util.formatWithOptions({}, 'hello %s', 'world');
+    """)
+    #expect(result?.toString() == "hello world")
+}
+
+@Test func utilFormatWithOptionsMultipleArgs() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var util = require('util');
+        util.formatWithOptions({}, '%s + %d = %d', 'one', 2, 3);
+    """)
+    #expect(result?.toString() == "one + 2 = 3")
+}
+
+@Test func utilFormatWithOptionsNoFormatString() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var util = require('util');
+        util.formatWithOptions({}, 1, 2, 3);
+    """)
+    #expect(result?.toString() == "1 2 3")
+}
+
+@Test func utilFormatWithOptionsIsFunction() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        typeof require('util').formatWithOptions === 'function';
+    """)
+    #expect(result?.toBool() == true)
+}
+
 @Test func utilPromisifyCustomSymbolValue() async throws {
     let runtime = NodeRuntime()
     let result = runtime.evaluate("""
