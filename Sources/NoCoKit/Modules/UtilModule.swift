@@ -49,6 +49,11 @@ public struct UtilModule: NodeModule {
                 return result;
             };
 
+            util.formatWithOptions = function(inspectOptions) {
+                var args = Array.prototype.slice.call(arguments, 1);
+                return util.format.apply(null, args);
+            };
+
             util.inspect = function(obj, opts) {
                 try {
                     return JSON.stringify(obj);
