@@ -10,9 +10,9 @@ NoCo implements CommonJS module resolution and a subset of Node.js built-in modu
 
 - **JavaScriptCore-powered** — Uses Apple's built-in JS engine; no V8 dependency
 - **CommonJS `require()`** — Full module resolution: built-in modules → cache → `node_modules` → filesystem
-- **Node.js built-in modules** — `fs`, `path`, `crypto`, `http`, `http2`, `stream`, `net`, `url`, `zlib`, and more
+- **Node.js built-in modules** — `fs`, `path`, `crypto`, `http`, `https`, `http2`, `stream`, `net`, `url`, `zlib`, `child_process`, and more
 - **Web Platform APIs** — `Headers`, `Request`, `Response`, `ReadableStream`, `AbortController` etc. for Fetch API compatibility
-- **HTTP/TCP servers** — `http.createServer()`, `http2.createServer()`, and `net.createServer()` powered by [SwiftNIO](https://github.com/apple/swift-nio)
+- **HTTP/HTTPS/TCP servers** — `http.createServer()`, `https.createServer()`, `http2.createServer()`, and `net.createServer()` powered by [SwiftNIO](https://github.com/apple/swift-nio)
 - **Event loop** — `setTimeout`, `setInterval`, `process.nextTick`, and async I/O
 - **Web framework support** — Run frameworks like [Hono](https://hono.dev/) on NoCo
 - **npm compatibility** — Works with real-world npm packages (tested with `pngjs`, `receiptline`, `iconv-lite`, etc.)
@@ -122,7 +122,7 @@ runtime.runEventLoop(timeout: .infinity)
 | Module | Description |
 |--------|-------------|
 | `console` | `log`, `warn`, `error`, `info`, `debug`, `dir`, `assert`, `time`/`timeEnd` |
-| `process` | `argv`, `env`, `cwd()`, `pid`, `platform`, `arch`, `version`, `versions`, `hrtime()`, `nextTick()`, `stdout`, `exit()` |
+| `process` | `argv`, `env`, `cwd()`, `pid`, `platform`, `arch`, `version`, `versions`, `hrtime()`, `nextTick()`, `stdout`, `stderr`, `exit()` |
 | `timers` | `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval` |
 | `Buffer` | Node.js-compatible Buffer class (Uint8Array-based) |
 | `EventEmitter` | Event emitter class |
@@ -160,19 +160,25 @@ runtime.runEventLoop(timeout: .infinity)
 | `fs` | `readFileSync`, `writeFileSync`, `existsSync`, `statSync`, `readdirSync`, `mkdirSync`, `unlinkSync`, `renameSync`, `appendFileSync`, `copyFileSync`, `accessSync`, `chmodSync`, and async variants |
 | `fs/promises` | Promise-based versions of `fs` methods |
 | `crypto` | `createHash`, `createHmac`, `randomBytes`, `randomUUID` (SHA-1, SHA-256, SHA-384, SHA-512, MD5) |
-| `stream` | `Readable`, `Writable`, `Transform`, `Duplex`, `PassThrough`, `Readable.toWeb()` |
+| `stream` | `Readable`, `Writable`, `Transform`, `Duplex`, `PassThrough`, `Readable.toWeb()`, `Readable.from()`, `pipeline`, `finished` |
 | `http` | `createServer`, `request`, `get`, `Server`, `IncomingMessage`, `ServerResponse` (server: SwiftNIO, client: URLSession) |
+| `https` | `createServer`, `request`, `get` (TLS-enabled HTTP server/client via SwiftNIO) |
 | `http2` | `createServer`, `createSecureServer`, `connect`, `getDefaultSettings`, `constants` (server: SwiftNIO + NIOHTTP2) |
 | `net` | `createServer`, `connect`, `Socket`, `Server`, `isIP`, `isIPv4`, `isIPv6` (server: SwiftNIO, client: NWConnection) |
 | `url` | `parse`, `format`, `resolve` |
 | `zlib` | `gzip`, `gunzip`, `deflate`, `inflate`, `deflateRaw`, `inflateRaw` |
-| `util` | `inherits`, `deprecate`, `format` |
+| `util` | `inherits`, `deprecate`, `format`, `promisify`, `types` |
 | `assert` | `ok`, `equal`, `strictEqual`, `notEqual`, `deepStrictEqual`, `throws`, `fail` |
 | `events` | `EventEmitter` |
 | `string_decoder` | `StringDecoder` |
 | `buffer` | `Buffer` |
 | `os` | `arch`, `platform`, `type`, `release`, `version`, `hostname`, `homedir`, `tmpdir`, `totalmem`, `freemem`, `cpus`, `loadavg`, `uptime`, `endianness`, `networkInterfaces`, `userInfo`, `EOL`, `constants` |
 | `querystring` | `parse`/`decode`, `stringify`/`encode`, `escape`, `unescape` |
+| `child_process` | `execSync`, `spawn` |
+| `readline` | `createInterface`, `Interface` (question, prompt, close) |
+| `tty` | `isatty`, `ReadStream`, `WriteStream` |
+| `constants` | `fs` constants (`F_OK`, `R_OK`, `W_OK`, `X_OK`, `O_RDONLY`, etc.) |
+| `module` | `createRequire`, `builtinModules`, `isBuiltin`, `Module` |
 | `async_hooks` | `AsyncLocalStorage` |
 | `timers` | `setTimeout`, `setInterval` |
 
