@@ -294,8 +294,9 @@ public final class ModuleLoader {
     private func extractExportPath(_ entry: Any) -> String? {
         if let str = entry as? String { return str }
         if let obj = entry as? [String: Any] {
-            if let req = obj["require"] { return extractExportPath(req) }
-            if let def = obj["default"] { return extractExportPath(def) }
+            if let node = obj["node"] { if let p = extractExportPath(node) { return p } }
+            if let req = obj["require"] { if let p = extractExportPath(req) { return p } }
+            if let def = obj["default"] { if let p = extractExportPath(def) { return p } }
         }
         return nil
     }
