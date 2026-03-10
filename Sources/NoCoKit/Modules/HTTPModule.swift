@@ -372,7 +372,10 @@ public struct HTTPModule: NodeModule {
 
             if args[0].isString {
                 urlString = args[0].toString()
-                if args.count > 1 && args[1].isObject && !args[1].hasProperty("on") {
+                let isFunction = args.count > 1
+                    ? ctx.evaluateScript("(function(v){return typeof v==='function'})")!.call(withArguments: [args[1]]).toBool()
+                    : false
+                if args.count > 1 && !isFunction {
                     options = args[1]
                     callback = args.count > 2 ? args[2] : nil
                 } else {
@@ -445,8 +448,10 @@ public struct HTTPModule: NodeModule {
                     urlReq.httpBody = bodyData
                 }
 
+                runtime.eventLoop.retainHandle()
                 let task = URLSession.shared.dataTask(with: urlReq) { data, response, error in
                     runtime.eventLoop.enqueueCallback {
+                        defer { runtime.eventLoop.releaseHandle() }
                         let ctx = runtime.context
                         if let error = error {
                             let jsErr = ctx.createError(error.localizedDescription)
