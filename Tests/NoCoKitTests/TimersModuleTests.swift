@@ -109,3 +109,78 @@ import JavaScriptCore
     """)
     #expect(result?.toBool() == true)
 }
+
+// MARK: - setImmediate / clearImmediate
+
+@Test func setImmediateBasic() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("setImmediate(function() { console.log('immediate'); })")
+    runtime.runEventLoop(timeout: 1)
+
+    #expect(messages.contains("immediate"))
+}
+
+@Test func setImmediateWithArgs() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("setImmediate(function(a, b) { console.log(a + ':' + b); }, 'hello', 'world')")
+    runtime.runEventLoop(timeout: 1)
+
+    #expect(messages.contains("hello:world"))
+}
+
+@Test func clearImmediatePreventsExecution() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var id = setImmediate(function() { console.log('should not fire'); });
+        clearImmediate(id);
+    """)
+    runtime.runEventLoop(timeout: 0.2)
+
+    #expect(!messages.contains("should not fire"))
+}
+
+@Test func setImmediateIsGlobal() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        typeof setImmediate === 'function' && typeof clearImmediate === 'function';
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func setImmediateInTimersModule() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var timers = require('timers');
+        typeof timers.setImmediate === 'function' && typeof timers.clearImmediate === 'function';
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func setImmediateExecutesBeforeTimeout() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        setTimeout(function() { console.log('timeout'); }, 50);
+        setImmediate(function() { console.log('immediate'); });
+    """)
+    runtime.runEventLoop(timeout: 1)
+
+    // Both should fire; immediate should fire first
+    #expect(messages.contains("immediate"))
+    #expect(messages.contains("timeout"))
+    if let imIdx = messages.firstIndex(of: "immediate"),
+       let toIdx = messages.firstIndex(of: "timeout") {
+        #expect(imIdx < toIdx)
+    }
+}

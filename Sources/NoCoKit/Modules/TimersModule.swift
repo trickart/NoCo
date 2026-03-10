@@ -68,6 +68,31 @@ public struct TimersModule: NodeModule {
             runtime.eventLoop.clearTimer(id: id)
         }
 
+        // setImmediate(callback, ...args) — equivalent to setTimeout(fn, 0)
+        let setImmediate: @convention(block) () -> JSValue = {
+            let args = JSContext.currentArguments() as? [JSValue] ?? []
+            guard let callback = args.first, !callback.isUndefined else {
+                return JSValue(int32: 0, in: JSContext.current())
+            }
+            let extraArgs = args.count > 1 ? Array(args[1...]) : []
+
+            let wrappedCallback: JSValue
+            if extraArgs.isEmpty {
+                wrappedCallback = callback
+            } else {
+                let bindFn = callback.invokeMethod("bind", withArguments: [JSValue(nullIn: context)!] + extraArgs)!
+                wrappedCallback = bindFn
+            }
+
+            let id = runtime.eventLoop.scheduleTimer(
+                callback: wrappedCallback,
+                delay: 0,
+                repeats: false,
+                context: context
+            )
+            return JSValue(int32: Int32(id), in: JSContext.current())
+        }
+
         context.setObject(unsafeBitCast(setTimeout, to: AnyObject.self),
                           forKeyedSubscript: "setTimeout" as NSString)
         context.setObject(unsafeBitCast(setInterval, to: AnyObject.self),
@@ -76,12 +101,18 @@ public struct TimersModule: NodeModule {
                           forKeyedSubscript: "clearTimeout" as NSString)
         context.setObject(unsafeBitCast(clearTimer, to: AnyObject.self),
                           forKeyedSubscript: "clearInterval" as NSString)
+        context.setObject(unsafeBitCast(setImmediate, to: AnyObject.self),
+                          forKeyedSubscript: "setImmediate" as NSString)
+        context.setObject(unsafeBitCast(clearTimer, to: AnyObject.self),
+                          forKeyedSubscript: "clearImmediate" as NSString)
 
         // Also available as require('timers')
         exports.setValue(unsafeBitCast(setTimeout, to: AnyObject.self), forProperty: "setTimeout")
         exports.setValue(unsafeBitCast(setInterval, to: AnyObject.self), forProperty: "setInterval")
         exports.setValue(unsafeBitCast(clearTimer, to: AnyObject.self), forProperty: "clearTimeout")
         exports.setValue(unsafeBitCast(clearTimer, to: AnyObject.self), forProperty: "clearInterval")
+        exports.setValue(unsafeBitCast(setImmediate, to: AnyObject.self), forProperty: "setImmediate")
+        exports.setValue(unsafeBitCast(clearTimer, to: AnyObject.self), forProperty: "clearImmediate")
 
         return exports
     }
