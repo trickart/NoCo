@@ -383,6 +383,7 @@ public struct ChildProcessModule: NodeModule {
                 s.pipe = function(dest) {
                     s.on('data', function(chunk) { dest.write(chunk); });
                     s.on('end', function() { if (typeof dest.end === 'function') dest.end(); });
+                    if (typeof dest.emit === 'function') dest.emit('pipe', s);
                     return dest;
                 };
                 s.setEncoding = function(enc) { s._encoding = enc; return s; };
@@ -420,12 +421,54 @@ public struct ChildProcessModule: NodeModule {
                     return s;
                 };
                 s.setEncoding = function(enc) { s._encoding = enc; return s; };
+                s.pipe = function(dest) {
+                    s.on('data', function(chunk) { dest.write(chunk); });
+                    s.on('end', function() { if (typeof dest.end === 'function') dest.end(); });
+                    if (typeof dest.emit === 'function') dest.emit('pipe', s);
+                    return dest;
+                };
             })
         """)!.call(withArguments: [stderr])
         childProcess.setValue(stderr, forProperty: "stderr")
 
-        // stdin (writable)
+        // stdin (writable with EventEmitter)
         let stdin = JSValue(newObjectIn: context)!
+        context.evaluateScript("""
+            (function(s) {
+                s._listeners = {};
+                s.destroyed = false;
+                s.on = function(event, fn) {
+                    if (!s._listeners[event]) s._listeners[event] = [];
+                    s._listeners[event].push(fn);
+                    return s;
+                };
+                s.once = function(event, fn) {
+                    fn._once = true;
+                    return s.on(event, fn);
+                };
+                s.emit = function(event) {
+                    var args = Array.prototype.slice.call(arguments, 1);
+                    var fns = s._listeners[event] || [];
+                    var remaining = [];
+                    for (var i = 0; i < fns.length; i++) {
+                        fns[i].apply(s, args);
+                        if (!fns[i]._once) remaining.push(fns[i]);
+                    }
+                    s._listeners[event] = remaining;
+                    return fns.length > 0;
+                };
+                s.removeListener = function(event, fn) {
+                    var fns = s._listeners[event] || [];
+                    s._listeners[event] = fns.filter(function(f) { return f !== fn; });
+                    return s;
+                };
+                s.removeAllListeners = function(event) {
+                    if (event) s._listeners[event] = [];
+                    else s._listeners = {};
+                    return s;
+                };
+            })
+        """)!.call(withArguments: [stdin])
         let stdinWrite: @convention(block) (JSValue) -> Bool = { data in
             let bytes: Data
             if data.isString {
