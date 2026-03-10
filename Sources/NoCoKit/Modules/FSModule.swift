@@ -199,8 +199,18 @@ public struct FSModule: NodeModule {
             let size = attrs[.size] as? Int ?? 0
             let mtime = attrs[.modificationDate] as? Date ?? Date()
             let ctime = attrs[.creationDate] as? Date ?? Date()
+            let ino = (attrs[.systemFileNumber] as? UInt) ?? 0
+            let dev = (attrs[.systemNumber] as? UInt) ?? 0
+            let nlink = (attrs[.referenceCount] as? UInt) ?? 1
+            let posix = (attrs[.posixPermissions] as? Int) ?? 0o644
+            // S_IFREG = 0o100000, S_IFDIR = 0o040000
+            let mode = (isDirFlag.boolValue ? 0o040000 : 0o100000) | posix
 
             stat.setValue(size, forProperty: "size")
+            stat.setValue(ino, forProperty: "ino")
+            stat.setValue(dev, forProperty: "dev")
+            stat.setValue(nlink, forProperty: "nlink")
+            stat.setValue(mode, forProperty: "mode")
             let mtimeMs = floor(mtime.timeIntervalSince1970 * 1000)
             let ctimeMs = floor(ctime.timeIntervalSince1970 * 1000)
             stat.setValue(mtimeMs, forProperty: "mtimeMs")
