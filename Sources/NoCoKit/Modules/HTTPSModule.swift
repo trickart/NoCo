@@ -1,59 +1,83 @@
 import Foundation
 @preconcurrency import JavaScriptCore
 import Network
-import NIOCore
-import NIOHTTP1
-import NIOTransportServices
+import Security
+import Synchronization
 
-/// Implements Node.js `http` module. Client uses URLSession; server uses NIOHTTP1.
-public struct HTTPModule: NodeModule {
-    public static let moduleName = "http"
+/// Implements Node.js `https` module with TLS support.
+/// Server uses Network.framework TLS via NIOTransportServices.
+/// Client uses URLSession (already supports HTTPS) with `rejectUnauthorized` option.
+public struct HTTPSModule: NodeModule {
+    public static let moduleName = "https"
 
     @discardableResult
     public static func install(in context: JSContext, runtime: NodeRuntime) -> JSValue {
-        let http = JSValue(newObjectIn: context)!
+        // Get the http module for reuse
+        let http = HTTPModule.install(in: context, runtime: runtime)
+        let https = JSValue(newObjectIn: context)!
 
-        // Per-runtime server storage
-        final class HTTPStorage {
+        // Copy shared properties from http (STATUS_CODES, METHODS, etc.)
+        let copyScript = """
+        (function(src, dst) {
+            ['STATUS_CODES', 'METHODS', 'IncomingMessage', 'ServerResponse'].forEach(function(key) {
+                if (src[key]) dst[key] = src[key];
+            });
+        })
+        """
+        context.evaluateScript(copyScript)!.call(withArguments: [http, https])
+
+        https.setValue(JSValue(newObjectIn: context)!, forProperty: "globalAgent")
+        https.forProperty("globalAgent")?.setValue(443, forProperty: "defaultPort")
+        https.forProperty("globalAgent")?.setValue("https:", forProperty: "protocol")
+
+        // --- Per-runtime HTTPS server storage ---
+        final class HTTPSStorage {
             var servers: [Int: NIOHTTPServer] = [:]
             var nextServerId: Int = 1
             var pendingRequests: [Int: HTTPRequestState] = [:]
         }
-        let storage = HTTPStorage()
+        let storage = HTTPSStorage()
 
-        // --- Server bridge functions ---
+        // __httpsCreateServer(certPEM, keyPEM, passphrase?) -> serverId or -1 on error
+        let createServerBlock: @convention(block) (String, String, JSValue) -> JSValue = { certPEM, keyPEM, passphraseVal in
+            let ctx = JSContext.current()!
+            let passphrase = passphraseVal.isUndefined || passphraseVal.isNull ? nil : passphraseVal.toString()
 
-        // __httpCreateServer() -> serverId
-        let createServerBlock: @convention(block) () -> Int = {
+            guard let tlsOpts = PEMHelper.createTLSOptions(certPEM: certPEM, keyPEM: keyPEM, passphrase: passphrase) else {
+                let err = ctx.evaluateScript("new Error('Failed to parse TLS certificate/key')")!
+                return err
+            }
+
             let id = storage.nextServerId
             storage.nextServerId += 1
             let server = NIOHTTPServer(eventLoop: runtime.eventLoop) { reqState in
                 storage.pendingRequests[reqState.requestId] = reqState
             }
+            server.tlsOptions = tlsOpts
             storage.servers[id] = server
-            return id
+            return JSValue(int32: Int32(id), in: ctx)
         }
-        context.setObject(createServerBlock, forKeyedSubscript: "__httpCreateServer" as NSString)
+        context.setObject(createServerBlock, forKeyedSubscript: "__httpsCreateServer" as NSString)
 
-        // __httpServerListen(serverId, port, host, jsServer)
+        // __httpsServerListen(serverId, port, host, jsServer)
         let serverListenBlock: @convention(block) (Int, Int, String, JSValue) -> Void = { id, port, host, jsServer in
             guard let server = storage.servers[id] else { return }
             server.jsServer = jsServer
             runtime.eventLoop.retainHandle()
             server.bind(host: host, port: port)
         }
-        context.setObject(serverListenBlock, forKeyedSubscript: "__httpServerListen" as NSString)
+        context.setObject(serverListenBlock, forKeyedSubscript: "__httpsServerListen" as NSString)
 
-        // __httpServerClose(serverId)
+        // __httpsServerClose(serverId)
         let serverCloseBlock: @convention(block) (Int) -> Void = { id in
             guard let server = storage.servers[id] else { return }
             server.close()
             storage.servers.removeValue(forKey: id)
             runtime.eventLoop.releaseHandle()
         }
-        context.setObject(serverCloseBlock, forKeyedSubscript: "__httpServerClose" as NSString)
+        context.setObject(serverCloseBlock, forKeyedSubscript: "__httpsServerClose" as NSString)
 
-        // __httpServerAddress(serverId)
+        // __httpsServerAddress(serverId)
         let serverAddressBlock: @convention(block) (Int) -> JSValue = { id in
             let ctx = JSContext.current()!
             guard let server = storage.servers[id] else {
@@ -65,9 +89,9 @@ public struct HTTPModule: NodeModule {
             obj.setValue("IPv4", forProperty: "family")
             return obj
         }
-        context.setObject(serverAddressBlock, forKeyedSubscript: "__httpServerAddress" as NSString)
+        context.setObject(serverAddressBlock, forKeyedSubscript: "__httpsServerAddress" as NSString)
 
-        // __httpWriteHead(requestId, statusCode, headersArray)
+        // __httpsWriteHead / __httpsWriteBody / __httpsEnd (reuse HTTP bridge via storage)
         let writeHeadBlock: @convention(block) (Int, Int, JSValue) -> Void = { reqId, statusCode, jsHeaders in
             guard let state = storage.pendingRequests[reqId] else { return }
             state.statusCode = statusCode
@@ -80,16 +104,14 @@ public struct HTTPModule: NodeModule {
                 i += 2
             }
         }
-        context.setObject(writeHeadBlock, forKeyedSubscript: "__httpWriteHead" as NSString)
+        context.setObject(writeHeadBlock, forKeyedSubscript: "__httpsWriteHead" as NSString)
 
-        // __httpWriteBody(requestId, data) -> Bool (channel.isWritable)
         let writeBodyBlock: @convention(block) (Int, JSValue) -> Bool = { reqId, dataVal in
             guard let state = storage.pendingRequests[reqId] else { return true }
             return state.writeChunk(httpExtractBytes(from: dataVal))
         }
-        context.setObject(writeBodyBlock, forKeyedSubscript: "__httpWriteBody" as NSString)
+        context.setObject(writeBodyBlock, forKeyedSubscript: "__httpsWriteBody" as NSString)
 
-        // __httpEnd(requestId, data?)
         let endBlock: @convention(block) (Int, JSValue) -> Void = { reqId, dataVal in
             guard let state = storage.pendingRequests[reqId] else { return }
             let finalBytes: [UInt8]? = (!dataVal.isNull && !dataVal.isUndefined)
@@ -97,11 +119,11 @@ public struct HTTPModule: NodeModule {
             state.sendEnd(withFinalBody: finalBytes)
             storage.pendingRequests.removeValue(forKey: reqId)
         }
-        context.setObject(endBlock, forKeyedSubscript: "__httpEnd" as NSString)
+        context.setObject(endBlock, forKeyedSubscript: "__httpsEnd" as NSString)
 
-        // --- JS-side http.createServer ---
+        // --- JS-side https.createServer ---
         let createServerJS = """
-        (function(http) {
+        (function(https) {
             var EventEmitter = this.__NoCo_EventEmitter;
             var Stream = require('stream');
             var Readable = Stream.Readable;
@@ -130,7 +152,7 @@ public struct HTTPModule: NodeModule {
                 var addr = remoteAddr || '127.0.0.1';
                 var port = remotePort || 0;
                 this.socket = {
-                    encrypted: false,
+                    encrypted: true,
                     remoteAddress: addr,
                     remotePort: port,
                     remoteFamily: addr.indexOf(':') !== -1 ? 'IPv6' : 'IPv4'
@@ -208,7 +230,7 @@ public struct HTTPModule: NodeModule {
                     flat.push(hkeys[j]);
                     flat.push(String(this._headers[hkeys[j]]));
                 }
-                __httpWriteHead(this._reqId, this.statusCode, flat);
+                __httpsWriteHead(this._reqId, this.statusCode, flat);
                 return this;
             };
             ServerResponse.prototype.write = function(data, encoding) {
@@ -216,7 +238,7 @@ public struct HTTPModule: NodeModule {
                     this.writeHead(this.statusCode);
                 }
                 if (data) {
-                    var ok = __httpWriteBody(this._reqId, data);
+                    var ok = __httpsWriteBody(this._reqId, data);
                     if (!ok) this._writableNeedDrain = true;
                     return ok;
                 }
@@ -229,20 +251,40 @@ public struct HTTPModule: NodeModule {
                     this.writeHead(this.statusCode);
                 }
                 this.finished = true;
-                __httpEnd(this._reqId, data || null);
+                __httpsEnd(this._reqId, data || null);
                 this.emit('finish');
                 if (callback) callback();
                 this._emitClose();
             };
 
-            function Server(requestListener) {
-                if (!(this instanceof Server)) return new Server(requestListener);
+            function Server(options, requestListener) {
+                if (!(this instanceof Server)) return new Server(options, requestListener);
                 this._events = Object.create(null);
                 this._maxListeners = 10;
-                this._serverId = __httpCreateServer();
                 this._responses = {};
                 this._requests = {};
                 this.listening = false;
+
+                if (typeof options === 'function') {
+                    requestListener = options;
+                    options = {};
+                }
+                options = options || {};
+
+                var certPEM = options.cert ? String(options.cert) : '';
+                var keyPEM = options.key ? String(options.key) : '';
+                var passphrase = options.passphrase;
+
+                if (certPEM && keyPEM) {
+                    var result = __httpsCreateServer(certPEM, keyPEM, passphrase);
+                    if (typeof result === 'object' && result instanceof Error) {
+                        throw result;
+                    }
+                    this._serverId = result;
+                } else {
+                    throw new Error('https.createServer requires options.cert and options.key');
+                }
+
                 if (requestListener) this.on('request', requestListener);
             }
             Server.prototype = Object.create(EventEmitter.prototype);
@@ -254,20 +296,20 @@ public struct HTTPModule: NodeModule {
                 if (!host) host = '0.0.0.0';
                 if (callback) this.once('listening', callback);
                 this.listening = true;
-                __httpServerListen(this._serverId, port || 0, host, this);
+                __httpsServerListen(this._serverId, port || 0, host, this);
                 return this;
             };
 
             Server.prototype.close = function(callback) {
                 if (callback) this.once('close', callback);
                 this.listening = false;
-                __httpServerClose(this._serverId);
+                __httpsServerClose(this._serverId);
                 this.emit('close');
                 return this;
             };
 
             Server.prototype.address = function() {
-                return __httpServerAddress(this._serverId);
+                return __httpsServerAddress(this._serverId);
             };
 
             Server.prototype.setTimeout = function() { return this; };
@@ -345,22 +387,16 @@ public struct HTTPModule: NodeModule {
                 }
             };
 
-            http.createServer = function(options, requestListener) {
-                if (typeof options === 'function') {
-                    requestListener = options;
-                }
-                return new Server(requestListener);
+            https.createServer = function(options, requestListener) {
+                return new Server(options, requestListener);
             };
 
-            http.Server = Server;
-            http.IncomingMessage = IncomingMessage;
-            http.ServerResponse = ServerResponse;
+            https.Server = Server;
         })
         """
-        let setupFn = context.evaluateScript(createServerJS)!
-        setupFn.call(withArguments: [http])
+        context.evaluateScript(createServerJS)!.call(withArguments: [https])
 
-        // --- Client-side http.request (URLSession-based) ---
+        // --- Client-side https.request (URLSession-based with TLS options) ---
         let request: @convention(block) () -> JSValue = {
             let args = JSContext.currentArguments() as? [JSValue] ?? []
             guard !args.isEmpty else { return JSValue(undefinedIn: JSContext.current()) }
@@ -372,7 +408,10 @@ public struct HTTPModule: NodeModule {
 
             if args[0].isString {
                 urlString = args[0].toString()
-                if args.count > 1 && args[1].isObject && !args[1].hasProperty("on") {
+                let isFunction = args.count > 1
+                    ? ctx.evaluateScript("(function(v){return typeof v==='function'})")!.call(withArguments: [args[1]]).toBool()
+                    : false
+                if args.count > 1 && !isFunction {
                     options = args[1]
                     callback = args.count > 2 ? args[2] : nil
                 } else {
@@ -381,17 +420,27 @@ public struct HTTPModule: NodeModule {
             } else {
                 options = args[0]
                 callback = args.count > 1 ? args[1] : nil
-                let proto = options?.property("protocol")?.toString() ?? "http:"
+                let proto = options?.property("protocol")?.toString() ?? "https:"
                 let hostname = options?.property("hostname")?.toString()
                     ?? options?.property("host")?.toString() ?? "localhost"
                 let port = options?.property("port")?.toString()
                 let path = options?.property("path")?.toString() ?? "/"
-                let portStr = port != nil ? ":\(port!)" : ""
+                let defaultPort = proto == "https:" ? "443" : "80"
+                let portStr = (port != nil && port != defaultPort) ? ":\(port!)" : ""
                 urlString = "\(proto)//\(hostname)\(portStr)\(path)"
+            }
+
+            // Ensure https:// protocol if URL doesn't have a scheme
+            if !urlString.contains("://") {
+                urlString = "https://" + urlString
+            } else if urlString.hasPrefix("http://") {
+                // If explicitly http://, keep it (allows mixed usage)
             }
 
             let method = options?.property("method")?.toString()?.uppercased() ?? "GET"
             let headers = options?.property("headers")
+            let rejectUnauthorized = options?.property("rejectUnauthorized")
+            let shouldRejectUnauthorized = rejectUnauthorized?.isUndefined != false || rejectUnauthorized?.toBool() != false
             let capturedCallback = callback
 
             let reqScript = """
@@ -445,8 +494,19 @@ public struct HTTPModule: NodeModule {
                     urlReq.httpBody = bodyData
                 }
 
-                let task = URLSession.shared.dataTask(with: urlReq) { data, response, error in
+                // Use custom session if rejectUnauthorized is false
+                let session: URLSession
+                if !shouldRejectUnauthorized {
+                    let delegate = InsecureURLSessionDelegate()
+                    session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+                } else {
+                    session = URLSession.shared
+                }
+
+                runtime.eventLoop.retainHandle()
+                let task = session.dataTask(with: urlReq) { data, response, error in
                     runtime.eventLoop.enqueueCallback {
+                        defer { runtime.eventLoop.releaseHandle() }
                         let ctx = runtime.context
                         if let error = error {
                             let jsErr = ctx.createError(error.localizedDescription)
@@ -517,322 +577,173 @@ public struct HTTPModule: NodeModule {
 
             return req
         }
-        http.setValue(unsafeBitCast(request, to: AnyObject.self), forProperty: "request")
+        https.setValue(unsafeBitCast(request, to: AnyObject.self), forProperty: "request")
 
-        // http.get
+        // https.get
         let get: @convention(block) () -> JSValue = {
             let args = JSContext.currentArguments() as? [JSValue] ?? []
-            let req = http.invokeMethod("request", withArguments: args)!
+            // Ensure method is GET
+            if !args.isEmpty && args[0].isObject && !args[0].isString {
+                args[0].setValue("GET", forProperty: "method")
+            }
+            let req = https.invokeMethod("request", withArguments: args)!
             return req
         }
-        http.setValue(unsafeBitCast(get, to: AnyObject.self), forProperty: "get")
+        https.setValue(unsafeBitCast(get, to: AnyObject.self), forProperty: "get")
 
-        // http.METHODS
-        let methods = context.evaluateScript("""
-            ['ACL','BIND','CHECKOUT','CONNECT','COPY','DELETE','GET','HEAD',
-             'LINK','LOCK','M-SEARCH','MERGE','MKACTIVITY','MKCALENDAR',
-             'MKCOL','MOVE','NOTIFY','OPTIONS','PATCH','POST','PROPFIND',
-             'PROPPATCH','PURGE','PUT','REBIND','REPORT','SEARCH','SOURCE',
-             'SUBSCRIBE','TRACE','UNBIND','UNLINK','UNLOCK','UNSUBSCRIBE']
-        """)!
-        http.setValue(methods, forProperty: "METHODS")
-
-        // http.STATUS_CODES
-        let statusCodes = JSValue(newObjectIn: context)!
-        let codes: [Int: String] = [
-            100: "Continue", 200: "OK", 201: "Created", 204: "No Content",
-            301: "Moved Permanently", 302: "Found", 304: "Not Modified",
-            400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
-            404: "Not Found", 405: "Method Not Allowed", 409: "Conflict",
-            500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable",
-        ]
-        for (code, msg) in codes {
-            statusCodes.setValue(msg, forProperty: String(code))
-        }
-        http.setValue(statusCodes, forProperty: "STATUS_CODES")
-
-        return http
+        return https
     }
 }
 
-// MARK: - NIOHTTPServer
+// MARK: - InsecureURLSessionDelegate
 
-/// HTTP server using NIOTransportServices + NIOHTTP1 codec.
-final class NIOHTTPServer: @unchecked Sendable {
-    let eventLoop: EventLoop
-    let onRegisterRequest: (HTTPRequestState) -> Void
-    var jsServer: JSValue?
-    var boundPort: Int = 0
-    var boundHost: String = ""
-    var tlsOptions: NWProtocolTLS.Options?
-    private var group: NIOTSEventLoopGroup?
-    private var channel: Channel?
-    private let requestIdCounter = AtomicCounter(initial: 1)
-
-    init(eventLoop: EventLoop, onRegisterRequest: @escaping (HTTPRequestState) -> Void) {
-        self.eventLoop = eventLoop
-        self.onRegisterRequest = onRegisterRequest
-    }
-
-    func bind(host: String, port: Int) {
-        let group = NIOTSEventLoopGroup(loopCount: 1)
-        self.group = group
-        let serverRef = self
-
-        var bootstrap = NIOTSListenerBootstrap(group: group)
-            .childChannelInitializer { channel in
-                channel.pipeline.addHandlers([
-                    ByteToMessageHandler(HTTPRequestDecoder()),
-                    HTTPResponseEncoder(),
-                    HTTPBridgeHandler(server: serverRef),
-                ])
-            }
-
-        if let tls = self.tlsOptions {
-            bootstrap = bootstrap.tlsOptions(tls)
-        }
-
-        bootstrap.bind(host: host, port: port).whenComplete { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .success(let ch):
-                self.channel = ch
-                if let addr = ch.localAddress {
-                    self.boundPort = addr.port ?? port
-                    self.boundHost = addr.ipAddress ?? host
-                }
-                self.eventLoop.enqueueCallback {
-                    self.jsServer?.invokeMethod("emit", withArguments: ["listening"])
-                }
-            case .failure(let error):
-                self.eventLoop.enqueueCallback {
-                    guard let js = self.jsServer, let ctx = js.context else { return }
-                    let err = JSValue(newErrorFromMessage: error.localizedDescription, in: ctx)
-                    js.invokeMethod("emit", withArguments: ["error", err as Any])
-                }
-            }
-        }
-    }
-
-    func close() {
-        let ch = channel
-        let g = group
-        channel = nil
-        group = nil
-        DispatchQueue.global().async {
-            ch?.close(promise: nil)
-            try? g?.syncShutdownGracefully()
-        }
-    }
-
-    func nextRequestId() -> Int {
-        requestIdCounter.next()
-    }
-}
-
-// MARK: - Helper
-
-/// Extract bytes from a JSValue (String, Buffer, or Uint8Array).
-func httpExtractBytes(from dataVal: JSValue) -> [UInt8] {
-    if dataVal.isString, let str = dataVal.toString() {
-        return Array(str.utf8)
-    }
-    let bufData = dataVal.forProperty("_data")!
-    let source = bufData.isUndefined ? dataVal : bufData
-    let len = Int(source.forProperty("length")?.toInt32() ?? 0)
-    var bytes = [UInt8]()
-    bytes.reserveCapacity(len)
-    for i in 0..<len {
-        bytes.append(UInt8(source.atIndex(i).toInt32() & 0xFF))
-    }
-    return bytes
-}
-
-// MARK: - HTTPRequestState
-
-/// Manages per-request state and streams the HTTP response via NIO channel.
-final class HTTPRequestState: @unchecked Sendable {
-    let requestId: Int
-    let channel: Channel
-    let keepAlive: Bool
-    var statusCode: Int = 200
-    var responseHeaders: [(String, String)] = []
-    private var headSent: Bool = false
-    private var hasWrittenBody: Bool = false
-
-    init(requestId: Int, channel: Channel, keepAlive: Bool) {
-        self.requestId = requestId
-        self.channel = channel
-        self.keepAlive = keepAlive
-    }
-
-    /// Send HTTP head to NIO channel (idempotent — only executes on first call).
-    /// Adds `transfer-encoding: chunked` when neither Content-Length nor Transfer-Encoding is set.
-    func sendHead() {
-        guard !headSent else { return }
-        headSent = true
-
-        let status = HTTPResponseStatus(statusCode: statusCode)
-        var head = HTTPResponseHead(version: .http1_1, status: status)
-        for (key, value) in responseHeaders {
-            head.headers.add(name: key, value: value)
-        }
-        if !head.headers.contains(name: "content-length") && !head.headers.contains(name: "transfer-encoding") {
-            head.headers.add(name: "transfer-encoding", value: "chunked")
-        }
-        if keepAlive {
-            head.headers.replaceOrAdd(name: "connection", value: "keep-alive")
-        }
-        channel.write(HTTPServerResponsePart.head(head), promise: nil)
-    }
-
-    /// Write a body chunk immediately to the NIO channel.
-    /// Returns `channel.isWritable` for backpressure signaling.
-    @discardableResult
-    func writeChunk(_ bytes: [UInt8]) -> Bool {
-        sendHead()
-        hasWrittenBody = true
-        if !bytes.isEmpty {
-            var buf = channel.allocator.buffer(capacity: bytes.count)
-            buf.writeBytes(bytes)
-            channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(buf)), promise: nil)
-        }
-        return channel.isWritable
-    }
-
-    /// Finish the response. When no prior `writeChunk` was called, uses Content-Length
-    /// for a single-shot response (avoiding chunked encoding).
-    func sendEnd(withFinalBody bytes: [UInt8]?) {
-        if !hasWrittenBody && !headSent {
-            // Optimization: single-shot response with Content-Length
-            let bodyBytes = bytes ?? []
-            let status = HTTPResponseStatus(statusCode: statusCode)
-            var head = HTTPResponseHead(version: .http1_1, status: status)
-            for (key, value) in responseHeaders {
-                head.headers.add(name: key, value: value)
-            }
-            if !head.headers.contains(name: "content-length") && !head.headers.contains(name: "transfer-encoding") {
-                head.headers.add(name: "content-length", value: String(bodyBytes.count))
-            }
-            if keepAlive {
-                head.headers.replaceOrAdd(name: "connection", value: "keep-alive")
-            }
-            headSent = true
-            channel.write(HTTPServerResponsePart.head(head), promise: nil)
-            if !bodyBytes.isEmpty {
-                var buf = channel.allocator.buffer(capacity: bodyBytes.count)
-                buf.writeBytes(bodyBytes)
-                channel.write(HTTPServerResponsePart.body(.byteBuffer(buf)), promise: nil)
-            }
+/// URLSession delegate that skips certificate validation (for rejectUnauthorized: false).
+private final class InsecureURLSessionDelegate: NSObject, URLSessionDelegate {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+           let trust = challenge.protectionSpace.serverTrust
+        {
+            completionHandler(.useCredential, URLCredential(trust: trust))
         } else {
-            sendHead()
-            if let bytes = bytes, !bytes.isEmpty {
-                var buf = channel.allocator.buffer(capacity: bytes.count)
-                buf.writeBytes(bytes)
-                channel.write(HTTPServerResponsePart.body(.byteBuffer(buf)), promise: nil)
-            }
-        }
-        channel.writeAndFlush(HTTPServerResponsePart.end(nil)).whenComplete { [weak self] _ in
-            guard let self else { return }
-            if !self.keepAlive {
-                self.channel.close(promise: nil)
-            }
+            completionHandler(.performDefaultHandling, nil)
         }
     }
 }
 
-// MARK: - HTTPBridgeHandler
+// MARK: - PEM Helper
 
-/// NIO ChannelInboundHandler that bridges HTTP requests to the JS event loop.
-final class HTTPBridgeHandler: ChannelInboundHandler, @unchecked Sendable {
-    typealias InboundIn = HTTPServerRequestPart
-    typealias OutboundOut = HTTPServerResponsePart
+/// Parses PEM-encoded certificates and keys, creates NWProtocolTLS.Options.
+/// Retains temporary keychain references so SecIdentity stays valid for the server lifetime.
+final class PEMHelper {
+    /// Retained keychain paths to keep SecIdentity alive.
+    /// Cleaned up when PEMHelper (and thus the containing server) is deallocated.
+    private static let activeKeychainPaths = Mutex<[String]>([])
 
-    let server: NIOHTTPServer
-    private var requestHead: HTTPRequestHead?
-    private var activeRequestId: Int?
+    /// Create NWProtocolTLS.Options from PEM cert and key strings.
+    static func createTLSOptions(certPEM: String, keyPEM: String, passphrase: String?) -> NWProtocolTLS.Options? {
+        guard let certDER = parsePEM(certPEM, type: "CERTIFICATE"),
+              let keyDER = parsePEM(keyPEM, type: "PRIVATE KEY") ?? parsePEM(keyPEM, type: "RSA PRIVATE KEY") ?? parsePEM(keyPEM, type: "EC PRIVATE KEY")
+        else {
+            return nil
+        }
 
-    init(server: NIOHTTPServer) {
-        self.server = server
+        guard let certificate = SecCertificateCreateWithData(nil, certDER as CFData) else {
+            return nil
+        }
+
+        guard let identity = createIdentity(certificate: certificate, keyDER: keyDER) else {
+            return nil
+        }
+
+        let options = NWProtocolTLS.Options()
+        guard let secIdentity = sec_identity_create(identity) else {
+            return nil
+        }
+        sec_protocol_options_set_local_identity(options.securityProtocolOptions, secIdentity)
+        sec_protocol_options_set_min_tls_protocol_version(options.securityProtocolOptions, .TLSv12)
+
+        return options
     }
 
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        let part = unwrapInboundIn(data)
-        switch part {
-        case .head(let head):
-            requestHead = head
-            let reqId = server.nextRequestId()
-            self.activeRequestId = reqId
-            let keepAlive = head.isKeepAlive
-            let channel = context.channel
-            let state = HTTPRequestState(requestId: reqId, channel: channel, keepAlive: keepAlive)
+    /// Parse a PEM block and return the DER-encoded data.
+    static func parsePEM(_ pem: String, type: String) -> Data? {
+        let beginMarker = "-----BEGIN \(type)-----"
+        let endMarker = "-----END \(type)-----"
 
-            let method = head.method.rawValue
-            let uri = head.uri
-            let headerPairs: [(String, String)] = head.headers.map { ($0.name, $0.value) }
-            let remoteAddr = context.remoteAddress?.ipAddress ?? "127.0.0.1"
-            let remotePort = context.remoteAddress?.port ?? 0
-
-            server.eventLoop.enqueueCallback { [weak self] in
-                guard let self else { return }
-                self.server.onRegisterRequest(state)
-
-                guard let jsServer = self.server.jsServer, let ctx = jsServer.context else { return }
-                let headersObj = JSValue(newObjectIn: ctx)!
-                let rawHeadersArr = JSValue(newArrayIn: ctx)!
-                var rawIdx: Int = 0
-                for (name, value) in headerPairs {
-                    let lname = name.lowercased()
-                    if let existing = headersObj.forProperty(lname), !existing.isUndefined {
-                        headersObj.setValue(existing.toString()! + ", " + value, forProperty: lname)
-                    } else {
-                        headersObj.setValue(value, forProperty: lname)
-                    }
-                    rawHeadersArr.setValue(name, at: rawIdx)
-                    rawHeadersArr.setValue(value, at: rawIdx + 1)
-                    rawIdx += 2
-                }
-                jsServer.invokeMethod("_handleRequest", withArguments: [
-                    reqId, method, uri, headersObj, "1.1", NSNull(), rawHeadersArr, remoteAddr, remotePort,
-                ])
-            }
-
-        case .body(var buf):
-            guard let reqId = activeRequestId else { return }
-            if let bytes = buf.readBytes(length: buf.readableBytes) {
-                let str = String(data: Data(bytes), encoding: .utf8)
-                    ?? String(data: Data(bytes), encoding: .isoLatin1) ?? ""
-                server.eventLoop.enqueueCallback { [weak self] in
-                    guard let self else { return }
-                    self.server.jsServer?.invokeMethod("_pushBodyChunk", withArguments: [reqId, str])
-                }
-            }
-
-        case .end:
-            guard let reqId = activeRequestId else { return }
-            server.eventLoop.enqueueCallback { [weak self] in
-                guard let self else { return }
-                self.server.jsServer?.invokeMethod("_endBody", withArguments: [reqId])
-            }
-            requestHead = nil
+        guard let beginRange = pem.range(of: beginMarker),
+              let endRange = pem.range(of: endMarker)
+        else {
+            return nil
         }
+
+        let base64String = pem[beginRange.upperBound..<endRange.lowerBound]
+            .replacingOccurrences(of: "\n", with: "")
+            .replacingOccurrences(of: "\r", with: "")
+            .trimmingCharacters(in: .whitespaces)
+
+        return Data(base64Encoded: base64String)
     }
 
-    func channelWritabilityChanged(context: ChannelHandlerContext) {
-        guard context.channel.isWritable else { return }
-        guard let reqId = activeRequestId else { return }
-        server.eventLoop.enqueueCallback { [weak self] in
-            self?.server.jsServer?.invokeMethod("_emitDrain", withArguments: [reqId])
-        }
-        context.fireChannelWritabilityChanged()
+    /// Remove a retained keychain path and delete the keychain file.
+    static func cleanupKeychain(path: String) {
+        activeKeychainPaths.withLock { $0.removeAll { $0 == path } }
+        try? FileManager.default.removeItem(atPath: path)
+        // Also remove -db and -shm files created by newer keychain format
+        try? FileManager.default.removeItem(atPath: path + "-db")
+        try? FileManager.default.removeItem(atPath: path + "-shm")
     }
 
-    func channelInactive(context: ChannelHandlerContext) {
-        guard let reqId = activeRequestId else { return }
-        activeRequestId = nil
-        server.eventLoop.enqueueCallback { [weak self] in
-            guard let self else { return }
-            self.server.jsServer?.invokeMethod("_notifyClose", withArguments: [reqId])
+    /// Create a SecIdentity from a certificate and private key DER data.
+    /// Uses a temporary keychain that stays alive until explicitly cleaned up.
+    private static func createIdentity(certificate: SecCertificate, keyDER: Data) -> SecIdentity? {
+        #if os(macOS)
+        var tempKeychain: SecKeychain?
+        let keychainPath = NSTemporaryDirectory() + "noco-tls-\(UUID().uuidString).keychain"
+        let password = UUID().uuidString
+
+        var status = SecKeychainCreate(keychainPath, UInt32(password.utf8.count), password, false, nil, &tempKeychain)
+        guard status == errSecSuccess, let keychain = tempKeychain else {
+            return nil
         }
+
+        // Retain the keychain path so the identity stays valid
+        activeKeychainPaths.withLock { $0.append(keychainPath) }
+
+        // Import the private key into the temporary keychain
+        var importItems: CFArray?
+        let keyData = keyDER as CFData
+        var keyParams = SecItemImportExportKeyParameters()
+        keyParams.version = UInt32(SEC_KEY_IMPORT_EXPORT_PARAMS_VERSION)
+
+        status = SecItemImport(
+            keyData,
+            nil,
+            nil,
+            nil,
+            [],
+            &keyParams,
+            keychain,
+            &importItems
+        )
+        guard status == errSecSuccess else {
+            cleanupKeychain(path: keychainPath)
+            return nil
+        }
+
+        // Import the certificate into the temporary keychain
+        let certData = SecCertificateCopyData(certificate) as Data
+        var certImportItems: CFArray?
+        status = SecItemImport(
+            certData as CFData,
+            nil,
+            nil,
+            nil,
+            [],
+            nil,
+            keychain,
+            &certImportItems
+        )
+        guard status == errSecSuccess else {
+            cleanupKeychain(path: keychainPath)
+            return nil
+        }
+
+        // Create identity from the temporary keychain
+        var identity: SecIdentity?
+        status = SecIdentityCreateWithCertificate(keychain, certificate, &identity)
+        guard status == errSecSuccess else {
+            cleanupKeychain(path: keychainPath)
+            return nil
+        }
+
+        return identity
+        #else
+        return nil
+        #endif
     }
 }
+
