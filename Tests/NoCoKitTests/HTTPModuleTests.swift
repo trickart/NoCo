@@ -978,3 +978,76 @@ func httpCreateServerEndWithDataContentLength() async throws {
     runtime.eventLoop.stop()
     await eventLoopTask.value
 }
+
+// MARK: - Socket EventEmitter compatibility
+
+@Test func httpIncomingMessageSocketIsEventEmitter() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var captured;
+        server.on('request', function(req, res) { captured = req; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        var sock = captured.socket;
+        [
+            typeof sock.on === 'function',
+            typeof sock.emit === 'function',
+            typeof sock.removeListener === 'function',
+            typeof sock.once === 'function',
+            sock.readable === true,
+            sock.writable === true,
+            typeof sock.destroy === 'function',
+            typeof sock.setTimeout === 'function'
+        ].every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpIncomingMessageSocketEventListeners() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var captured;
+        server.on('request', function(req, res) { captured = req; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        var sock = captured.socket;
+        sock.on('close', function() { console.log('socket-closed'); });
+        sock.emit('close');
+    """)
+    #expect(messages.contains("socket-closed"))
+}
+
+@Test func httpIncomingMessageConnectionAlias() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var captured;
+        server.on('request', function(req, res) { captured = req; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        captured.connection === captured.socket;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpServerResponseHasSocket() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var capturedReq, capturedRes;
+        server.on('request', function(req, res) { capturedReq = req; capturedRes = res; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        [
+            capturedRes.socket === capturedReq.socket,
+            capturedRes.connection === capturedReq.socket,
+            typeof capturedRes.socket.on === 'function'
+        ].every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}

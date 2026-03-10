@@ -129,12 +129,17 @@ public struct HTTPModule: NodeModule {
                 this.rawHeaders = rawHeaders || [];
                 var addr = remoteAddr || '127.0.0.1';
                 var port = remotePort || 0;
-                this.socket = {
-                    encrypted: false,
-                    remoteAddress: addr,
-                    remotePort: port,
-                    remoteFamily: addr.indexOf(':') !== -1 ? 'IPv6' : 'IPv4'
-                };
+                var sock = new EventEmitter();
+                sock.encrypted = false;
+                sock.readable = true;
+                sock.writable = true;
+                sock.remoteAddress = addr;
+                sock.remotePort = port;
+                sock.remoteFamily = addr.indexOf(':') !== -1 ? 'IPv6' : 'IPv4';
+                sock.destroy = function() { this.readable = false; this.writable = false; return this; };
+                sock.setTimeout = function() { return this; };
+                this.socket = sock;
+                this.connection = sock;
             }
             IncomingMessage.prototype = Object.create(Readable.prototype);
             IncomingMessage.prototype.constructor = IncomingMessage;
@@ -318,6 +323,8 @@ public struct HTTPModule: NodeModule {
             Server.prototype._handleRequest = function(reqId, method, url, headersObj, httpVersion, bodyStr, rawHeaders, remoteAddr, remotePort) {
                 var req = new IncomingMessage(reqId, method, url, headersObj, httpVersion, rawHeaders || [], remoteAddr, remotePort);
                 var res = new ServerResponse(reqId);
+                res.socket = req.socket;
+                res.connection = req.socket;
                 var self = this;
                 self._responses[reqId] = res;
                 self._requests[reqId] = req;
