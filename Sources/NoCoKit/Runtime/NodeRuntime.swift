@@ -471,6 +471,102 @@ public final class NodeRuntime: @unchecked Sendable {
             })(this);
             """)
 
+        // V8-compatible Error.captureStackTrace / Error.prepareStackTrace polyfill
+        context.evaluateScript("""
+            (function(g) {
+                // Parse JSC stack trace string into call site objects
+                function parseStack(stackStr) {
+                    if (!stackStr) return [];
+                    var lines = stackStr.split('\\n');
+                    var sites = [];
+                    for (var i = 0; i < lines.length; i++) {
+                        var line = lines[i];
+                        // JSC format: "funcName@file:line:col" or "@file:line:col" or "funcName@"
+                        var match = line.match(/^(.*)@(.*?):(\\d+):(\\d+)$/);
+                        if (!match) {
+                            match = line.match(/^(.*)@(.*?):(\\d+)$/);
+                        }
+                        if (!match) {
+                            // Handle "funcName@" or "funcName@[native code]" (no line/col)
+                            match = line.match(/^(.*)@(.*)$/);
+                            if (match) match = [match[0], match[1], match[2], null, null];
+                        }
+                        if (match) {
+                            (function(funcName, fileName, lineNo, colNo) {
+                                sites.push({
+                                    getFileName: function() { return fileName || null; },
+                                    getLineNumber: function() { return parseInt(lineNo, 10) || null; },
+                                    getColumnNumber: function() { return parseInt(colNo || '0', 10) || null; },
+                                    getFunctionName: function() { return funcName || null; },
+                                    getMethodName: function() { return funcName || null; },
+                                    getTypeName: function() { return null; },
+                                    isEval: function() { return false; },
+                                    isNative: function() { return fileName === '[native code]'; },
+                                    isConstructor: function() { return false; },
+                                    isToplevel: function() { return !funcName; },
+                                    getEvalOrigin: function() { return undefined; },
+                                    getThis: function() { return undefined; },
+                                    toString: function() {
+                                        var s = funcName ? funcName : '<anonymous>';
+                                        if (fileName) s += ' (' + fileName;
+                                        if (lineNo) s += ':' + lineNo;
+                                        if (colNo) s += ':' + colNo;
+                                        if (fileName) s += ')';
+                                        return s;
+                                    }
+                                });
+                            })(match[1], match[2], match[3], match[4]);
+                        }
+                    }
+                    return sites;
+                }
+
+                Error.captureStackTrace = function(targetObject, constructorOpt) {
+                    var err = new Error();
+                    var stackStr = err.stack || '';
+                    // Parse into structured call sites
+                    var callSites = parseStack(stackStr);
+                    // Remove internal frames (captureStackTrace itself, and the caller if constructorOpt)
+                    // Remove at least the first 2 frames (Error constructor + captureStackTrace)
+                    callSites = callSites.slice(2);
+                    if (constructorOpt) {
+                        // Remove frames up to and including constructorOpt
+                        var name = constructorOpt.name || '';
+                        if (name) {
+                            for (var i = 0; i < callSites.length; i++) {
+                                if (callSites[i].getFunctionName() === name) {
+                                    callSites = callSites.slice(i + 1);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // If prepareStackTrace is set, call it
+                    if (typeof Error.prepareStackTrace === 'function') {
+                        Object.defineProperty(targetObject, 'stack', {
+                            get: function() {
+                                var prep = Error.prepareStackTrace;
+                                return prep(targetObject, callSites);
+                            },
+                            set: function(v) {
+                                Object.defineProperty(targetObject, 'stack', {
+                                    value: v, writable: true, configurable: true
+                                });
+                            },
+                            configurable: true
+                        });
+                    } else {
+                        // Format as string like V8
+                        var formatted = callSites.map(function(s) { return '    at ' + s.toString(); }).join('\\n');
+                        targetObject.stack = (targetObject.name || 'Error') +
+                            (targetObject.message ? ': ' + targetObject.message : '') +
+                            (formatted ? '\\n' + formatted : '');
+                    }
+                };
+                Error.stackTraceLimit = 10;
+            })(this);
+            """)
+
         // WebAPIModule depends on Blob (for File extends Blob), so install after Blob
         WebAPIModule.install(in: context, runtime: self)
     }
