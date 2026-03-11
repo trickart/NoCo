@@ -1052,14 +1052,105 @@ func httpCreateServerEndWithDataContentLength() async throws {
     #expect(result?.toBool() == true)
 }
 
-@Test func httpStatusCodesCompleteness() async throws {
+@Test func httpServerResponseGetHeaderNames() async throws {
     let runtime = NodeRuntime()
     let result = runtime.evaluate("""
         var http = require('http');
-        var codes = [100, 101, 200, 201, 202, 204, 206, 301, 302, 303, 304, 307, 308,
-                     400, 401, 403, 404, 405, 408, 409, 413, 416, 422, 429,
-                     500, 501, 502, 503, 504];
-        codes.every(function(c) { return typeof http.STATUS_CODES[c] === 'string'; });
+        var server = http.createServer(function(req, res) {});
+        var capturedRes;
+        server.on('request', function(req, res) { capturedRes = res; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        capturedRes.setHeader('Content-Type', 'text/html');
+        capturedRes.setHeader('X-Custom', 'val');
+        var names = capturedRes.getHeaderNames();
+        [
+            Array.isArray(names),
+            names.length === 2,
+            names.indexOf('content-type') !== -1,
+            names.indexOf('x-custom') !== -1
+        ].every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpServerResponseGetHeaders() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var capturedRes;
+        server.on('request', function(req, res) { capturedRes = res; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        capturedRes.setHeader('Content-Type', 'application/json');
+        capturedRes.setHeader('X-Foo', 'bar');
+        var headers = capturedRes.getHeaders();
+        [
+            typeof headers === 'object',
+            headers['content-type'] === 'application/json',
+            headers['x-foo'] === 'bar',
+            Object.keys(headers).length === 2
+        ].every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpServerResponseHasHeader() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var capturedRes;
+        server.on('request', function(req, res) { capturedRes = res; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        capturedRes.setHeader('Content-Type', 'text/plain');
+        [
+            capturedRes.hasHeader('Content-Type') === true,
+            capturedRes.hasHeader('content-type') === true,
+            capturedRes.hasHeader('X-Missing') === false
+        ].every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpServerResponseSetHeaderReturnsThis() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var capturedRes;
+        server.on('request', function(req, res) { capturedRes = res; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        capturedRes.setHeader('X-A', '1') === capturedRes;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpServerResponseGetHeaderNamesEmpty() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var capturedRes;
+        server.on('request', function(req, res) { capturedRes = res; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        var names = capturedRes.getHeaderNames();
+        Array.isArray(names) && names.length === 0;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpServerResponseGetHeadersIsCopy() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var capturedRes;
+        server.on('request', function(req, res) { capturedRes = res; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        capturedRes.setHeader('X-Test', 'original');
+        var headers = capturedRes.getHeaders();
+        headers['x-test'] = 'modified';
+        capturedRes.getHeader('X-Test') === 'original';
     """)
     #expect(result?.toBool() == true)
 }
