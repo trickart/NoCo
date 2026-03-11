@@ -1154,3 +1154,15 @@ func httpCreateServerEndWithDataContentLength() async throws {
     """)
     #expect(result?.toBool() == true)
 }
+
+@Test func httpStatusCodesCompleteness() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var codes = [100, 101, 200, 201, 202, 204, 206, 301, 302, 303, 304, 307, 308,
+                     400, 401, 403, 404, 405, 408, 409, 413, 416, 422, 429,
+                     500, 501, 502, 503, 504];
+        codes.every(function(c) { return typeof http.STATUS_CODES[c] === 'string'; });
+    """)
+    #expect(result?.toBool() == true)
+}
