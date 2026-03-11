@@ -528,6 +528,12 @@ public struct BufferModule: NodeModule {
                 return offset + 8;
             };
 
+            // Patch ArrayBuffer.isView to recognize Buffer instances
+            var _origIsView = ArrayBuffer.isView;
+            ArrayBuffer.isView = function(obj) {
+                return _origIsView(obj) || (obj instanceof Buffer);
+            };
+
             global.Buffer = Buffer;
             return { Buffer: Buffer, SlowBuffer: Buffer, kMaxLength: 0x7fffffff, INSPECT_MAX_BYTES: 50 };
         })(this);
