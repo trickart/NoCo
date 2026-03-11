@@ -266,3 +266,25 @@ import JavaScriptCore
     """)
     #expect(r4?.toString() == "EPSON")
 }
+
+@Test func bufferArrayBufferIsView() async throws {
+    let runtime = NodeRuntime()
+
+    // Buffer should be recognized by ArrayBuffer.isView
+    let r1 = runtime.evaluate("ArrayBuffer.isView(Buffer.from('hello'))")
+    #expect(r1?.toBool() == true)
+
+    // Uint8Array should still work
+    let r2 = runtime.evaluate("ArrayBuffer.isView(new Uint8Array(4))")
+    #expect(r2?.toBool() == true)
+
+    // Non-view objects should return false
+    let r3 = runtime.evaluate("ArrayBuffer.isView({})")
+    #expect(r3?.toBool() == false)
+
+    let r4 = runtime.evaluate("ArrayBuffer.isView('string')")
+    #expect(r4?.toBool() == false)
+
+    let r5 = runtime.evaluate("ArrayBuffer.isView(null)")
+    #expect(r5?.toBool() == false)
+}
