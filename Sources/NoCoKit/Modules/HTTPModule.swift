@@ -190,12 +190,27 @@ public struct HTTPModule: NodeModule {
 
             ServerResponse.prototype.setHeader = function(name, value) {
                 this._headers[name.toLowerCase()] = value;
+                return this;
             };
             ServerResponse.prototype.getHeader = function(name) {
                 return this._headers[name.toLowerCase()];
             };
             ServerResponse.prototype.removeHeader = function(name) {
                 delete this._headers[name.toLowerCase()];
+            };
+            ServerResponse.prototype.getHeaderNames = function() {
+                return Object.keys(this._headers);
+            };
+            ServerResponse.prototype.getHeaders = function() {
+                var copy = {};
+                var keys = Object.keys(this._headers);
+                for (var i = 0; i < keys.length; i++) {
+                    copy[keys[i]] = this._headers[keys[i]];
+                }
+                return copy;
+            };
+            ServerResponse.prototype.hasHeader = function(name) {
+                return name.toLowerCase() in this._headers;
             };
             ServerResponse.prototype.writeHead = function(statusCode, reasonOrHeaders, headers) {
                 this.statusCode = statusCode;
