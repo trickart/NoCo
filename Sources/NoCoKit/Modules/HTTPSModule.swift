@@ -143,10 +143,14 @@ public struct HTTPSModule: NodeModule {
                 this.url = url;
                 this.headers = headers;
                 this.httpVersion = httpVersion;
+                var _vparts = httpVersion.split('.');
+                this.httpVersionMajor = parseInt(_vparts[0], 10) || 1;
+                this.httpVersionMinor = _vparts.length > 1 ? (parseInt(_vparts[1], 10) || 0) : 1;
                 this._encoding = null;
                 this._body = [];
                 this._ended = false;
                 this.complete = false;
+                this.upgrade = false;
                 this.errored = null;
                 this.rawHeaders = rawHeaders || [];
                 var addr = remoteAddr || '127.0.0.1';
@@ -173,6 +177,7 @@ public struct HTTPSModule: NodeModule {
                 this._maxListeners = 10;
                 this._reqId = reqId;
                 this.statusCode = 200;
+                this.statusMessage = 'OK';
                 this._headers = {};
                 this._headersSent = false;
                 this.finished = false;
@@ -181,6 +186,8 @@ public struct HTTPSModule: NodeModule {
                 this._closed = false;
                 this._writableNeedDrain = false;
                 this.writableHighWaterMark = 16384;
+                this.socket = null;
+                this.connection = null;
             }
             ServerResponse.prototype = Object.create(EventEmitter.prototype);
             ServerResponse.prototype.constructor = ServerResponse;
@@ -216,6 +223,9 @@ public struct HTTPSModule: NodeModule {
             };
             ServerResponse.prototype.writeHead = function(statusCode, reasonOrHeaders, headers) {
                 this.statusCode = statusCode;
+                if (typeof reasonOrHeaders === 'string') {
+                    this.statusMessage = reasonOrHeaders;
+                }
                 var h = headers || (typeof reasonOrHeaders === 'object' ? reasonOrHeaders : null);
                 if (h) {
                     var keys = Object.keys(h);
@@ -360,6 +370,8 @@ public struct HTTPSModule: NodeModule {
             Server.prototype._handleRequest = function(reqId, method, url, headersObj, httpVersion, bodyStr, rawHeaders, remoteAddr, remotePort) {
                 var req = new IncomingMessage(reqId, method, url, headersObj, httpVersion, rawHeaders || [], remoteAddr, remotePort);
                 var res = new ServerResponse(reqId);
+                res.socket = req.socket;
+                res.connection = req.socket;
                 var self = this;
                 self._responses[reqId] = res;
                 self._requests[reqId] = req;

@@ -1166,3 +1166,125 @@ func httpCreateServerEndWithDataContentLength() async throws {
     """)
     #expect(result?.toBool() == true)
 }
+
+// MARK: - Express Compat Phase 3 Tests
+
+@Test func httpIncomingMessageHttpVersionParts() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var captured;
+        server.on('request', function(req, res) { captured = req; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        [
+            captured.httpVersion === '1.1',
+            captured.httpVersionMajor === 1,
+            captured.httpVersionMinor === 1
+        ].every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpIncomingMessageHttpVersionParts10() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var captured;
+        server.on('request', function(req, res) { captured = req; });
+        server._handleRequest(1, 'GET', '/', {}, '1.0', '', []);
+        [
+            captured.httpVersion === '1.0',
+            captured.httpVersionMajor === 1,
+            captured.httpVersionMinor === 0
+        ].every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpServerResponseStatusMessage() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var res = new http.ServerResponse(1);
+        var init = res.statusMessage === 'OK';
+        res.writeHead(404, 'Not Found', {});
+        var after = res.statusMessage === 'Not Found' && res.statusCode === 404;
+        init && after;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpServerResponseStatusMessageWithObjectArg() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var res = new http.ServerResponse(1);
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.statusMessage === 'OK';
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpIncomingMessageUpgradeProperty() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var captured;
+        server.on('request', function(req, res) { captured = req; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        captured.upgrade === false;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpServerResponseSocketInit() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var res = new http.ServerResponse(1);
+        res.socket === null && res.connection === null;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpServerResponseSocketSetInHandleRequest() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        var capturedReq, capturedRes;
+        server.on('request', function(req, res) { capturedReq = req; capturedRes = res; });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+        capturedRes.socket === capturedReq.socket && capturedRes.connection === capturedReq.socket && capturedRes.socket !== null;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func httpStreamPipeErrorPropagation() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var stream = require('stream');
+        var source = new stream.Readable({ read: function() {} });
+        var dest = new stream.Writable({
+            write: function(chunk, enc, cb) { cb(); }
+        });
+        var destroyCalled = false;
+        var origDestroy = dest.destroy.bind(dest);
+        dest.destroy = function(err) {
+            destroyCalled = true;
+            console.log('destroy-err:' + err.message);
+        };
+        dest.on('error', function() {}); // prevent uncaught error
+        source.pipe(dest);
+        source.emit('error', new Error('test-error'));
+        console.log('destroyCalled:' + destroyCalled);
+    """)
+    #expect(messages.contains("destroyCalled:true"))
+    #expect(messages.contains("destroy-err:test-error"))
+}

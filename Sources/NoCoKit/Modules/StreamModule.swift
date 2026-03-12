@@ -49,6 +49,9 @@ public struct StreamModule: NodeModule {
                 var source = this;
                 function onData(chunk) { dest.write(chunk); }
                 source.on('data', onData);
+                source.on('error', function(err) {
+                    if (dest.destroy) dest.destroy(err);
+                });
                 source.on('end', function() {
                     if (!options || options.end !== false) { dest.end(); }
                 });
@@ -137,6 +140,9 @@ public struct StreamModule: NodeModule {
                         destination.write(chunk);
                     }
                     source.on('data', onData);
+                    source.on('error', function(err) {
+                        if (destination.destroy) destination.destroy(err);
+                    });
                     source.on('end', function() {
                         if (!options || options.end !== false) {
                             destination.end();
