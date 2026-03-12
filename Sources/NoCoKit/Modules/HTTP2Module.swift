@@ -132,11 +132,15 @@ public struct HTTP2Module: NodeModule {
                 this.url = url;
                 this.headers = headers;
                 this.httpVersion = httpVersion;
+                var _vparts = httpVersion.split('.');
+                this.httpVersionMajor = parseInt(_vparts[0], 10) || 1;
+                this.httpVersionMinor = parseInt(_vparts[1], 10) || 0;
                 this.readable = true;
                 this._encoding = null;
                 this._body = [];
                 this._ended = false;
                 this.complete = false;
+                this.upgrade = false;
                 this.errored = null;
                 this.stream = { id: reqId };
                 this.rawHeaders = rawHeaders || [];
