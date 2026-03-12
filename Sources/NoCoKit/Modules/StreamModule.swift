@@ -176,6 +176,15 @@ public struct StreamModule: NodeModule {
                     return this;
                 }
 
+                isPaused() {
+                    return this._readableState.flowing === false;
+                }
+
+                unshift(chunk) {
+                    if (chunk === null) return;
+                    this._readableState.buffer.unshift(chunk);
+                }
+
                 destroy(err) {
                     this._readableState.ended = true;
                     this._readableState.buffer = [];

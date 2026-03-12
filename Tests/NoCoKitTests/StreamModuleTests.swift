@@ -578,3 +578,41 @@ import JavaScriptCore
 
     #expect(messages.filter({ $0.starts(with: "end:") }).count == 1)
 }
+
+// MARK: - Readable isPaused / unshift Tests
+
+@Test func readableIsPaused() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var Stream = require('stream');
+        var r = new Stream.Readable({ read: function() {} });
+        console.log('initial:' + r.isPaused());
+        r.pause();
+        console.log('paused:' + r.isPaused());
+        r.resume();
+        console.log('resumed:' + r.isPaused());
+    """)
+    #expect(messages.contains("initial:false"))
+    #expect(messages.contains("paused:true"))
+    #expect(messages.contains("resumed:false"))
+}
+
+@Test func readableUnshift() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var Stream = require('stream');
+        var r = new Stream.Readable({ read: function() {} });
+        r.push('world');
+        r.unshift('hello');
+        console.log('first:' + r.read());
+        console.log('second:' + r.read());
+    """)
+    #expect(messages.contains("first:hello"))
+    #expect(messages.contains("second:world"))
+}
