@@ -140,6 +140,7 @@ public struct HTTP2Module: NodeModule {
                 this._body = [];
                 this._ended = false;
                 this.complete = false;
+                this.aborted = false;
                 this.upgrade = false;
                 this.errored = null;
                 this.stream = { id: reqId };
