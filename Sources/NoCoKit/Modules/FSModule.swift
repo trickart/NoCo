@@ -78,6 +78,14 @@ public struct FSModule: NodeModule {
             return validatePath(path)
         }
 
+        // fs.Stats constructor for instanceof support
+        context.evaluateScript("""
+            (function(fs) {
+                function Stats() {}
+                fs.Stats = Stats;
+            })
+        """)!.call(withArguments: [fs])
+
         // fs.readFileSync(path, options?)
         let readFileSync: @convention(block) (String, JSValue) -> JSValue = {
             path, options in
@@ -196,6 +204,9 @@ public struct FSModule: NodeModule {
             let attrs = (try? fm.attributesOfItem(atPath: resolved)) ?? [:]
 
             let stat = JSValue(newObjectIn: context)!
+            // Set prototype to fs.Stats.prototype for instanceof support
+            context.evaluateScript("(function(s, fs) { Object.setPrototypeOf(s, fs.Stats.prototype); })")!
+                .call(withArguments: [stat, fs])
             let size = attrs[.size] as? Int ?? 0
             let mtime = attrs[.modificationDate] as? Date ?? Date()
             let ctime = attrs[.creationDate] as? Date ?? Date()
