@@ -722,3 +722,22 @@ func fsMkdirAsync() async throws {
 
     #expect(messages.contains("exists:true"))
 }
+
+// MARK: - fs.Stats instanceof Tests
+
+@Test func fsStatsInstanceof() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var stat = fs.statSync('.');
+        console.log('instanceof:' + (stat instanceof fs.Stats));
+        console.log('hasStats:' + (typeof fs.Stats === 'function'));
+        console.log('isDir:' + stat.isDirectory());
+    """)
+    #expect(messages.contains("instanceof:true"))
+    #expect(messages.contains("hasStats:true"))
+    #expect(messages.contains("isDir:true"))
+}
