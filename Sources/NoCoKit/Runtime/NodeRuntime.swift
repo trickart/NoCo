@@ -172,6 +172,23 @@ public final class NodeRuntime: @unchecked Sendable {
         ProcessModule.install(in: context, runtime: self)
         BufferModule.install(in: context, runtime: self)
         EventEmitterModule.install(in: context, runtime: self)
+
+        // Mixin EventEmitter onto process (must run after EventEmitter is installed)
+        context.evaluateScript("""
+            (function() {
+                var EE = this.__NoCo_EventEmitter;
+                if (!EE) return;
+                var p = process;
+                p._events = Object.create(null);
+                p._maxListeners = EE.defaultMaxListeners;
+                var proto = EE.prototype;
+                var names = Object.getOwnPropertyNames(proto);
+                for (var i = 0; i < names.length; i++) {
+                    if (names[i] !== 'constructor') p[names[i]] = proto[names[i]];
+                }
+            })();
+        """)
+
         WebCryptoModule.install(in: context, runtime: self)
 
         // Register require()-able modules

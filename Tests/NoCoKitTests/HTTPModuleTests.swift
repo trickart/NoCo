@@ -1288,3 +1288,23 @@ func httpCreateServerEndWithDataContentLength() async throws {
     #expect(messages.contains("destroyCalled:true"))
     #expect(messages.contains("destroy-err:test-error"))
 }
+
+// MARK: - process EventEmitter Tests
+
+@Test func processIsEventEmitter() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var received = '';
+        process.on('deprecation', function(msg) { received = msg; });
+        process.emit('deprecation', 'test-dep');
+        console.log('received:' + received);
+        console.log('hasOn:' + (typeof process.on === 'function'));
+        console.log('hasEmit:' + (typeof process.emit === 'function'));
+    """)
+    #expect(messages.contains("received:test-dep"))
+    #expect(messages.contains("hasOn:true"))
+    #expect(messages.contains("hasEmit:true"))
+}
