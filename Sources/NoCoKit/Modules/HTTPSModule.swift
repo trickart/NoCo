@@ -150,6 +150,7 @@ public struct HTTPSModule: NodeModule {
                 this._body = [];
                 this._ended = false;
                 this.complete = false;
+                this.aborted = false;
                 this.upgrade = false;
                 this.errored = null;
                 this.rawHeaders = rawHeaders || [];
@@ -183,6 +184,7 @@ public struct HTTPSModule: NodeModule {
                 this.finished = false;
                 this.writable = true;
                 this.writableFinished = false;
+                this.writableEnded = false;
                 this._closed = false;
                 this._writableNeedDrain = false;
                 this.writableHighWaterMark = 16384;
@@ -237,8 +239,16 @@ public struct HTTPSModule: NodeModule {
                 var flat = [];
                 var hkeys = Object.keys(this._headers);
                 for (var j = 0; j < hkeys.length; j++) {
-                    flat.push(hkeys[j]);
-                    flat.push(String(this._headers[hkeys[j]]));
+                    var val = this._headers[hkeys[j]];
+                    if (Array.isArray(val)) {
+                        for (var k = 0; k < val.length; k++) {
+                            flat.push(hkeys[j]);
+                            flat.push(String(val[k]));
+                        }
+                    } else {
+                        flat.push(hkeys[j]);
+                        flat.push(String(val));
+                    }
                 }
                 __httpsWriteHead(this._reqId, this.statusCode, flat);
                 return this;
@@ -261,6 +271,7 @@ public struct HTTPSModule: NodeModule {
                     this.writeHead(this.statusCode);
                 }
                 this.finished = true;
+                this.writableEnded = true;
                 __httpsEnd(this._reqId, data || null);
                 this.emit('finish');
                 if (callback) callback();
@@ -331,6 +342,7 @@ public struct HTTPSModule: NodeModule {
                 var req = this._requests[reqId];
                 if (res) res._emitClose();
                 if (req && !req._ended) {
+                    req.aborted = true;
                     req._ended = true;
                     req._readableState.ended = true;
                     req.emit('error', new Error('Connection closed'));

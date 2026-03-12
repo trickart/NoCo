@@ -1308,3 +1308,61 @@ func httpCreateServerEndWithDataContentLength() async throws {
     #expect(messages.contains("hasOn:true"))
     #expect(messages.contains("hasEmit:true"))
 }
+
+// MARK: - HTTP Compatibility Phase 4 Tests
+
+@Test func httpSetHeaderWithArray() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var res = new http.ServerResponse(1);
+        res.setHeader('set-cookie', ['a=1', 'b=2']);
+        var val = res.getHeader('set-cookie');
+        console.log('isArray:' + Array.isArray(val));
+        console.log('len:' + val.length);
+        console.log('v0:' + val[0]);
+        console.log('v1:' + val[1]);
+    """)
+    #expect(messages.contains("isArray:true"))
+    #expect(messages.contains("len:2"))
+    #expect(messages.contains("v0:a=1"))
+    #expect(messages.contains("v1:b=2"))
+}
+
+@Test func httpReqAbortedProperty() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        server.on('request', function(req, res) {
+            console.log('aborted:' + req.aborted);
+        });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+    """)
+    #expect(messages.contains("aborted:false"))
+}
+
+@Test func httpResWritableEnded() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {});
+        server.on('request', function(req, res) {
+            console.log('before:' + res.writableEnded);
+            res.end('ok');
+            console.log('after:' + res.writableEnded);
+        });
+        server._handleRequest(1, 'GET', '/', {}, '1.1', '', []);
+    """)
+    #expect(messages.contains("before:false"))
+    #expect(messages.contains("after:true"))
+}
