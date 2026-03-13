@@ -13,7 +13,7 @@ swift run noco -e "console.log('hi')"    # Evaluate inline JS
 
 ## Architecture
 
-NoCo is a Node.js-compatible runtime built on JavaScriptCore (Swift). CommonJS module resolution + SwiftNIO (NIOHTTP1 + NIOTransportServices) for networking.
+NoCo is a Node.js-compatible runtime built on JavaScriptCore (Swift). CommonJS + ESM module resolution. SwiftNIO (NIOHTTP1 + NIOTransportServices + swift-nio-http2) for networking.
 
 ### Targets
 
@@ -24,6 +24,7 @@ NoCo is a Node.js-compatible runtime built on JavaScriptCore (Swift). CommonJS m
 
 - **NodeRuntime** — `JSContext` wrapper. All JS ops run on `jsQueue` (serial DispatchQueue). `runtime.perform { context in ... }` for thread-safe access.
 - **ModuleLoader** — CommonJS `require()`. Resolution: builtin → cache → node_modules → filesystem. Supports `node:` prefix and wildcard exports. Circular requires handled via cache-before-execute.
+- **ESMDetector / ESMTransformer / ESMRuntime** — ESM (`import`/`export`) support. Detects ESM syntax and `.mjs` files, transforms to CommonJS for execution.
 - **EventLoop** — Timers, nextTick, I/O callbacks. `DispatchSemaphore` idle wait (no polling). `enqueueCallback()` for instant wakeup. `onUncaughtException` isolates failed callbacks.
 - **NodeModule** — Protocol: `static var moduleName` + `static func install(in:runtime:) -> JSValue`
 
@@ -32,14 +33,8 @@ NoCo is a Node.js-compatible runtime built on JavaScriptCore (Swift). CommonJS m
 | Type | Modules |
 |------|---------|
 | Global | console, process, timers, Buffer, EventEmitter |
-| require() | path, fs, fs/promises, crypto, util, assert, events, string_decoder, stream, http, http2, net, url, querystring, os, zlib, async_hooks |
-| Web API | fetch, URL, URLSearchParams, Blob, File, FormData, ReadableStream, WritableStream, TransformStream, CompressionStream/DecompressionStream, crypto.subtle (WebCrypto) |
-
-### Server Architecture (SwiftNIO)
-
-`http.createServer()` / `net.createServer()` use NIOTransportServices + NIOHTTP1. HTTP/2 via swift-nio-http2.
-
-NIO thread → `eventLoop.enqueueCallback` → `drainCallbacks()` executes JS on jsQueue. Responses sent back via `Channel.write`. Supports backpressure (`write()` + `drain` event).
+| require() | path, fs, fs/promises, crypto, util, assert, events, string_decoder, stream, http, https, http2, net, url, querystring, os, zlib, async_hooks, child_process, constants, module, readline, tty |
+| Web API | fetch, URL, URLSearchParams, Headers, Request, Response, Blob, File, FormData, ReadableStream, WritableStream, TransformStream, CompressionStream/DecompressionStream, crypto.subtle (WebCrypto) |
 
 ### Key Patterns
 
