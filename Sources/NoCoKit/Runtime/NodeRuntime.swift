@@ -584,6 +584,9 @@ public final class NodeRuntime: @unchecked Sendable {
             })(this);
             """)
 
+        // Install ESM runtime functions (__esm_import, __esm_export, etc.)
+        ESMRuntime.install(in: context, runtime: self)
+
         // WebAPIModule depends on Blob (for File extends Blob), so install after Blob
         WebAPIModule.install(in: context, runtime: self)
     }

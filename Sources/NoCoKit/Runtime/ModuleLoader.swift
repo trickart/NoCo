@@ -164,10 +164,18 @@ public final class ModuleLoader {
 
         let dirname = (path as NSString).deletingLastPathComponent
 
+        // Transform source based on module type
+        let transformedSource: String
+        if ESMDetector.shared.isESM(path: path) {
+            transformedSource = ESMTransformer.transform(source)
+        } else {
+            transformedSource = ESMTransformer.transformDynamicImport(source)
+        }
+
         // Wrap in CommonJS function
         let wrapped = """
             (function(exports, require, module, __filename, __dirname) {
-            \(source)
+            \(transformedSource)
             })
             """
 
@@ -227,7 +235,7 @@ public final class ModuleLoader {
     }
 
     /// Resolve a relative path from a base directory.
-    private func resolveRelativePath(_ name: String, from baseDir: String) -> String? {
+    func resolveRelativePath(_ name: String, from baseDir: String) -> String? {
         let fm = FileManager.default
 
         var candidate: String
@@ -244,16 +252,12 @@ public final class ModuleLoader {
             return candidate
         }
 
-        // Try with .js extension
-        let withJs = candidate + ".js"
-        if fm.fileExists(atPath: withJs) {
-            return withJs
-        }
-
-        // Try with .json extension
-        let withJson = candidate + ".json"
-        if fm.fileExists(atPath: withJson) {
-            return withJson
+        // Try with extensions: .js, .mjs, .cjs, .json
+        for ext in [".js", ".mjs", ".cjs", ".json"] {
+            let withExt = candidate + ext
+            if fm.fileExists(atPath: withExt) {
+                return withExt
+            }
         }
 
         // Try as directory with index.js (or package.json main)
@@ -291,12 +295,18 @@ public final class ModuleLoader {
     }
 
     /// Extract a resolved path string from an exports entry (string or conditional object).
-    private func extractExportPath(_ entry: Any) -> String? {
+    /// When `esmContext` is true, prefer "import" condition; otherwise prefer "require".
+    private func extractExportPath(_ entry: Any, esmContext: Bool = false) -> String? {
         if let str = entry as? String { return str }
         if let obj = entry as? [String: Any] {
-            if let node = obj["node"] { if let p = extractExportPath(node) { return p } }
-            if let req = obj["require"] { if let p = extractExportPath(req) { return p } }
-            if let def = obj["default"] { if let p = extractExportPath(def) { return p } }
+            if esmContext {
+                if let imp = obj["import"] { if let p = extractExportPath(imp, esmContext: true) { return p } }
+            }
+            if let node = obj["node"] { if let p = extractExportPath(node, esmContext: esmContext) { return p } }
+            if !esmContext {
+                if let req = obj["require"] { if let p = extractExportPath(req, esmContext: false) { return p } }
+            }
+            if let def = obj["default"] { if let p = extractExportPath(def, esmContext: esmContext) { return p } }
         }
         return nil
     }
@@ -333,7 +343,7 @@ public final class ModuleLoader {
     }
 
     /// Resolve a bare module name by walking up the directory tree looking for node_modules.
-    private func resolveNodeModules(_ name: String, from startDir: String) -> String? {
+    func resolveNodeModules(_ name: String, from startDir: String) -> String? {
         let fm = FileManager.default
         var dir = (startDir as NSString).standardizingPath
 
