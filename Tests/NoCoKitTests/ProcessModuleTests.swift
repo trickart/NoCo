@@ -150,6 +150,53 @@ import JavaScriptCore
     #expect(result?.toBool() == true)
 }
 
+// MARK: - process.uptime / hrtime.bigint / chdir Tests
+
+@Test func processUptime() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var u = process.uptime();
+        typeof u === 'number' && u >= 0 && u < 10;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func processHrtimeBigint() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var b = process.hrtime.bigint();
+        typeof b === 'bigint' && b > 0n;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func processChdir() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var original = process.cwd();
+        process.chdir('/tmp');
+        var changed = process.cwd();
+        process.chdir(original);
+        // macOS resolves /tmp to /private/tmp
+        changed === '/tmp' || changed === '/private/tmp';
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func processChdirNonexistent() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var threw = false;
+        try {
+            process.chdir('/nonexistent_dir_12345');
+        } catch (e) {
+            threw = e.message.indexOf('ENOENT') !== -1;
+        }
+        threw;
+    """)
+    #expect(result?.toBool() == true)
+}
+
 // MARK: - process EventEmitter Tests
 
 @Test func processIsEventEmitter() async throws {

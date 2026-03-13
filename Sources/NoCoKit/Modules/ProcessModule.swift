@@ -23,6 +23,7 @@ public struct ProcessModule: NodeModule {
 
     @discardableResult
     public static func install(in context: JSContext, runtime: NodeRuntime) -> JSValue {
+        let startTime = Date()
         let process = JSValue(newObjectIn: context)!
 
         // process.version
@@ -72,6 +73,27 @@ public struct ProcessModule: NodeModule {
         }
         process.setValue(unsafeBitCast(cwd, to: AnyObject.self), forProperty: "cwd")
 
+        // process.chdir(directory)
+        let chdir: @convention(block) (String) -> Void = { directory in
+            let path: String
+            if directory.hasPrefix("/") {
+                path = directory
+            } else {
+                path = FileManager.default.currentDirectoryPath + "/" + directory
+            }
+            var isDir: ObjCBool = false
+            if !FileManager.default.fileExists(atPath: path, isDirectory: &isDir) || !isDir.boolValue {
+                let ctx = JSContext.current()!
+                let escaped = path.replacingOccurrences(of: "'", with: "\\'")
+                ctx.exception = ctx.evaluateScript(
+                    "new Error('ENOENT: no such file or directory, chdir \\'\(escaped)\\'');"
+                )
+                return
+            }
+            FileManager.default.changeCurrentDirectoryPath(path)
+        }
+        process.setValue(unsafeBitCast(chdir, to: AnyObject.self), forProperty: "chdir")
+
         // process.exit(code)
         let exit: @convention(block) (JSValue) -> Void = { code in
             let exitCode = code.isUndefined ? 0 : Int32(code.toInt32())
@@ -118,6 +140,23 @@ public struct ProcessModule: NodeModule {
             return JSValue.array(from: [seconds, remainingNanos], in: JSContext.current())
         }
         process.setValue(unsafeBitCast(hrtime, to: AnyObject.self), forProperty: "hrtime")
+
+        // process.hrtime.bigint()
+        let hrtimeObj = process.forProperty("hrtime")!
+        context.evaluateScript("""
+            (function(hrtime) {
+                hrtime.bigint = function() {
+                    var t = hrtime();
+                    return BigInt(t[0]) * 1000000000n + BigInt(t[1]);
+                };
+            })
+        """)!.call(withArguments: [hrtimeObj])
+
+        // process.uptime()
+        let uptime: @convention(block) () -> Double = {
+            return Date().timeIntervalSince(startTime)
+        }
+        process.setValue(unsafeBitCast(uptime, to: AnyObject.self), forProperty: "uptime")
 
         // process.execPath
         process.setValue(ProcessInfo.processInfo.arguments[0], forProperty: "execPath")
