@@ -4,12 +4,13 @@ A Node.js-compatible JavaScript runtime built on Apple's [JavaScriptCore](https:
 
 The name "NoCo" comes from the Japanese word "鋸" (nokogiri), meaning "saw" — a sharp tool that cuts through complexity.
 
-NoCo implements CommonJS module resolution and a subset of Node.js built-in modules, allowing you to run many Node.js scripts and npm packages natively on Apple platforms — without embedding V8 or Node.js itself.
+NoCo implements CommonJS and ESM (ES Modules) module resolution and a subset of Node.js built-in modules, allowing you to run many Node.js scripts and npm packages natively on Apple platforms — without embedding V8 or Node.js itself.
 
 ## Features
 
 - **JavaScriptCore-powered** — Uses Apple's built-in JS engine; no V8 dependency
 - **CommonJS `require()`** — Full module resolution: built-in modules → cache → `node_modules` → filesystem
+- **ESM `import`/`export`** — `.mjs` files and `import`/`export` syntax supported via automatic transformation
 - **Node.js built-in modules** — `fs`, `path`, `crypto`, `http`, `https`, `http2`, `stream`, `net`, `url`, `zlib`, `child_process`, and more
 - **Web Platform APIs** — `Headers`, `Request`, `Response`, `ReadableStream`, `AbortController` etc. for Fetch API compatibility
 - **HTTP/HTTPS/TCP servers** — `http.createServer()`, `https.createServer()`, `http2.createServer()`, and `net.createServer()` powered by [SwiftNIO](https://github.com/apple/swift-nio)
@@ -82,6 +83,26 @@ server.listen(8080, () => {
 
 ```bash
 noco server.js
+```
+
+### Use ESM (ES Modules)
+
+```javascript
+// app.mjs
+import { createServer } from 'http';
+
+const server = createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Hello from ESM!');
+});
+
+server.listen(8080, () => {
+    console.log('Server running at http://127.0.0.1:8080/');
+});
+```
+
+```bash
+noco app.mjs
 ```
 
 ### Run Hono
@@ -191,6 +212,7 @@ NoCo
     ├── Runtime
     │   ├── NodeRuntime      JSContext wrapper with serial DispatchQueue for thread safety
     │   ├── ModuleLoader     CommonJS require() with circular dependency handling
+    │   ├── ESM*             ESM detection, transformation, and runtime support
     │   ├── EventLoop        Timers, nextTick queue, I/O handle tracking
     │   └── NodeModule       Protocol for built-in modules
     ├── Modules              All built-in module implementations
