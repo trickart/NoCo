@@ -204,6 +204,7 @@ public final class NodeRuntime: @unchecked Sendable {
         registerModule(EventEmitterModule.self)
         registerModule(BufferModule.self)
         registerModule(TimersModule.self)
+        registerModule(TimersPromisesModule.self)
         registerModule(UtilModule.self)
         registerModule(AssertModule.self)
         registerModule(ZlibModule.self)
