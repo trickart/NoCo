@@ -184,6 +184,88 @@ struct DependencyResolverTests {
         }
     }
 
+    // MARK: - Deduplication / Nesting Tests
+
+    @Test("Compatible transitive deps are deduplicated to top level")
+    func compatibleDepsDeduped() async throws {
+        // Install a package with transitive deps — all compatible versions should be at top level
+        let registry = NpmRegistry()
+        let resolver = DependencyResolver(registry: registry)
+        let resolved = try await resolver.resolve(dependencies: ["is-number": "^7.0.0"])
+
+        // All packages should be at top level (no nesting for compatible versions)
+        for pkg in resolved {
+            #expect(!pkg.isNested, "\(pkg.name) should be at top level, but is at \(pkg.installPath)")
+        }
+    }
+
+    @Test("Incompatible transitive deps are nested under parent")
+    func incompatibleDepsNested() async throws {
+        // Use lockfile to pin a package at top level, then install another package
+        // that needs an incompatible version — it should be nested
+        let registry = NpmRegistry()
+        var lockfile = Lockfile(name: "test", version: "1.0.0")
+        // Pin ms@1.0.0 at top level
+        lockfile.packages["node_modules/ms"] = LockfilePackageInfo(
+            version: "1.0.0",
+            resolved: "https://registry.npmjs.org/ms/-/ms-1.0.0.tgz",
+            integrity: "sha512-test"
+        )
+
+        let resolver = DependencyResolver(registry: registry, lockfile: lockfile)
+        // ms@1.0.0 is pinned. debug@4.x needs ms@^2.0.0 which is incompatible.
+        let resolved = try await resolver.resolve(orderedDependencies: [
+            (name: "ms", range: "1.0.0"),
+            (name: "debug", range: "^4.0.0"),
+        ])
+
+        // ms@1.0.0 should be at top level
+        let topMs = resolved.first { $0.name == "ms" && !$0.isNested }
+        #expect(topMs != nil, "ms@1.0.0 should be at top level")
+        #expect(topMs?.version == "1.0.0")
+
+        // debug should need ms@^2.1.3, which is incompatible with ms@1.0.0
+        // The nested ms should be a different version from top-level ms@1.0.0
+        let nestedMs = resolved.filter { $0.name == "ms" && $0.isNested }
+        #expect(!nestedMs.isEmpty, "ms should be nested under debug, all ms: \(resolved.filter { $0.name == "ms" }.map { "\($0.version) at \($0.installPath)" })")
+        if let nested = nestedMs.first {
+            #expect(nested.version != "1.0.0", "Nested ms should not be 1.0.0")
+            #expect(nested.installPath.contains("debug/node_modules/ms"),
+                    "Nested ms should be under debug's node_modules, got \(nested.installPath)")
+        }
+    }
+
+    @Test("Lockfile records nested packages with correct paths")
+    func lockfileNestedPaths() async throws {
+        let registry = NpmRegistry()
+        var lockfile = Lockfile(name: "test", version: "1.0.0")
+        lockfile.packages["node_modules/ms"] = LockfilePackageInfo(
+            version: "1.0.0",
+            resolved: "https://registry.npmjs.org/ms/-/ms-1.0.0.tgz",
+            integrity: "sha512-test"
+        )
+
+        let resolver = DependencyResolver(registry: registry, lockfile: lockfile)
+        let resolved = try await resolver.resolve(orderedDependencies: [
+            (name: "ms", range: "1.0.0"),
+            (name: "debug", range: "^4.0.0"),
+        ])
+
+        // Build lockfile from resolved packages
+        var newLockfile = Lockfile(name: "test", version: "1.0.0")
+        for pkg in resolved {
+            newLockfile.addPackage(pkg)
+        }
+
+        // Top-level ms
+        #expect(newLockfile.packages["node_modules/ms"] != nil, "Top-level ms should be in lockfile")
+        // Nested ms under debug
+        let nestedKey = resolved.first { $0.name == "ms" && $0.isNested }?.installPath
+        if let key = nestedKey {
+            #expect(newLockfile.packages[key] != nil, "Nested ms should be in lockfile at \(key)")
+        }
+    }
+
     @Test("Failed required dependency still throws")
     func failedRequiredDependencyThrows() async throws {
         let registry = NpmRegistry()

@@ -133,11 +133,12 @@ public final class ScriptRunner: Sendable {
     /// Returns the list of ScriptInfo for packages that have scripts (for --list-scripts).
     @discardableResult
     public func processPackages(_ packages: [ResolvedPackage], nodeModulesDir: String) throws -> [ScriptInfo] {
+        let projectDir = (nodeModulesDir as NSString).deletingLastPathComponent
         var allScripts: [ScriptInfo] = []
         var skipped: [ScriptInfo] = []
 
         for pkg in packages {
-            let pkgDir = (nodeModulesDir as NSString).appendingPathComponent(pkg.name)
+            let pkgDir = (projectDir as NSString).appendingPathComponent(pkg.installPath)
             guard let info = readScripts(packageDir: pkgDir, name: pkg.name, version: pkg.version) else {
                 continue
             }
@@ -164,9 +165,10 @@ public final class ScriptRunner: Sendable {
 
     /// List scripts without executing them.
     public func listScripts(_ packages: [ResolvedPackage], nodeModulesDir: String) -> [ScriptInfo] {
+        let projectDir = (nodeModulesDir as NSString).deletingLastPathComponent
         var allScripts: [ScriptInfo] = []
         for pkg in packages {
-            let pkgDir = (nodeModulesDir as NSString).appendingPathComponent(pkg.name)
+            let pkgDir = (projectDir as NSString).appendingPathComponent(pkg.installPath)
             if let info = readScripts(packageDir: pkgDir, name: pkg.name, version: pkg.version) {
                 allScripts.append(info)
             }

@@ -22,27 +22,67 @@ public final class PackageInstaller: Sendable {
         let nodeModulesDir = (projectDir as NSString).appendingPathComponent("node_modules")
         try FileManager.default.createDirectory(atPath: nodeModulesDir, withIntermediateDirectories: true)
 
+        // Sort: top-level packages first, nested packages after their parents
+        let sorted = packages.sorted { a, b in
+            a.installPath.components(separatedBy: "node_modules").count <
+            b.installPath.components(separatedBy: "node_modules").count
+        }
+        let topLevel = sorted.filter { !$0.isNested }
+        let nested = sorted.filter { $0.isNested }
+
         let total = packages.count
         let progress = InstallProgress(total: total, onProgress: onProgress)
 
+        // Phase 1: Install top-level packages concurrently
         try await withThrowingTaskGroup(of: Void.self) { group in
             var running = 0
             var index = 0
 
-            while index < packages.count {
+            while index < topLevel.count {
                 if running >= maxConcurrency {
                     try await group.next()
                     running -= 1
                 }
 
-                let pkg = packages[index]
-                let destDir = nodeModulesDir
+                let pkg = topLevel[index]
                 index += 1
                 running += 1
 
                 group.addTask {
                     do {
-                        try await self.installPackage(pkg, nodeModulesDir: destDir)
+                        try await self.installPackage(pkg, nodeModulesDir: nodeModulesDir)
+                    } catch {
+                        if pkg.optional {
+                            self.onProgress?("warning: optional dependency \(pkg.name)@\(pkg.version) failed to install, skipping")
+                            return
+                        }
+                        throw error
+                    }
+                    progress.report(pkg)
+                }
+            }
+
+            try await group.waitForAll()
+        }
+
+        // Phase 2: Install nested packages (parents are now in place)
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            var running = 0
+            var index = 0
+
+            while index < nested.count {
+                if running >= maxConcurrency {
+                    try await group.next()
+                    running -= 1
+                }
+
+                let pkg = nested[index]
+                index += 1
+                running += 1
+
+                group.addTask {
+                    do {
+                        try await self.installPackage(pkg, nodeModulesDir: nodeModulesDir)
                     } catch {
                         if pkg.optional {
                             self.onProgress?("warning: optional dependency \(pkg.name)@\(pkg.version) failed to install, skipping")
@@ -75,6 +115,8 @@ public final class PackageInstaller: Sendable {
         try? fm.createDirectory(atPath: binDir, withIntermediateDirectories: true)
 
         for pkg in packages {
+            // Only create .bin links for top-level packages
+            guard !pkg.isNested else { continue }
             let pkgDir = (nodeModulesDir as NSString).appendingPathComponent(pkg.name)
             let pkgJsonPath = (pkgDir as NSString).appendingPathComponent("package.json")
 
@@ -136,17 +178,13 @@ public final class PackageInstaller: Sendable {
     }
 
     private func installPackage(_ pkg: ResolvedPackage, nodeModulesDir: String) async throws {
-        let targetDir: String
-        if pkg.name.contains("/") {
-            // Scoped package: @scope/name → node_modules/@scope/name
-            let scopeDir = (nodeModulesDir as NSString).appendingPathComponent(
-                (pkg.name as NSString).deletingLastPathComponent
-            )
-            try FileManager.default.createDirectory(atPath: scopeDir, withIntermediateDirectories: true)
-            targetDir = (nodeModulesDir as NSString).appendingPathComponent(pkg.name)
-        } else {
-            targetDir = (nodeModulesDir as NSString).appendingPathComponent(pkg.name)
-        }
+        // Derive target directory from installPath (supports nested node_modules)
+        // installPath is like "node_modules/foo" or "node_modules/bar/node_modules/foo"
+        let projectDir = (nodeModulesDir as NSString).deletingLastPathComponent
+        let targetDir = (projectDir as NSString).appendingPathComponent(pkg.installPath)
+        // Ensure parent directories exist (handles scoped packages and nested node_modules)
+        let parentDir = (targetDir as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(atPath: parentDir, withIntermediateDirectories: true)
 
         // Skip if already installed with correct version
         let packageJsonPath = (targetDir as NSString).appendingPathComponent("package.json")
