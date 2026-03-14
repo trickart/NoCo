@@ -172,8 +172,12 @@ public struct FSModule: NodeModule {
             guard let resolved = validatePath(path) else {
                 return JSValue(undefinedIn: context)
             }
+            let withFileTypes = options.isObject && options.forProperty("withFileTypes")?.toBool() == true
             do {
                 let items = try fm.contentsOfDirectory(atPath: resolved)
+                if withFileTypes {
+                    return Self.createDirentArray(items, directory: resolved, fm: fm, context: context)
+                }
                 return JSValue.array(from: items, in: context)
             } catch {
                 context.exception = context.createSystemError(
@@ -249,9 +253,17 @@ public struct FSModule: NodeModule {
             let isSymlinkFn: @convention(block) () -> Bool = { fileType == .typeSymbolicLink }
             stat.setValue(unsafeBitCast(isSymlinkFn, to: AnyObject.self), forProperty: "isSymbolicLink")
 
+            let falseFn: @convention(block) () -> Bool = { false }
+            stat.setValue(unsafeBitCast(falseFn, to: AnyObject.self), forProperty: "isBlockDevice")
+            stat.setValue(unsafeBitCast(falseFn, to: AnyObject.self), forProperty: "isCharacterDevice")
+            stat.setValue(unsafeBitCast(falseFn, to: AnyObject.self), forProperty: "isFIFO")
+            stat.setValue(unsafeBitCast(falseFn, to: AnyObject.self), forProperty: "isSocket")
+
             return stat
         }
         fs.setValue(unsafeBitCast(statSync, to: AnyObject.self), forProperty: "statSync")
+        // fs.lstatSync — same as statSync for now (symlink info via attrs[.type])
+        fs.setValue(unsafeBitCast(statSync, to: AnyObject.self), forProperty: "lstatSync")
 
         // fs.unlinkSync(path)
         let unlinkSync: @convention(block) (String) -> Void = { path in
@@ -1124,6 +1136,7 @@ public struct FSModule: NodeModule {
             }
 
             let resolved = (path as NSString).standardizingPath
+            runtime.eventLoop.retainHandle()
             DispatchQueue.global().async {
                 let data = FileManager.default.contents(atPath: resolved)
                 runtime.eventLoop.enqueueCallback {
@@ -1146,6 +1159,7 @@ public struct FSModule: NodeModule {
                         )
                         callback.call(withArguments: [err])
                     }
+                    runtime.eventLoop.releaseHandle()
                 }
             }
         }
@@ -1173,11 +1187,13 @@ public struct FSModule: NodeModule {
                 writeData = Data(bytes)
             }
 
+            runtime.eventLoop.retainHandle()
             DispatchQueue.global().async {
                 FileManager.default.createFile(atPath: resolved, contents: writeData, attributes: nil)
                 runtime.eventLoop.enqueueCallback {
                     let ctx = runtime.context
                     callback.call(withArguments: [JSValue(nullIn: ctx)!])
+                    runtime.eventLoop.releaseHandle()
                 }
             }
         }
@@ -1185,6 +1201,7 @@ public struct FSModule: NodeModule {
 
         // fs.stat(path, callback)
         let stat: @convention(block) (String, JSValue) -> Void = { path, callback in
+            runtime.eventLoop.retainHandle()
             DispatchQueue.global().async {
                 runtime.eventLoop.enqueueCallback {
                     let ctx = runtime.context
@@ -1199,9 +1216,109 @@ public struct FSModule: NodeModule {
                             callback.call(withArguments: [JSValue(nullIn: ctx)!, statResult])
                         }
                     }
+                    runtime.eventLoop.releaseHandle()
                 }
             }
         }
         fs.setValue(unsafeBitCast(stat, to: AnyObject.self), forProperty: "stat")
+
+        // fs.lstat(path, callback) — same as stat for now
+        fs.setValue(unsafeBitCast(stat, to: AnyObject.self), forProperty: "lstat")
+
+        // fs.readdir(path, options, callback)
+        let readdir: @convention(block) () -> Void = {
+            let args = JSContext.currentArguments() as? [JSValue] ?? []
+            guard args.count >= 2 else { return }
+
+            let path = args[0].toString()!
+            let callback: JSValue
+            let opts: JSValue?
+
+            if args.count >= 3 && args[2].isObject == false && !args[2].isUndefined && !args[2].isNull {
+                // readdir(path, callback)
+                callback = args[1]
+                opts = nil
+            } else if args.count >= 3 {
+                callback = args[args.count - 1]
+                opts = args[1]
+            } else {
+                callback = args[1]
+                opts = nil
+            }
+
+            let withFileTypes = opts?.isObject == true && opts?.forProperty("withFileTypes")?.toBool() == true
+
+            let resolved = (path as NSString).standardizingPath
+            runtime.eventLoop.retainHandle()
+            DispatchQueue.global().async {
+                let localFm = FileManager.default
+                let entries: [String]?
+                do {
+                    entries = try localFm.contentsOfDirectory(atPath: resolved)
+                } catch {
+                    entries = nil
+                }
+                runtime.eventLoop.enqueueCallback {
+                    let ctx = runtime.context
+                    if let entries = entries {
+                        if withFileTypes {
+                            let arr = Self.createDirentArray(entries, directory: resolved, fm: localFm, context: ctx)
+                            callback.call(withArguments: [JSValue(nullIn: ctx)!, arr])
+                        } else {
+                            let arr = JSValue(newArrayIn: ctx)!
+                            for (i, entry) in entries.enumerated() {
+                                arr.setValue(entry, at: i)
+                            }
+                            callback.call(withArguments: [JSValue(nullIn: ctx)!, arr])
+                        }
+                    } else {
+                        let err = ctx.createSystemError(
+                            "ENOENT: no such file or directory, scandir '\(path)'",
+                            code: "ENOENT", syscall: "scandir", path: path
+                        )
+                        callback.call(withArguments: [err])
+                    }
+                    runtime.eventLoop.releaseHandle()
+                }
+            }
+        }
+        fs.setValue(unsafeBitCast(readdir, to: AnyObject.self), forProperty: "readdir")
+    }
+
+    /// Create an array of Dirent-like objects from directory entries.
+    private static func createDirentArray(_ entries: [String], directory: String, fm: FileManager, context: JSContext) -> JSValue {
+        let arr = JSValue(newArrayIn: context)!
+        for (i, entry) in entries.enumerated() {
+            let entryPath = (directory as NSString).appendingPathComponent(entry)
+            var isDir: ObjCBool = false
+            let exists = fm.fileExists(atPath: entryPath, isDirectory: &isDir)
+            let attrs = (try? fm.attributesOfItem(atPath: entryPath)) ?? [:]
+            let fileType = attrs[.type] as? FileAttributeType
+            let isSymlink = fileType == .typeSymbolicLink
+
+            let dirent = JSValue(newObjectIn: context)!
+            dirent.setValue(entry, forProperty: "name")
+
+            let isDirVal = exists && isDir.boolValue
+            let isFileVal = exists && !isDir.boolValue
+            let isDirectoryFn: @convention(block) () -> Bool = { isDirVal }
+            let isFileFn: @convention(block) () -> Bool = { isFileVal }
+            let isSymlinkFn: @convention(block) () -> Bool = { isSymlink }
+            let isBlockDevFn: @convention(block) () -> Bool = { false }
+            let isCharDevFn: @convention(block) () -> Bool = { false }
+            let isFIFOFn: @convention(block) () -> Bool = { false }
+            let isSocketFn: @convention(block) () -> Bool = { false }
+
+            dirent.setValue(unsafeBitCast(isDirectoryFn, to: AnyObject.self), forProperty: "isDirectory")
+            dirent.setValue(unsafeBitCast(isFileFn, to: AnyObject.self), forProperty: "isFile")
+            dirent.setValue(unsafeBitCast(isSymlinkFn, to: AnyObject.self), forProperty: "isSymbolicLink")
+            dirent.setValue(unsafeBitCast(isBlockDevFn, to: AnyObject.self), forProperty: "isBlockDevice")
+            dirent.setValue(unsafeBitCast(isCharDevFn, to: AnyObject.self), forProperty: "isCharacterDevice")
+            dirent.setValue(unsafeBitCast(isFIFOFn, to: AnyObject.self), forProperty: "isFIFO")
+            dirent.setValue(unsafeBitCast(isSocketFn, to: AnyObject.self), forProperty: "isSocket")
+
+            arr.setValue(dirent, at: i)
+        }
+        return arr
     }
 }

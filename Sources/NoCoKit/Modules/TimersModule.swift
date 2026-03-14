@@ -106,12 +106,43 @@ public struct TimersModule: NodeModule {
         context.setObject(unsafeBitCast(clearTimer, to: AnyObject.self),
                           forKeyedSubscript: "clearImmediate" as NSString)
 
+        // Wrap timer functions to return Timeout objects with ref()/unref()
+        context.evaluateScript("""
+            (function(origSetTimeout, origSetInterval, origSetImmediate) {
+                function wrapTimeout(id) {
+                    var t = { _id: id, _destroyed: false };
+                    t.ref = function() { return t; };
+                    t.unref = function() { return t; };
+                    t.refresh = function() { return t; };
+                    t.hasRef = function() { return true; };
+                    t[Symbol.toPrimitive] = function() { return id; };
+                    return t;
+                }
+                globalThis.setTimeout = function setTimeout() {
+                    var id = origSetTimeout.apply(null, arguments);
+                    return wrapTimeout(id);
+                };
+                globalThis.setInterval = function setInterval() {
+                    var id = origSetInterval.apply(null, arguments);
+                    return wrapTimeout(id);
+                };
+                globalThis.setImmediate = function setImmediate() {
+                    var id = origSetImmediate.apply(null, arguments);
+                    return wrapTimeout(id);
+                };
+            })
+        """)!.call(withArguments: [
+            context.objectForKeyedSubscript("setTimeout" as NSString)!,
+            context.objectForKeyedSubscript("setInterval" as NSString)!,
+            context.objectForKeyedSubscript("setImmediate" as NSString)!,
+        ])
+
         // Also available as require('timers')
-        exports.setValue(unsafeBitCast(setTimeout, to: AnyObject.self), forProperty: "setTimeout")
-        exports.setValue(unsafeBitCast(setInterval, to: AnyObject.self), forProperty: "setInterval")
+        exports.setValue(context.objectForKeyedSubscript("setTimeout" as NSString)!, forProperty: "setTimeout")
+        exports.setValue(context.objectForKeyedSubscript("setInterval" as NSString)!, forProperty: "setInterval")
         exports.setValue(unsafeBitCast(clearTimer, to: AnyObject.self), forProperty: "clearTimeout")
         exports.setValue(unsafeBitCast(clearTimer, to: AnyObject.self), forProperty: "clearInterval")
-        exports.setValue(unsafeBitCast(setImmediate, to: AnyObject.self), forProperty: "setImmediate")
+        exports.setValue(context.objectForKeyedSubscript("setImmediate" as NSString)!, forProperty: "setImmediate")
         exports.setValue(unsafeBitCast(clearTimer, to: AnyObject.self), forProperty: "clearImmediate")
 
         return exports

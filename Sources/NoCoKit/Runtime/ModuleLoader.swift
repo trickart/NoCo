@@ -28,6 +28,64 @@ public final class ModuleLoader {
             unsafeBitCast(requireBlock, to: AnyObject.self),
             forKeyedSubscript: "require" as NSString
         )
+
+        // require.resolve(id) — resolve module path without loading
+        let resolveBlock: @convention(block) (String) -> JSValue = { [weak self] moduleName in
+            guard let self = self, let runtime = self.runtime else {
+                return JSValue(undefinedIn: JSContext.current())
+            }
+            let ctx = JSContext.current()!
+
+            let name = moduleName.hasPrefix("node:") ? String(moduleName.dropFirst(5)) : moduleName
+
+            // Builtin modules resolve to their name
+            if runtime.registeredModules[name] != nil || ["process", "console"].contains(name) {
+                return JSValue(object: name, in: ctx)
+            }
+
+            if let path = self.resolveFilePath(name) {
+                return JSValue(object: path, in: ctx)
+            }
+
+            ctx.exception = ctx.evaluateScript(
+                "new Error('Cannot find module \\'" + name.replacingOccurrences(of: "'", with: "\\'") + "\\'')"
+            )
+            return JSValue(undefinedIn: ctx)
+        }
+
+        // require.resolve.paths(request) — return search paths
+        let resolvePathsBlock: @convention(block) (String) -> JSValue = { _ in
+            let ctx = JSContext.current()!
+            let cwd = FileManager.default.currentDirectoryPath
+            let result = JSValue(newArrayIn: ctx)!
+            var paths: [String] = []
+            var dir = cwd
+            while true {
+                let nmDir = (dir as NSString).appendingPathComponent("node_modules")
+                paths.append(nmDir)
+                let parent = (dir as NSString).deletingLastPathComponent
+                if parent == dir { break }
+                dir = parent
+            }
+            for (i, p) in paths.enumerated() {
+                result.setValue(p, at: i)
+            }
+            return result
+        }
+
+        // Build require as a callable with .resolve and .resolve.paths
+        context.evaluateScript("""
+            (function(req, resolve, resolvePaths) {
+                req.resolve = resolve;
+                req.resolve.paths = resolvePaths;
+                req.cache = {};
+                req.main = undefined;
+            })
+        """)!.call(withArguments: [
+            context.objectForKeyedSubscript("require" as NSString)!,
+            unsafeBitCast(resolveBlock, to: AnyObject.self),
+            unsafeBitCast(resolvePathsBlock, to: AnyObject.self),
+        ])
     }
 
     /// Resolve and load a module by name.
@@ -203,9 +261,72 @@ public final class ModuleLoader {
             return self.require(name)
         }
 
+        // Attach resolve/resolve.paths to local require
+        let localResolveBlock: @convention(block) (String) -> JSValue = { [weak self] moduleName in
+            guard let self = self, let runtime = self.runtime else {
+                return JSValue(undefinedIn: JSContext.current())
+            }
+            let ctx = JSContext.current()!
+            let reqName = moduleName.hasPrefix("node:") ? String(moduleName.dropFirst(5)) : moduleName
+
+            if runtime.registeredModules[reqName] != nil || ["process", "console"].contains(reqName) {
+                return JSValue(object: reqName, in: ctx)
+            }
+
+            // Resolve relative to this module's directory
+            if reqName.hasPrefix(".") || reqName.hasPrefix("/") {
+                if let resolved = self.resolveRelativePath(reqName, from: dirname) {
+                    return JSValue(object: resolved, in: ctx)
+                }
+            } else {
+                if let resolved = self.resolveNodeModules(reqName, from: dirname) {
+                    return JSValue(object: resolved, in: ctx)
+                }
+            }
+            if let resolved = self.resolveFilePath(reqName) {
+                return JSValue(object: resolved, in: ctx)
+            }
+
+            ctx.exception = ctx.evaluateScript(
+                "new Error('Cannot find module \\'" + reqName.replacingOccurrences(of: "'", with: "\\'") + "\\'')"
+            )
+            return JSValue(undefinedIn: ctx)
+        }
+
+        let localResolvePathsBlock: @convention(block) (String) -> JSValue = { _ in
+            let ctx = JSContext.current()!
+            let result = JSValue(newArrayIn: ctx)!
+            var paths: [String] = []
+            var d = dirname
+            while true {
+                paths.append((d as NSString).appendingPathComponent("node_modules"))
+                let parent = (d as NSString).deletingLastPathComponent
+                if parent == d { break }
+                d = parent
+            }
+            for (i, p) in paths.enumerated() {
+                result.setValue(p, at: i)
+            }
+            return result
+        }
+
+        let localRequireObj = unsafeBitCast(localRequire, to: AnyObject.self)
+        context.evaluateScript("""
+            (function(req, resolve, resolvePaths) {
+                req.resolve = resolve;
+                req.resolve.paths = resolvePaths;
+                req.cache = {};
+                req.main = undefined;
+            })
+        """)!.call(withArguments: [
+            localRequireObj,
+            unsafeBitCast(localResolveBlock, to: AnyObject.self),
+            unsafeBitCast(localResolvePathsBlock, to: AnyObject.self),
+        ])
+
         fn.call(withArguments: [
             exports,
-            unsafeBitCast(localRequire, to: AnyObject.self),
+            localRequireObj,
             module,
             path,
             dirname,
