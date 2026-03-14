@@ -376,3 +376,53 @@ private func fixturesPath() -> String {
     let resolvedRealDir = (realDir as NSString).resolvingSymlinksInPath
     #expect(result.toString() == resolvedRealDir)
 }
+
+// MARK: - TypeScript Support
+
+@Test func requireTypeScriptFile() async throws {
+    let runtime = NodeRuntime()
+    let fixturesDir = ((#filePath as NSString).deletingLastPathComponent as NSString)
+        .appendingPathComponent("Fixtures/typescript")
+
+    var output: [String] = []
+    runtime.consoleHandler = { _, msg in output.append(msg) }
+
+    runtime.moduleLoader.loadFile(at: fixturesDir + "/basic.ts")
+
+    // basic.ts should log "Hello, World!"
+    #expect(output.contains("Hello, World!"))
+}
+
+@Test func requireTypeScriptModule() async throws {
+    let runtime = NodeRuntime()
+    let fixturesDir = ((#filePath as NSString).deletingLastPathComponent as NSString)
+        .appendingPathComponent("Fixtures/typescript")
+
+    let result = runtime.evaluate("""
+        var math = require('\(fixturesDir)/module.ts');
+        math.add(2, 3).toString() + ',' + math.multiply(4, 5).toString() + ',' + math.PI.toString();
+    """)
+    #expect(result?.toString() == "5,20,3.14159")
+}
+
+@Test func resolveTypeScriptExtension() async throws {
+    let fm = FileManager.default
+    let tmpDir = NSTemporaryDirectory() + "noco_ts_resolve_\(UUID().uuidString)"
+    defer { try? fm.removeItem(atPath: tmpDir) }
+    try fm.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+
+    // Create a .ts file
+    try """
+    const greeting: string = "resolved";
+    module.exports = greeting;
+    """.write(toFile: tmpDir + "/helper.ts", atomically: true, encoding: .utf8)
+
+    // Create a .js file that requires the .ts file without extension
+    try """
+    module.exports = require('./helper');
+    """.write(toFile: tmpDir + "/main.js", atomically: true, encoding: .utf8)
+
+    let runtime = NodeRuntime()
+    let result = runtime.moduleLoader.loadFile(at: tmpDir + "/main.js")
+    #expect(result.toString() == "resolved")
+}

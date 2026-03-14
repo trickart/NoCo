@@ -20,11 +20,14 @@ public final class ESMDetector: @unchecked Sendable {
     public func isESM(path: String) -> Bool {
         let ext = (path as NSString).pathExtension.lowercased()
         switch ext {
-        case "mjs":
+        case "mjs", "mts":
             return true
-        case "cjs":
+        case "cjs", "cts":
             return false
         case "js":
+            let pkgType = findNearestPackageType(from: (path as NSString).deletingLastPathComponent)
+            return pkgType == "module"
+        case "ts":
             let pkgType = findNearestPackageType(from: (path as NSString).deletingLastPathComponent)
             return pkgType == "module"
         default:
