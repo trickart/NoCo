@@ -741,3 +741,130 @@ func fsMkdirAsync() async throws {
     #expect(messages.contains("hasStats:true"))
     #expect(messages.contains("isDir:true"))
 }
+
+// MARK: - fs.watchFile / fs.unwatchFile / fs.watch Tests
+
+@Test(.timeLimit(.minutes(1)))
+func fsWatchFileDetectsChange() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_watchfile_\(UUID().uuidString).txt"
+    FileManager.default.createFile(atPath: tmpPath, contents: "initial".data(using: .utf8))
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 30000);
+        fs.watchFile('\(tmpPath)', {interval: 200}, function(curr, prev) {
+            console.log('changed:' + curr.mtimeMs + ':' + prev.mtimeMs);
+            fs.unwatchFile('\(tmpPath)');
+            clearTimeout(keepAlive);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 10)
+    }
+
+    // Wait a bit then modify the file
+    try await Task.sleep(nanoseconds: 300_000_000)
+    try "modified".write(toFile: tmpPath, atomically: true, encoding: .utf8)
+
+    // Wait for callback
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 100_000_000)
+        if messages.contains(where: { $0.hasPrefix("changed:") }) { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains(where: { $0.hasPrefix("changed:") }))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fsUnwatchFileStopsPolling() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_unwatchfile_\(UUID().uuidString).txt"
+    FileManager.default.createFile(atPath: tmpPath, contents: "initial".data(using: .utf8))
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 30000);
+        var callCount = 0;
+        fs.watchFile('\(tmpPath)', {interval: 200}, function(curr, prev) {
+            callCount++;
+            console.log('call:' + callCount);
+        });
+        // Immediately unwatchFile
+        fs.unwatchFile('\(tmpPath)');
+        setTimeout(function() {
+            console.log('done:' + callCount);
+            clearTimeout(keepAlive);
+        }, 1000);
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    // Modify file while unwatched
+    try await Task.sleep(nanoseconds: 300_000_000)
+    try "modified".write(toFile: tmpPath, atomically: true, encoding: .utf8)
+
+    for _ in 0..<50 {
+        try await Task.sleep(nanoseconds: 100_000_000)
+        if messages.contains(where: { $0.hasPrefix("done:") }) { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("done:0"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fsWatchDetectsChange() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_watch_\(UUID().uuidString).txt"
+    FileManager.default.createFile(atPath: tmpPath, contents: "initial".data(using: .utf8))
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 30000);
+        var watcher = fs.watch('\(tmpPath)', function(eventType, filename) {
+            console.log('event:' + eventType + ':' + filename);
+            watcher.close();
+            clearTimeout(keepAlive);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 10)
+    }
+
+    // Wait a bit then modify the file
+    try await Task.sleep(nanoseconds: 300_000_000)
+    try "modified".write(toFile: tmpPath, atomically: true, encoding: .utf8)
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 100_000_000)
+        if messages.contains(where: { $0.hasPrefix("event:") }) { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    // atomically:true writes via rename, so kqueue may report "rename" or "change"
+    #expect(messages.contains(where: { $0.hasPrefix("event:change:") || $0.hasPrefix("event:rename:") }))
+}
