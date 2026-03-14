@@ -108,7 +108,8 @@ public final class NodeRuntime: @unchecked Sendable {
             throw NoCoError.fileNotFound(resolvedPath)
         }
         let script = try String(contentsOfFile: resolvedPath, encoding: .utf8)
-        return evaluate(script, sourceURL: resolvedPath)
+        let strippedScript = ModuleLoader.stripShebang(script)
+        return evaluate(strippedScript, sourceURL: resolvedPath)
     }
 
     // MARK: - Module Registration
