@@ -65,12 +65,18 @@ struct InstallCommand: AsyncParsableCommand {
 
         // Determine dependencies to resolve
         var depsToResolve: [String: String]
+        var optionalDepNames: Set<String> = []
 
         if packages.isEmpty {
             // Install from package.json
             depsToResolve = packageJson.dependencies
             if !production {
                 depsToResolve.merge(packageJson.devDependencies) { current, _ in current }
+            }
+            // optionalDependencies override dependencies (npm behavior)
+            for (name, version) in packageJson.optionalDependencies {
+                depsToResolve[name] = version
+                optionalDepNames.insert(name)
             }
         } else {
             // Install specified packages
@@ -96,7 +102,10 @@ struct InstallCommand: AsyncParsableCommand {
         }
 
         print("Resolving dependencies...")
-        let resolvedPackages = try await resolver.resolve(dependencies: depsToResolve)
+        let resolvedPackages = try await resolver.resolve(
+            dependencies: depsToResolve,
+            optionalDependencies: optionalDepNames
+        )
 
         if resolvedPackages.isEmpty {
             print("All packages are up to date.")

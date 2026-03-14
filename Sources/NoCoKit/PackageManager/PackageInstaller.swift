@@ -41,7 +41,15 @@ public final class PackageInstaller: Sendable {
                 running += 1
 
                 group.addTask {
-                    try await self.installPackage(pkg, nodeModulesDir: destDir)
+                    do {
+                        try await self.installPackage(pkg, nodeModulesDir: destDir)
+                    } catch {
+                        if pkg.optional {
+                            self.onProgress?("warning: optional dependency \(pkg.name)@\(pkg.version) failed to install, skipping")
+                            return
+                        }
+                        throw error
+                    }
                     progress.report(pkg)
                 }
             }

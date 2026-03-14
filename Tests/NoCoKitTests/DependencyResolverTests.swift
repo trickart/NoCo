@@ -113,4 +113,60 @@ struct DependencyResolverTests {
         let hasConflictWarning = warnings.withLock { $0.contains { $0.contains("peer dependency") && $0.contains("react") } }
         #expect(hasConflictWarning, "Should warn about conflicting peer dependency for react")
     }
+
+    // MARK: - optionalDependencies Tests
+
+    @Test("optionalDependencies are resolved normally")
+    func optionalDependenciesResolved() async throws {
+        let registry = NpmRegistry()
+        let resolver = DependencyResolver(registry: registry)
+        let resolved = try await resolver.resolve(
+            dependencies: ["is-number": "^7.0.0"],
+            optionalDependencies: ["is-number"]
+        )
+
+        #expect(resolved.count == 1)
+        #expect(resolved[0].name == "is-number")
+        #expect(resolved[0].optional == true)
+    }
+
+    @Test("Failed optionalDependency is skipped without error")
+    func failedOptionalDependencySkipped() async throws {
+        let registry = NpmRegistry()
+        let warnings = Mutex<[String]>([])
+        let resolver = DependencyResolver(
+            registry: registry,
+            onWarning: { msg in
+                warnings.withLock { $0.append(msg) }
+            }
+        )
+
+        // non-existent package as optional dep should not throw
+        let resolved = try await resolver.resolve(
+            dependencies: [
+                "is-number": "^7.0.0",
+                "this-package-does-not-exist-xyz-123": "^1.0.0"
+            ],
+            optionalDependencies: ["this-package-does-not-exist-xyz-123"]
+        )
+
+        let names = Set(resolved.map(\.name))
+        #expect(names.contains("is-number"), "Required dependency should still be installed")
+        #expect(!names.contains("this-package-does-not-exist-xyz-123"), "Failed optional dep should be skipped")
+
+        let hasWarning = warnings.withLock { $0.contains { $0.contains("optional dependency") } }
+        #expect(hasWarning, "Should emit warning for failed optional dependency")
+    }
+
+    @Test("Failed required dependency still throws")
+    func failedRequiredDependencyThrows() async throws {
+        let registry = NpmRegistry()
+        let resolver = DependencyResolver(registry: registry)
+
+        await #expect(throws: Error.self) {
+            _ = try await resolver.resolve(dependencies: [
+                "this-package-does-not-exist-xyz-123": "^1.0.0"
+            ])
+        }
+    }
 }
