@@ -49,14 +49,74 @@ public struct ModuleModule: NodeModule {
             };
 
             mod.builtinModules = [
-                'assert', 'buffer', 'child_process', 'constants', 'crypto',
-                'events', 'fs', 'http', 'http2', 'module', 'net', 'os',
-                'path', 'process', 'querystring', 'readline', 'stream',
-                'string_decoder', 'timers', 'tty', 'url', 'util', 'zlib'
+                'assert', 'async_hooks', 'buffer', 'child_process', 'constants',
+                'crypto', 'events', 'fs', 'http', 'http2', 'https', 'module',
+                'net', 'os', 'path', 'perf_hooks', 'process', 'querystring',
+                'readline', 'stream', 'string_decoder', 'test', 'timers',
+                'tty', 'url', 'util', 'v8', 'vm', 'worker_threads', 'zlib'
             ];
+
+            mod.isBuiltin = function(name) {
+                var n = name;
+                if (n.startsWith('node:')) n = n.slice(5);
+                return mod.builtinModules.indexOf(n) !== -1;
+            };
+
+            mod.Module.builtinModules = mod.builtinModules;
+            mod.Module.isBuiltin = mod.isBuiltin;
 
             mod._cache = {};
             mod._pathCache = {};
+
+            // Expose Module internals at top level too (pirates/jest use require('module')._extensions)
+            mod._extensions = {};
+            mod._extensions['.js'] = function(module, filename) {
+                var fs = require('fs');
+                var content = fs.readFileSync(filename, 'utf8');
+                module._compile(content, filename);
+            };
+            mod._extensions['.json'] = function(module, filename) {
+                var fs = require('fs');
+                var content = fs.readFileSync(filename, 'utf8');
+                module.exports = JSON.parse(content);
+            };
+            mod._extensions['.node'] = function(module, filename) {
+                throw new Error('.node native addons are not supported');
+            };
+
+            mod._resolveFilename = function(request, parent) {
+                if (require.resolve) {
+                    return require.resolve(request);
+                }
+                return request;
+            };
+
+            // Module._extensions — loader hooks (used by pirates/jest transform)
+            mod.Module._extensions = {};
+            mod.Module._extensions['.js'] = function(module, filename) {
+                var fs = require('fs');
+                var content = fs.readFileSync(filename, 'utf8');
+                module._compile(content, filename);
+            };
+            mod.Module._extensions['.json'] = function(module, filename) {
+                var fs = require('fs');
+                var content = fs.readFileSync(filename, 'utf8');
+                module.exports = JSON.parse(content);
+            };
+            mod.Module._extensions['.node'] = function(module, filename) {
+                throw new Error('.node native addons are not supported');
+            };
+
+            // Module._resolveFilename
+            mod.Module._resolveFilename = function(request, parent) {
+                if (require.resolve) {
+                    return require.resolve(request);
+                }
+                return request;
+            };
+
+            // Module._cache
+            mod.Module._cache = mod._cache;
 
             return mod;
         })();

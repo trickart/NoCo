@@ -485,6 +485,10 @@ public struct StreamModule: NodeModule {
         """
 
         let exports = context.evaluateScript(script)!
+        // stream.EventEmitter = EventEmitter (Node.js compatibility)
+        if let ee = context.objectForKeyedSubscript("__NoCo_EventEmitter" as NSString), !ee.isUndefined {
+            exports.setValue(ee, forProperty: "EventEmitter")
+        }
         return exports
     }
 }

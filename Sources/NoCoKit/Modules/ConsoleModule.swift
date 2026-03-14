@@ -60,6 +60,46 @@ public struct ConsoleModule: NodeModule {
         }
         console.setValue(unsafeBitCast(dirBlock, to: AnyObject.self), forProperty: "dir")
 
+        // console.Console constructor (Node.js compatible)
+        context.evaluateScript("""
+            (function(c) {
+                function Console(opts) {
+                    if (!(this instanceof Console)) return new Console(opts);
+                    var stdout = opts;
+                    if (opts && typeof opts === 'object' && opts.write === undefined) {
+                        stdout = opts.stdout || { write: function() {} };
+                    }
+                    this._stdout = stdout || { write: function() {} };
+                    this._stderr = (opts && opts.stderr) || this._stdout;
+                    this.log = function() {
+                        var args = Array.prototype.slice.call(arguments);
+                        var msg = args.map(String).join(' ');
+                        if (this._stdout && this._stdout.write) this._stdout.write(msg + '\\n');
+                    };
+                    this.info = this.log;
+                    this.debug = this.log;
+                    this.warn = function() {
+                        var args = Array.prototype.slice.call(arguments);
+                        var msg = args.map(String).join(' ');
+                        if (this._stderr && this._stderr.write) this._stderr.write(msg + '\\n');
+                    };
+                    this.error = this.warn;
+                    this.dir = this.log;
+                    this.time = function() {};
+                    this.timeEnd = function() {};
+                    this.assert = function(v) { if (!v) this.error('Assertion failed'); };
+                    this.trace = function() { this.error(new Error().stack); };
+                    this.clear = function() {};
+                    this.count = function() {};
+                    this.countReset = function() {};
+                    this.group = function() {};
+                    this.groupEnd = function() {};
+                    this.table = this.log;
+                }
+                c.Console = Console;
+            })
+        """)!.call(withArguments: [console])
+
         context.setObject(console, forKeyedSubscript: "console" as NSString)
         return console
     }
