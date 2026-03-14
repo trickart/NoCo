@@ -697,7 +697,73 @@ public struct FSModule: NodeModule {
         // Async versions using GCD
         installAsyncVersions(fs: fs, context: context, runtime: runtime, config: config)
 
+        // Watch APIs (watchFile, unwatchFile, watch)
+        installWatchAPIs(fs: fs, context: context, runtime: runtime)
+
         return fs
+    }
+
+    /// Create a stat object from file attributes, reusable by statSync and watchFile.
+    static func createStatObject(path: String, context: JSContext, fs: JSValue) -> JSValue? {
+        let fm = FileManager.default
+        var isDirFlag: ObjCBool = false
+        guard fm.fileExists(atPath: path, isDirectory: &isDirFlag) else {
+            return nil
+        }
+
+        let attrs = (try? fm.attributesOfItem(atPath: path)) ?? [:]
+
+        let stat = JSValue(newObjectIn: context)!
+        context.evaluateScript("(function(s, fs) { Object.setPrototypeOf(s, fs.Stats.prototype); })")!
+            .call(withArguments: [stat, fs])
+        let size = attrs[.size] as? Int ?? 0
+        let mtime = attrs[.modificationDate] as? Date ?? Date()
+        let ctime = attrs[.creationDate] as? Date ?? Date()
+        let ino = (attrs[.systemFileNumber] as? UInt) ?? 0
+        let dev = (attrs[.systemNumber] as? UInt) ?? 0
+        let nlink = (attrs[.referenceCount] as? UInt) ?? 1
+        let posix = (attrs[.posixPermissions] as? Int) ?? 0o644
+        let mode = (isDirFlag.boolValue ? 0o040000 : 0o100000) | posix
+
+        stat.setValue(size, forProperty: "size")
+        stat.setValue(ino, forProperty: "ino")
+        stat.setValue(dev, forProperty: "dev")
+        stat.setValue(nlink, forProperty: "nlink")
+        stat.setValue(mode, forProperty: "mode")
+        let mtimeMs = floor(mtime.timeIntervalSince1970 * 1000)
+        let ctimeMs = floor(ctime.timeIntervalSince1970 * 1000)
+        stat.setValue(mtimeMs, forProperty: "mtimeMs")
+        stat.setValue(ctimeMs, forProperty: "ctimeMs")
+        stat.setValue(ctimeMs, forProperty: "birthtimeMs")
+
+        let dateConstructor = context.objectForKeyedSubscript("Date")!
+        let mtimeDate = dateConstructor.construct(withArguments: [mtimeMs])!
+        let ctimeDate = dateConstructor.construct(withArguments: [ctimeMs])!
+        let birthtimeDate = dateConstructor.construct(withArguments: [ctimeMs])!
+        stat.setValue(mtimeDate, forProperty: "mtime")
+        stat.setValue(ctimeDate, forProperty: "ctime")
+        stat.setValue(birthtimeDate, forProperty: "birthtime")
+
+        let isDir = isDirFlag.boolValue
+        let isFile = !isDir
+
+        let isDirectoryFn: @convention(block) () -> Bool = { isDir }
+        stat.setValue(unsafeBitCast(isDirectoryFn, to: AnyObject.self), forProperty: "isDirectory")
+
+        let isFileFn: @convention(block) () -> Bool = { isFile }
+        stat.setValue(unsafeBitCast(isFileFn, to: AnyObject.self), forProperty: "isFile")
+
+        let fileType = attrs[.type] as? FileAttributeType
+        let isSymlinkFn: @convention(block) () -> Bool = { fileType == .typeSymbolicLink }
+        stat.setValue(unsafeBitCast(isSymlinkFn, to: AnyObject.self), forProperty: "isSymbolicLink")
+
+        let falseFn: @convention(block) () -> Bool = { false }
+        stat.setValue(unsafeBitCast(falseFn, to: AnyObject.self), forProperty: "isBlockDevice")
+        stat.setValue(unsafeBitCast(falseFn, to: AnyObject.self), forProperty: "isCharacterDevice")
+        stat.setValue(unsafeBitCast(falseFn, to: AnyObject.self), forProperty: "isFIFO")
+        stat.setValue(unsafeBitCast(falseFn, to: AnyObject.self), forProperty: "isSocket")
+
+        return stat
     }
 
     /// Convert JSValue data to Data for writing
