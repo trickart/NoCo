@@ -39,7 +39,7 @@ public enum ESMRuntime {
                 moduleValue = loader.require(resolved)
             } else {
                 // Try node_modules resolution from basedir
-                if let path = loader.resolveNodeModules(resolved, from: basedir) {
+                if let path = loader.resolveNodeModules(resolved, from: basedir, esmContext: true) {
                     moduleValue = loader.loadFile(at: path)
                 } else {
                     moduleValue = loader.require(resolved)

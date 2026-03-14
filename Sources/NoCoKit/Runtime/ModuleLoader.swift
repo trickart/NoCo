@@ -131,8 +131,18 @@ public final class ModuleLoader {
             return exports
         }
 
-        // 1b. Handle builtin subpath modules (e.g., 'fs/promises')
+        // 1b. Handle builtin subpath modules (e.g., 'fs/promises', 'timers/promises')
         if resolvedName.contains("/") {
+            // Check if the full subpath is registered as its own module
+            if let subpathModule = runtime.registeredModules[resolvedName] {
+                if let cached = moduleCache[resolvedName] {
+                    return cached
+                }
+                let exports = subpathModule.install(in: runtime.context, runtime: runtime)
+                moduleCache[resolvedName] = exports
+                return exports
+            }
+
             let parts = resolvedName.split(separator: "/", maxSplits: 1)
             let baseName = String(parts[0])
             let subPath = String(parts[1])
@@ -445,16 +455,24 @@ public final class ModuleLoader {
     }
 
     /// Resolve a subpath using the "exports" field in package.json.
-    private func resolvePackageExports(at dir: String, subpath: String) -> String? {
+    private func resolvePackageExports(at dir: String, subpath: String, esmContext: Bool = false) -> String? {
         let packageJsonPath = (dir as NSString).appendingPathComponent("package.json")
         guard let data = FileManager.default.contents(atPath: packageJsonPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let exports = json["exports"] as? [String: Any]
         else { return nil }
 
+        // サブパスが "." の場合、exports 自体が条件マップかもしれない
+        if subpath == "." {
+            let hasSubpathKeys = exports.keys.contains { $0.hasPrefix(".") }
+            if !hasSubpathKeys {
+                return extractExportPath(exports, esmContext: esmContext)
+            }
+        }
+
         // 完全一致
         if let entry = exports[subpath] {
-            return extractExportPath(entry)
+            return extractExportPath(entry, esmContext: esmContext)
         }
 
         // ワイルドカードパターン: "./utils/*" → "./dist/cjs/utils/*.js"
@@ -466,7 +484,7 @@ public final class ModuleLoader {
             let suffix = String(parts[1])
             if subpath.hasPrefix(prefix) && subpath.hasSuffix(suffix) {
                 let matched = String(subpath.dropFirst(prefix.count).dropLast(suffix.count))
-                if let template = extractExportPath(entry) {
+                if let template = extractExportPath(entry, esmContext: esmContext) {
                     return template.replacingOccurrences(of: "*", with: matched)
                 }
             }
@@ -476,7 +494,7 @@ public final class ModuleLoader {
     }
 
     /// Resolve a bare module name by walking up the directory tree looking for node_modules.
-    func resolveNodeModules(_ name: String, from startDir: String) -> String? {
+    func resolveNodeModules(_ name: String, from startDir: String, esmContext: Bool = false) -> String? {
         let fm = FileManager.default
         var dir = (startDir as NSString).standardizingPath
 
@@ -508,7 +526,7 @@ public final class ModuleLoader {
                 let moduleDir = (dir as NSString).appendingPathComponent("node_modules/\(packageName)")
                 if fm.fileExists(atPath: moduleDir) {
                     // 1. exports フィールドを試みる
-                    if let exportedPath = resolvePackageExports(at: moduleDir, subpath: exportSubpath) {
+                    if let exportedPath = resolvePackageExports(at: moduleDir, subpath: exportSubpath, esmContext: esmContext) {
                         if let resolved = resolveRelativePath(
                             exportedPath.hasPrefix("./") ? exportedPath : "./" + exportedPath,
                             from: moduleDir
