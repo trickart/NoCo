@@ -5,6 +5,8 @@ import Synchronization
 public final class DependencyResolver: Sendable {
     private let registry: NpmRegistry
     private let lockfile: Lockfile?
+    private let installPeerDeps: Bool
+    private let onWarning: (@Sendable (String) -> Void)?
     private let state = Mutex<ResolverState>(ResolverState())
 
     private struct ResolverState {
@@ -12,20 +14,29 @@ public final class DependencyResolver: Sendable {
         var resolving: Set<String> = []
     }
 
-    public init(registry: NpmRegistry, lockfile: Lockfile? = nil) {
+    public init(registry: NpmRegistry, lockfile: Lockfile? = nil,
+                installPeerDeps: Bool = true,
+                onWarning: (@Sendable (String) -> Void)? = nil) {
         self.registry = registry
         self.lockfile = lockfile
+        self.installPeerDeps = installPeerDeps
+        self.onWarning = onWarning
     }
 
     /// Resolve all dependencies starting from root dependencies.
     /// Returns a flat list of packages to install with their target paths.
     public func resolve(dependencies: [String: String]) async throws -> [ResolvedPackage] {
+        try await resolve(orderedDependencies: dependencies.map { ($0.key, $0.value) })
+    }
+
+    /// Resolve dependencies in the specified order.
+    public func resolve(orderedDependencies: [(name: String, range: String)]) async throws -> [ResolvedPackage] {
         state.withLock { state in
             state.resolved = [:]
             state.resolving = []
         }
 
-        for (name, range) in dependencies {
+        for (name, range) in orderedDependencies {
             try await resolveDependency(name: name, rangeStr: range, parentPath: [])
         }
 
@@ -110,6 +121,48 @@ public final class DependencyResolver: Sendable {
         // Resolve transitive dependencies
         for (depName, depRange) in versionInfo.dependencies {
             try await resolveDependency(name: depName, rangeStr: depRange, parentPath: parentPath + [name])
+        }
+
+        // Resolve peerDependencies
+        for (peerName, peerRange) in versionInfo.peerDependencies {
+            let isOptional = versionInfo.peerDependenciesMeta[peerName]?.optional == true
+            try await resolvePeerDependency(
+                name: peerName, rangeStr: peerRange,
+                requestedBy: name, optional: isOptional,
+                parentPath: parentPath + [name]
+            )
+        }
+    }
+
+    private func resolvePeerDependency(
+        name: String, rangeStr: String,
+        requestedBy: String, optional: Bool,
+        parentPath: [String]
+    ) async throws {
+        if !installPeerDeps { return }
+
+        let existingCheck = state.withLock { state -> (resolved: Bool, compatible: Bool) in
+            guard let existing = state.resolved[name] else { return (false, false) }
+            guard let range = SemVerRange(rangeStr),
+                  let ver = SemVer(existing.version) else { return (true, true) }
+            return (true, range.satisfiedBy(ver))
+        }
+
+        if existingCheck.resolved {
+            if !existingCheck.compatible && !optional {
+                onWarning?("WARN: peer dependency \(name)@\(rangeStr) required by \(requestedBy) conflicts with installed version")
+            }
+            return
+        }
+
+        // Not yet resolved — resolve as a normal dependency
+        do {
+            try await resolveDependency(name: name, rangeStr: rangeStr, parentPath: parentPath)
+        } catch {
+            if optional {
+                return
+            }
+            throw error
         }
     }
 }

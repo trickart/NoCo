@@ -32,6 +32,10 @@ struct InstallCommand: AsyncParsableCommand {
           help: "List lifecycle scripts without executing them")
     var listScripts: Bool = false
 
+    @Flag(name: .customLong("legacy-peer-deps"),
+          help: "Skip installing peerDependencies")
+    var legacyPeerDeps: Bool = false
+
     func run() async throws {
         let projectDir = FileManager.default.currentDirectoryPath
         let packageJsonPath = (projectDir as NSString).appendingPathComponent("package.json")
@@ -84,7 +88,12 @@ struct InstallCommand: AsyncParsableCommand {
 
         // Resolve dependencies
         let registry = NpmRegistry()
-        let resolver = DependencyResolver(registry: registry, lockfile: lockfile)
+        let resolver = DependencyResolver(
+            registry: registry, lockfile: lockfile,
+            installPeerDeps: !legacyPeerDeps
+        ) { warning in
+            print(warning)
+        }
 
         print("Resolving dependencies...")
         let resolvedPackages = try await resolver.resolve(dependencies: depsToResolve)
