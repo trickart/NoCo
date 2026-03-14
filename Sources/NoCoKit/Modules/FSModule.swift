@@ -350,6 +350,39 @@ public struct FSModule: NodeModule {
         }
         fs.setValue(unsafeBitCast(appendFileSync, to: AnyObject.self), forProperty: "appendFileSync")
 
+        // fs.utimesSync(path, atime, mtime)
+        let utimesSync: @convention(block) (String, JSValue, JSValue) -> Void = { path, atimeVal, mtimeVal in
+            guard let resolved = validatePath(path) else { return }
+            guard fm.fileExists(atPath: resolved) else {
+                context.exception = context.createSystemError(
+                    "ENOENT: no such file or directory, utime '\(path)'",
+                    code: "ENOENT", syscall: "utime", path: path
+                )
+                return
+            }
+
+            func toDate(_ val: JSValue) -> Date {
+                if val.isInstance(of: context.objectForKeyedSubscript("Date")) {
+                    let ms = val.invokeMethod("getTime", withArguments: [])!.toDouble()
+                    return Date(timeIntervalSince1970: ms / 1000.0)
+                }
+                let sec = val.toDouble()
+                return Date(timeIntervalSince1970: sec)
+            }
+
+            let mtime = toDate(mtimeVal)
+            let attrs: [FileAttributeKey: Any] = [.modificationDate: mtime]
+
+            do {
+                try fm.setAttributes(attrs, ofItemAtPath: resolved)
+            } catch {
+                context.exception = context.createSystemError(
+                    error.localizedDescription, code: "EPERM", syscall: "utime", path: path
+                )
+            }
+        }
+        fs.setValue(unsafeBitCast(utimesSync, to: AnyObject.self), forProperty: "utimesSync")
+
         // fs.createReadStream(path, options?)
         let createReadStream: @convention(block) (String, JSValue) -> JSValue = { path, options in
             let highWaterMark: Int

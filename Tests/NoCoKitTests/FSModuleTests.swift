@@ -868,3 +868,35 @@ func fsWatchDetectsChange() async throws {
     // atomically:true writes via rename, so kqueue may report "rename" or "change"
     #expect(messages.contains(where: { $0.hasPrefix("event:change:") || $0.hasPrefix("event:rename:") }))
 }
+
+@Test func fsUtimesSyncWithNumber() async throws {
+    let runtime = NodeRuntime()
+    let tmpPath = NSTemporaryDirectory() + "nodecore_test_utimes_\(UUID().uuidString).txt"
+    defer {
+        try? FileManager.default.removeItem(atPath: tmpPath)
+    }
+
+    let result = runtime.evaluate("""
+        var fs = require('fs');
+        fs.writeFileSync('\(tmpPath)', 'hello');
+        fs.utimesSync('\(tmpPath)', 1000, 2000);
+        var s = fs.statSync('\(tmpPath)');
+        s.mtimeMs;
+    """)
+    #expect(result?.toDouble() == 2000000)
+}
+
+@Test func fsUtimesSyncENOENT() async throws {
+    let runtime = NodeRuntime()
+
+    let result = runtime.evaluate("""
+        var fs = require('fs');
+        try {
+            fs.utimesSync('/nonexistent/path/file.txt', 1000, 2000);
+            'no error';
+        } catch (e) {
+            e.code;
+        }
+    """)
+    #expect(result?.toString() == "ENOENT")
+}
