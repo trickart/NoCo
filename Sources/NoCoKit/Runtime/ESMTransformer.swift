@@ -162,7 +162,7 @@ public enum ESMTransformer {
             (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*import\s+(\w+)\s*,\s*\{([^}]*)\}\s*from\s+['"]([^'"]+)['"]"#),
              { src, match in
                  let defaultName = substr(src, match.range(at: 1))
-                 let named = substr(src, match.range(at: 2)).trimmingCharacters(in: .whitespaces)
+                 let named = substr(src, match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
                  let specifier = substr(src, match.range(at: 3))
                  let destructured = transformNamedImports(named)
                  return "var __m = __esm_import('\(specifier)', __dirname); var \(defaultName) = __m.default; var { \(destructured) } = __m;"
@@ -205,7 +205,7 @@ public enum ESMTransformer {
     }
 
     private static func transformNamedImports(_ named: String) -> String {
-        let parts = named.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        let parts = named.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         return parts.map { part in
             let tokens = part.split(separator: " ").map(String.init)
             if tokens.count == 3 && tokens[1] == "as" {
@@ -243,7 +243,7 @@ public enum ESMTransformer {
             // export default expr (must come after function/class)
             (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*export\s+default\s+(?!function\b|class\b)(.+)"#),
              { src, match in
-                 var expr = substr(src, match.range(at: 1)).trimmingCharacters(in: .whitespaces)
+                 var expr = substr(src, match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
                  if expr.hasSuffix(";") { expr = String(expr.dropLast()) }
                  return "__esm_export_default(module, \(expr));"
              }),
@@ -253,7 +253,7 @@ public enum ESMTransformer {
              { src, match in
                  let named = substr(src, match.range(at: 1))
                  let specifier = substr(src, match.range(at: 2))
-                 let parts = named.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                 let parts = named.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                  // Use IIFE to scope the re-export variable
                  var exportLines: [String] = []
                  for part in parts {
@@ -304,7 +304,7 @@ public enum ESMTransformer {
             (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*export\s+\{([^}]*)\}\s*(?:;|\n|$)"#),
              { src, match in
                  let named = substr(src, match.range(at: 1))
-                 let parts = named.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                 let parts = named.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                  return parts.map { part in
                      let tokens = part.split(separator: " ").map(String.init)
                      if tokens.count == 3 && tokens[1] == "as" {
@@ -341,9 +341,9 @@ public enum ESMTransformer {
                 if ch == "}" || ch == "]" { inBracket -= 1; continue }
                 if ch == "=" && inBracket == 0 { break }
                 if ch == "," && inBracket <= 0 {
-                    let name = current.trimmingCharacters(in: .whitespaces)
+                    let name = current.trimmingCharacters(in: .whitespacesAndNewlines)
                         .split(separator: ":").last.map(String.init)?
-                        .trimmingCharacters(in: .whitespaces) ?? ""
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     if !name.isEmpty && name.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "$" }) {
                         names.append(name)
                     }
@@ -352,9 +352,9 @@ public enum ESMTransformer {
                 }
                 if inBracket > 0 { current.append(ch) }
             }
-            let name = current.trimmingCharacters(in: .whitespaces)
+            let name = current.trimmingCharacters(in: .whitespacesAndNewlines)
                 .split(separator: ":").last.map(String.init)?
-                .trimmingCharacters(in: .whitespaces) ?? ""
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !name.isEmpty && name.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "$" }) {
                 names.append(name)
             }
@@ -378,10 +378,10 @@ public enum ESMTransformer {
     }
 
     private static func extractSimpleName(from s: String) -> String? {
-        let trimmed = s.trimmingCharacters(in: .whitespaces)
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
         let name: String
         if let eqIdx = trimmed.firstIndex(of: "=") {
-            name = String(trimmed[..<eqIdx]).trimmingCharacters(in: .whitespaces)
+            name = String(trimmed[..<eqIdx]).trimmingCharacters(in: .whitespacesAndNewlines)
         } else {
             name = trimmed
         }
