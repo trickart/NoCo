@@ -83,10 +83,20 @@ public struct NpmPackageMetadata: Sendable {
     }
 }
 
+public struct PeerDepMeta: Sendable {
+    public let optional: Bool
+
+    public init(optional: Bool = false) {
+        self.optional = optional
+    }
+}
+
 public struct NpmVersionInfo: Sendable {
     public let version: String
     public let dependencies: [String: String]
     public let devDependencies: [String: String]
+    public let peerDependencies: [String: String]
+    public let peerDependenciesMeta: [String: PeerDepMeta]
     public let dist: NpmDist
     public let bin: [String: String]?
 
@@ -94,6 +104,18 @@ public struct NpmVersionInfo: Sendable {
         let version = json["version"] as? String ?? ""
         let deps = json["dependencies"] as? [String: String] ?? [:]
         let devDeps = json["devDependencies"] as? [String: String] ?? [:]
+        let peerDeps = json["peerDependencies"] as? [String: String] ?? [:]
+
+        var peerMeta: [String: PeerDepMeta] = [:]
+        if let metaJson = json["peerDependenciesMeta"] as? [String: Any] {
+            for (key, value) in metaJson {
+                if let dict = value as? [String: Any] {
+                    let optional = dict["optional"] as? Bool ?? false
+                    peerMeta[key] = PeerDepMeta(optional: optional)
+                }
+            }
+        }
+
         let distJson = json["dist"] as? [String: Any] ?? [:]
         let dist = NpmDist(
             tarball: distJson["tarball"] as? String ?? "",
@@ -110,7 +132,10 @@ public struct NpmVersionInfo: Sendable {
         }
 
         return NpmVersionInfo(version: version, dependencies: deps,
-                              devDependencies: devDeps, dist: dist, bin: bin)
+                              devDependencies: devDeps,
+                              peerDependencies: peerDeps,
+                              peerDependenciesMeta: peerMeta,
+                              dist: dist, bin: bin)
     }
 }
 
