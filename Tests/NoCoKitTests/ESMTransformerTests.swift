@@ -121,6 +121,47 @@ import Testing
     #expect(result.contains("__esm_export_star(module, __esm_import('bar', __dirname))"))
 }
 
+// MARK: - Minified (no space) patterns
+
+@Test func transformMinifiedNamedImport() async throws {
+    let source = "import{a}from'b';"
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("__esm_import('b', __dirname)"))
+    #expect(result.contains("a"))
+}
+
+@Test func transformMinifiedNamespaceImport() async throws {
+    let source = "import*as ns from'mod';"
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("var ns = __esm_import('mod', __dirname)"))
+}
+
+@Test func transformMinifiedSideEffectImport() async throws {
+    let source = "import'./module';"
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("__esm_import('./module', __dirname)"))
+}
+
+@Test func transformMinifiedExportNamedList() async throws {
+    let source = "const a = 1;const b = 2;\nexport{a as x,b as y};"
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("__esm_export(module, 'x', function() { return a; })"))
+    #expect(result.contains("__esm_export(module, 'y', function() { return b; })"))
+}
+
+@Test func transformMinifiedReExportAll() async throws {
+    let source = "export*from'module';"
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("__esm_export_star(module, __esm_import('module', __dirname))"))
+}
+
+@Test func transformMinifiedReExportNamed() async throws {
+    let source = "export{foo}from'bar';"
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("__esm_import('bar', __dirname)"))
+    #expect(result.contains("__esm_export(module, 'foo'"))
+}
+
 // MARK: - import.meta
 
 @Test func transformImportMeta() async throws {
