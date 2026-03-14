@@ -12,6 +12,7 @@ public final class DependencyResolver: Sendable {
     private struct ResolverState {
         var resolved: [String: ResolvedPackage] = [:]
         var resolving: Set<String> = []
+        var optionalNames: Set<String> = []
     }
 
     public init(registry: NpmRegistry, lockfile: Lockfile? = nil,
@@ -25,19 +26,33 @@ public final class DependencyResolver: Sendable {
 
     /// Resolve all dependencies starting from root dependencies.
     /// Returns a flat list of packages to install with their target paths.
-    public func resolve(dependencies: [String: String]) async throws -> [ResolvedPackage] {
-        try await resolve(orderedDependencies: dependencies.map { ($0.key, $0.value) })
+    public func resolve(dependencies: [String: String],
+                        optionalDependencies: Set<String> = []) async throws -> [ResolvedPackage] {
+        try await resolve(
+            orderedDependencies: dependencies.map { ($0.key, $0.value) },
+            optionalDependencies: optionalDependencies
+        )
     }
 
     /// Resolve dependencies in the specified order.
-    public func resolve(orderedDependencies: [(name: String, range: String)]) async throws -> [ResolvedPackage] {
+    public func resolve(orderedDependencies: [(name: String, range: String)],
+                        optionalDependencies: Set<String> = []) async throws -> [ResolvedPackage] {
         state.withLock { state in
             state.resolved = [:]
             state.resolving = []
+            state.optionalNames = optionalDependencies
         }
 
         for (name, range) in orderedDependencies {
-            try await resolveDependency(name: name, rangeStr: range, parentPath: [])
+            if optionalDependencies.contains(name) {
+                do {
+                    try await resolveDependency(name: name, rangeStr: range, parentPath: [])
+                } catch {
+                    onWarning?("WARN: optional dependency \(name)@\(range) failed to resolve, skipping")
+                }
+            } else {
+                try await resolveDependency(name: name, rangeStr: range, parentPath: [])
+            }
         }
 
         return state.withLock { Array($0.resolved.values) }
@@ -74,11 +89,13 @@ public final class DependencyResolver: Sendable {
                     throw DependencyResolverError.invalidVersionRange(name, rangeStr)
                 }
                 if let ver = SemVer(lockedInfo.version), range.satisfiedBy(ver) {
+                    let isOptional = state.withLock { $0.optionalNames.contains(name) }
                     let pkg = ResolvedPackage(
                         name: name, version: lockedInfo.version,
                         tarballURL: lockedInfo.resolved, integrity: lockedInfo.integrity,
                         dependencies: lockedInfo.dependencies,
-                        installPath: "node_modules/\(name)"
+                        installPath: "node_modules/\(name)",
+                        optional: isOptional
                     )
                     state.withLock { $0.resolved[name] = pkg }
 
@@ -109,12 +126,14 @@ public final class DependencyResolver: Sendable {
             throw DependencyResolverError.noMatchingVersion(name, rangeStr)
         }
 
+        let isOptional = state.withLock { $0.optionalNames.contains(name) }
         let pkg = ResolvedPackage(
             name: name, version: versionStr,
             tarballURL: versionInfo.dist.tarball,
             integrity: versionInfo.dist.integrity,
             dependencies: versionInfo.dependencies,
-            installPath: "node_modules/\(name)"
+            installPath: "node_modules/\(name)",
+            optional: isOptional
         )
         state.withLock { $0.resolved[name] = pkg }
 
@@ -175,6 +194,18 @@ public struct ResolvedPackage: Sendable {
     public let integrity: String
     public let dependencies: [String: String]
     public let installPath: String
+    public let optional: Bool
+
+    public init(name: String, version: String, tarballURL: String, integrity: String,
+                dependencies: [String: String], installPath: String, optional: Bool = false) {
+        self.name = name
+        self.version = version
+        self.tarballURL = tarballURL
+        self.integrity = integrity
+        self.dependencies = dependencies
+        self.installPath = installPath
+        self.optional = optional
+    }
 }
 
 public enum DependencyResolverError: Error, CustomStringConvertible {
