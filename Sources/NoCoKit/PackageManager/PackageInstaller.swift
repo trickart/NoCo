@@ -49,10 +49,82 @@ public final class PackageInstaller: Sendable {
             try await group.waitForAll()
         }
 
+        // Create .bin symlinks for packages with bin fields
+        createBinLinks(nodeModulesDir: nodeModulesDir, packages: packages)
+
         // Run lifecycle scripts after all packages are downloaded and extracted
         if let runner = scriptRunner {
             try runner.processPackages(packages, nodeModulesDir: nodeModulesDir)
         }
+    }
+
+    /// Create .bin symlinks for packages that declare bin fields in their package.json
+    func createBinLinks(nodeModulesDir: String, packages: [ResolvedPackage]) {
+        let binDir = (nodeModulesDir as NSString).appendingPathComponent(".bin")
+        let fm = FileManager.default
+
+        // Create .bin directory
+        try? fm.createDirectory(atPath: binDir, withIntermediateDirectories: true)
+
+        for pkg in packages {
+            let pkgDir = (nodeModulesDir as NSString).appendingPathComponent(pkg.name)
+            let pkgJsonPath = (pkgDir as NSString).appendingPathComponent("package.json")
+
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: pkgJsonPath)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                continue
+            }
+
+            let binEntries = parseBinField(json: json, packageName: pkg.name)
+            for (command, binPath) in binEntries {
+                // Build relative symlink target: ../<pkg-name>/<bin-path>
+                let cleanBinPath = binPath.hasPrefix("./") ? String(binPath.dropFirst(2)) : binPath
+                let relativeTarget: String
+                if pkg.name.contains("/") {
+                    // Scoped package: ../@scope/name/<bin-path>
+                    relativeTarget = "../\(pkg.name)/\(cleanBinPath)"
+                } else {
+                    relativeTarget = "../\(pkg.name)/\(cleanBinPath)"
+                }
+
+                let linkPath = (binDir as NSString).appendingPathComponent(command)
+
+                // Remove existing link
+                try? fm.removeItem(atPath: linkPath)
+
+                // Create symlink
+                do {
+                    try fm.createSymbolicLink(atPath: linkPath, withDestinationPath: relativeTarget)
+                    // Set executable permission on the target file
+                    let targetAbsPath = (pkgDir as NSString).appendingPathComponent(cleanBinPath)
+                    if fm.fileExists(atPath: targetAbsPath) {
+                        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: targetAbsPath)
+                    }
+                } catch {
+                    // Non-fatal: log and continue
+                    onProgress?("warning: failed to create bin link for \(command): \(error)")
+                }
+            }
+        }
+    }
+
+    /// Parse the bin field from package.json
+    /// Supports: string form ("bin": "./cli.js") and object form ("bin": {"cmd": "./cli.js"})
+    private func parseBinField(json: [String: Any], packageName: String) -> [(String, String)] {
+        if let binDict = json["bin"] as? [String: String] {
+            return Array(binDict)
+        }
+        if let binString = json["bin"] as? String {
+            // Use the package name (without scope) as the command name
+            let commandName: String
+            if packageName.contains("/") {
+                commandName = String(packageName.split(separator: "/").last ?? Substring(packageName))
+            } else {
+                commandName = packageName
+            }
+            return [(commandName, binString)]
+        }
+        return []
     }
 
     private func installPackage(_ pkg: ResolvedPackage, nodeModulesDir: String) async throws {
