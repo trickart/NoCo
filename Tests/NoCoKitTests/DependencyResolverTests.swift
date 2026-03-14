@@ -158,6 +158,32 @@ struct DependencyResolverTests {
         #expect(hasWarning, "Should emit warning for failed optional dependency")
     }
 
+    // MARK: - bundledDependencies Tests
+
+    @Test("bundledDependencies are skipped during dependency resolution")
+    func bundledDependenciesSkipped() async throws {
+        // npm package with bundledDependencies should not resolve those as transitive deps
+        // We use a mock-like approach: resolve a package that has bundledDependencies in its metadata
+        // For a real-world test, we use `npm` package itself which has bundledDependencies
+        let registry = NpmRegistry()
+        let metadata = try await registry.fetchMetadata(for: "npm")
+        let latestVersion = metadata.distTags["latest"]!
+        let versionInfo = metadata.versions[latestVersion]!
+
+        // Verify that npm actually has bundledDependencies in its metadata
+        #expect(!versionInfo.bundledDependencies.isEmpty, "npm package should have bundledDependencies")
+
+        // Now resolve npm - bundled deps should NOT appear in resolved list
+        let resolver = DependencyResolver(registry: registry)
+        let resolved = try await resolver.resolve(dependencies: ["npm": latestVersion])
+
+        let resolvedNames = Set(resolved.map(\.name))
+        for bundledName in versionInfo.bundledDependencies {
+            #expect(!resolvedNames.contains(bundledName),
+                    "\(bundledName) is bundled and should not be in resolved list")
+        }
+    }
+
     @Test("Failed required dependency still throws")
     func failedRequiredDependencyThrows() async throws {
         let registry = NpmRegistry()
