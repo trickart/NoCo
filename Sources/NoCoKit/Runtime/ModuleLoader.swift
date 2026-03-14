@@ -222,12 +222,15 @@ public final class ModuleLoader {
 
         let dirname = (path as NSString).deletingLastPathComponent
 
+        // Shebang行をJSコメントに変換（行番号を維持）
+        let strippedSource = Self.stripShebang(source)
+
         // Transform source based on module type
         let transformedSource: String
         if ESMDetector.shared.isESM(path: path) {
-            transformedSource = ESMTransformer.transform(source)
+            transformedSource = ESMTransformer.transform(strippedSource)
         } else {
-            transformedSource = ESMTransformer.transformDynamicImport(source)
+            transformedSource = ESMTransformer.transformDynamicImport(strippedSource)
         }
 
         // Wrap in CommonJS function
@@ -583,5 +586,15 @@ public final class ModuleLoader {
     func clearCache() {
         moduleCache.removeAll()
         loadingModules.removeAll()
+    }
+
+    /// Shebang行(`#!`)をJSコメント(`//`)に変換（行番号を維持）
+    static func stripShebang(_ source: String) -> String {
+        guard source.hasPrefix("#!") else { return source }
+        if let newlineIndex = source.firstIndex(where: { $0 == "\n" || $0 == "\r" }) {
+            return "//" + source[source.index(source.startIndex, offsetBy: 2)..<newlineIndex] + source[newlineIndex...]
+        }
+        // 改行なし（shebangのみのファイル）
+        return "//" + source.dropFirst(2)
     }
 }

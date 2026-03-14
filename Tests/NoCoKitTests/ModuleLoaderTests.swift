@@ -257,3 +257,65 @@ private func fixturesPath() -> String {
     """)
     #expect(result?.toBool() == true)
 }
+
+// MARK: - Shebang handling
+
+@Test func requireShebangModule() async throws {
+    let runtime = NodeRuntime()
+    let fixturePath = fixturesPath() + "/shebang_module.js"
+    let result = runtime.evaluate("require('\(fixturePath)').value")
+    #expect(result?.toString() == "shebang_works")
+}
+
+@Test func evaluateFileWithShebang() async throws {
+    let runtime = NodeRuntime()
+    var messages: [(NodeRuntime.ConsoleLevel, String)] = []
+    runtime.consoleHandler = { level, msg in messages.append((level, msg)) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_shebang_test_\(UUID().uuidString).js"
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+    try "#!/usr/bin/env node\nconsole.log('shebang_exec');".write(
+        toFile: tmpPath, atomically: true, encoding: .utf8)
+
+    try runtime.evaluateFile(at: tmpPath)
+    #expect(messages.contains(where: { $0.1 == "shebang_exec" }))
+}
+
+@Test func shebangPreservesLineNumbers() async throws {
+    let runtime = NodeRuntime()
+    let fixturePath = fixturesPath() + "/shebang_error.js"
+
+    let result = runtime.evaluate("""
+        try {
+            require('\(fixturePath)');
+        } catch(e) {
+            e.line;
+        }
+    """)
+    // CommonJSラッパーで1行追加されるため、ファイル上の3行目 → e.line は4
+    #expect(result?.toInt32() == 4)
+}
+
+@Test func requireShebangCRLF() async throws {
+    let runtime = NodeRuntime()
+    let fixturePath = fixturesPath() + "/shebang_crlf.js"
+    let result = runtime.evaluate("require('\(fixturePath)').value")
+    #expect(result?.toString() == "crlf_works")
+}
+
+@Test func stripShebangUnit() async throws {
+    // shebangなし → そのまま返す
+    #expect(ModuleLoader.stripShebang("console.log('hi')") == "console.log('hi')")
+
+    // shebang付き → コメント化
+    let result = ModuleLoader.stripShebang("#!/usr/bin/env node\nconsole.log('hi')")
+    #expect(result == "///usr/bin/env node\nconsole.log('hi')")
+
+    // CRLF
+    let crlf = ModuleLoader.stripShebang("#!/usr/bin/env node\r\nconsole.log('hi')")
+    #expect(crlf == "///usr/bin/env node\r\nconsole.log('hi')")
+
+    // shebangのみ（改行なし）
+    let only = ModuleLoader.stripShebang("#!/usr/bin/env node")
+    #expect(only == "///usr/bin/env node")
+}
