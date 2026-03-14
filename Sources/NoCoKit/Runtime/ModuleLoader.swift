@@ -228,12 +228,22 @@ public final class ModuleLoader {
         // Shebang行をJSコメントに変換（行番号を維持）
         let strippedSource = Self.stripShebang(source)
 
+        // TypeScriptファイルの場合、型注釈を削除
+        let tsExtensions = ["ts", "mts", "cts"]
+        let fileExt = (path as NSString).pathExtension.lowercased()
+        let jsSource: String
+        if tsExtensions.contains(fileExt) {
+            jsSource = TypeScriptStripper.strip(strippedSource)
+        } else {
+            jsSource = strippedSource
+        }
+
         // Transform source based on module type
         let transformedSource: String
         if ESMDetector.shared.isESM(path: path) {
-            transformedSource = ESMTransformer.transform(strippedSource)
+            transformedSource = ESMTransformer.transform(jsSource)
         } else {
-            transformedSource = ESMTransformer.transformDynamicImport(strippedSource)
+            transformedSource = ESMTransformer.transformDynamicImport(jsSource)
         }
 
         // Wrap in CommonJS function
@@ -379,8 +389,8 @@ public final class ModuleLoader {
             return candidate
         }
 
-        // Try with extensions: .js, .mjs, .cjs, .json
-        for ext in [".js", ".mjs", ".cjs", ".json"] {
+        // Try with extensions: .js, .mjs, .cjs, .ts, .mts, .cts, .json
+        for ext in [".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".json"] {
             let withExt = candidate + ext
             if fm.fileExists(atPath: withExt) {
                 return withExt
