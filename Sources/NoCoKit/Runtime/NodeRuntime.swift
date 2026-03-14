@@ -103,7 +103,7 @@ public final class NodeRuntime: @unchecked Sendable {
     /// Evaluate a JavaScript file at the given path.
     @discardableResult
     public func evaluateFile(at path: String) throws -> JSValue? {
-        let resolvedPath = (path as NSString).standardizingPath
+        let resolvedPath = ((path as NSString).standardizingPath as NSString).resolvingSymlinksInPath
         guard FileManager.default.fileExists(atPath: resolvedPath) else {
             throw NoCoError.fileNotFound(resolvedPath)
         }
