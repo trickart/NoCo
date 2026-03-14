@@ -1,5 +1,6 @@
 import Foundation
-import JavaScriptCore
+@preconcurrency import JavaScriptCore
+import Synchronization
 
 /// Implements the Node.js `vm` module for sandboxed code execution.
 /// Uses separate JSContext instances (on the same JSVirtualMachine) for true scope isolation.
@@ -7,8 +8,11 @@ public struct VmModule: NodeModule {
     public static let moduleName = "vm"
 
     /// Maps context IDs to their dedicated JSContext instances.
-    nonisolated(unsafe) private static var contextStore: [Int: JSContext] = [:]
-    nonisolated(unsafe) private static var nextContextId: Int = 1
+    private struct State {
+        var contextStore: [Int: JSContext] = [:]
+        var nextContextId: Int = 1
+    }
+    private static let state = Mutex(State())
 
     @discardableResult
     public static func install(in context: JSContext, runtime: NodeRuntime) -> JSValue {
@@ -37,9 +41,12 @@ public struct VmModule: NodeModule {
             installGlobals(in: newContext, from: runtime)
 
             // Assign a unique ID and store the mapping
-            let contextId = nextContextId
-            nextContextId += 1
-            contextStore[contextId] = newContext
+            let contextId = state.withLock { s in
+                let id = s.nextContextId
+                s.nextContextId += 1
+                s.contextStore[id] = newContext
+                return id
+            }
 
             // Mark sandbox as a context with hidden properties
             ctx.evaluateScript("""
@@ -72,7 +79,7 @@ public struct VmModule: NodeModule {
             let callerCtx = JSContext.current()!
 
             let contextId = sandbox.forProperty("__vmContextId__")?.toInt32() ?? 0
-            guard contextId > 0, let targetCtx = contextStore[Int(contextId)] else {
+            guard contextId > 0, let targetCtx = state.withLock({ $0.contextStore[Int(contextId)] }) else {
                 callerCtx.exception = callerCtx.evaluateScript(
                     "new TypeError('argument is not a context')"
                 )
@@ -174,7 +181,7 @@ public struct VmModule: NodeModule {
             let targetCtx: JSContext
             if !sandbox.isUndefined && !sandbox.isNull {
                 let contextId = sandbox.forProperty("__vmContextId__")?.toInt32() ?? 0
-                if contextId > 0, let mapped = contextStore[Int(contextId)] {
+                if contextId > 0, let mapped = state.withLock({ $0.contextStore[Int(contextId)] }) {
                     targetCtx = mapped
                 } else {
                     targetCtx = runtime.context

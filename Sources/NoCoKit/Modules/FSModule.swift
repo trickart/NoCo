@@ -17,7 +17,7 @@ public struct FSConfiguration {
 
 /// Manages file descriptor table for fd-based fs APIs.
 /// Thread-safe: accessed from both jsQueue and GCD background queues.
-class FileDescriptorTable: @unchecked Sendable {
+final class FileDescriptorTable: Sendable {
     private struct State {
         var nextFd = 3 // 0=stdin, 1=stdout, 2=stderr are reserved
         var table: [Int: FileHandle] = [:]

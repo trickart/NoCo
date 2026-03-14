@@ -1,5 +1,6 @@
 import Testing
 import JavaScriptCore
+import Synchronization
 @testable import NoCoKit
 
 // MARK: - Event Loop Tests
@@ -133,8 +134,9 @@ import JavaScriptCore
 
 @Test func multipleEnqueueCallbacksProcessedInOrder() async throws {
     let runtime = NodeRuntime()
-    nonisolated(unsafe) var messages: [String] = []
-    runtime.consoleHandler = { _, msg in messages.append(msg) }
+    let messages = Mutex<[String]>([])
+
+    runtime.consoleHandler = { _, msg in messages.withLock { $0.append(msg) } }
     runtime.eventLoop.retainHandle()
 
     async let loopDone: Void = withCheckedContinuation { continuation in
@@ -167,5 +169,5 @@ import JavaScriptCore
     await loopDone
 
     let expected = (0..<10).map { "callback-\($0)" }
-    #expect(messages == expected)
+    #expect(messages.withLock { $0 } == expected)
 }
