@@ -7,6 +7,7 @@ public enum NoCoError: Error, CustomStringConvertible {
     case fileNotFound(String)
     case evaluationFailed(String)
     case sandboxViolation(String)
+    case scriptNotFound(String, available: [String])
 
     public var description: String {
         switch self {
@@ -15,6 +16,12 @@ public enum NoCoError: Error, CustomStringConvertible {
         case .fileNotFound(let path): return "ENOENT: no such file or directory, open '\(path)'"
         case .evaluationFailed(let msg): return "EvaluationFailed: \(msg)"
         case .sandboxViolation(let msg): return "SandboxViolation: \(msg)"
+        case .scriptNotFound(let name, let available):
+            var msg = "Script \"\(name)\" not found in package.json."
+            if !available.isEmpty {
+                msg += "\nAvailable scripts: \(available.sorted().joined(separator: ", "))"
+            }
+            return msg
         }
     }
 }

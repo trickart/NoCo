@@ -7,18 +7,21 @@ public struct PackageJson: Sendable {
     public var dependencies: [String: String]
     public var devDependencies: [String: String]
     public var optionalDependencies: [String: String]
+    public var scripts: [String: String]
     /// Raw JSON bytes for round-trip preservation of unknown fields
     private var rawJSON: Data?
 
     public init(name: String = "", version: String = "1.0.0",
                 dependencies: [String: String] = [:],
                 devDependencies: [String: String] = [:],
-                optionalDependencies: [String: String] = [:]) {
+                optionalDependencies: [String: String] = [:],
+                scripts: [String: String] = [:]) {
         self.name = name
         self.version = version
         self.dependencies = dependencies
         self.devDependencies = devDependencies
         self.optionalDependencies = optionalDependencies
+        self.scripts = scripts
         self.rawJSON = nil
     }
 
@@ -40,6 +43,7 @@ public struct PackageJson: Sendable {
         pkg.dependencies = json["dependencies"] as? [String: String] ?? [:]
         pkg.devDependencies = json["devDependencies"] as? [String: String] ?? [:]
         pkg.optionalDependencies = json["optionalDependencies"] as? [String: String] ?? [:]
+        pkg.scripts = json["scripts"] as? [String: String] ?? [:]
         return pkg
     }
 

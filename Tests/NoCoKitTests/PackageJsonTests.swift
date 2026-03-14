@@ -77,6 +77,39 @@ struct PackageJsonTests {
         #expect(reread.devDependencies["jest"] == "^29.0.0")
     }
 
+    @Test("Parse scripts field")
+    func parseScripts() throws {
+        let json = """
+        {
+          "name": "my-app",
+          "version": "1.0.0",
+          "scripts": {
+            "test": "echo test",
+            "build": "echo build",
+            "pretest": "echo pretest"
+          }
+        }
+        """.data(using: .utf8)!
+
+        let pkg = try PackageJson.parse(json)
+        #expect(pkg.scripts.count == 3)
+        #expect(pkg.scripts["test"] == "echo test")
+        #expect(pkg.scripts["build"] == "echo build")
+        #expect(pkg.scripts["pretest"] == "echo pretest")
+    }
+
+    @Test("Parse package.json without scripts")
+    func parseWithoutScripts() throws {
+        let json = """
+        {
+          "name": "no-scripts"
+        }
+        """.data(using: .utf8)!
+
+        let pkg = try PackageJson.parse(json)
+        #expect(pkg.scripts.isEmpty)
+    }
+
     @Test("Invalid format throws")
     func invalidFormat() {
         let data = "not json".data(using: .utf8)!
