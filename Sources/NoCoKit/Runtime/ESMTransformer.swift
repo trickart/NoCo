@@ -159,7 +159,7 @@ public enum ESMTransformer {
 
         let patterns: [(NSRegularExpression, (String, NSTextCheckingResult) -> String?)] = [
             // import x, { a, b } from 'y'  (default + named)
-            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*import\s+(\w+)\s*,\s*\{([^}]*)\}\s*from\s+['"]([^'"]+)['"]"#),
+            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*import\s+(\w+)\s*,\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]"#),
              { src, match in
                  let defaultName = substr(src, match.range(at: 1))
                  let named = substr(src, match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -168,14 +168,14 @@ public enum ESMTransformer {
                  return "var __m = __esm_import('\(specifier)', __dirname); var \(defaultName) = __m.default; var { \(destructured) } = __m;"
              }),
             // import * as ns from 'y'
-            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*import\s+\*\s+as\s+(\w+)\s+from\s+['"]([^'"]+)['"]"#),
+            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*import\s*\*\s*as\s+(\w+)\s+from\s*['"]([^'"]+)['"]"#),
              { src, match in
                  let ns = substr(src, match.range(at: 1))
                  let specifier = substr(src, match.range(at: 2))
                  return "var \(ns) = __esm_import('\(specifier)', __dirname);"
              }),
             // import { a, b } from 'y'
-            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*import\s+\{([^}]*)\}\s*from\s+['"]([^'"]+)['"]"#),
+            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*import\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]"#),
              { src, match in
                  let named = substr(src, match.range(at: 1))
                  let specifier = substr(src, match.range(at: 2))
@@ -183,14 +183,14 @@ public enum ESMTransformer {
                  return "var { \(destructured) } = __esm_import('\(specifier)', __dirname);"
              }),
             // import x from 'y'
-            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*import\s+(\w+)\s+from\s+['"]([^'"]+)['"]"#),
+            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*import\s+(\w+)\s+from\s*['"]([^'"]+)['"]"#),
              { src, match in
                  let name = substr(src, match.range(at: 1))
                  let specifier = substr(src, match.range(at: 2))
                  return "var __m = __esm_import('\(specifier)', __dirname); var \(name) = __m.default;"
              }),
             // import 'y'  (side-effect only)
-            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*import\s+['"]([^'"]+)['"]"#),
+            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*import\s*['"]([^'"]+)['"]"#),
              { src, match in
                  let specifier = substr(src, match.range(at: 1))
                  return "__esm_import('\(specifier)', __dirname);"
@@ -249,7 +249,7 @@ public enum ESMTransformer {
              }),
 
             // export { a, b } from 'y'  (re-export named)
-            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*export\s+\{([^}]*)\}\s*from\s+['"]([^'"]+)['"]"#),
+            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]"#),
              { src, match in
                  let named = substr(src, match.range(at: 1))
                  let specifier = substr(src, match.range(at: 2))
@@ -268,7 +268,7 @@ public enum ESMTransformer {
              }),
 
             // export * from 'y'
-            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*export\s+\*\s+from\s+['"]([^'"]+)['"]"#),
+            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*export\s*\*\s*from\s*['"]([^'"]+)['"]"#),
              { src, match in
                  let specifier = substr(src, match.range(at: 1))
                  return "__esm_export_star(module, __esm_import('\(specifier)', __dirname));"
@@ -301,7 +301,7 @@ public enum ESMTransformer {
              }),
 
             // export { a, b }  (local re-export, no 'from')
-            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*export\s+\{([^}]*)\}\s*(?:;|\n|$)"#),
+            (try! NSRegularExpression(pattern: #"(?:^|\n|;)\s*export\s*\{([^}]*)\}\s*(?:;|\n|$)"#),
              { src, match in
                  let named = substr(src, match.range(at: 1))
                  let parts = named.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
