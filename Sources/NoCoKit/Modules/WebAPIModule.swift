@@ -1,6 +1,7 @@
 import Foundation
 @preconcurrency import JavaScriptCore
 import Compression
+import Synchronization
 
 /// Installs Web Platform APIs as globals: Headers, Request, Response,
 /// AbortController, AbortSignal, ReadableStream.
@@ -30,9 +31,33 @@ public struct WebAPIModule {
         context.setObject(decompressBlock, forKeyedSubscript: "__decompress" as NSString)
 
         // ── Fetch bridge functions ──
-        final class FetchStorage: @unchecked Sendable {
-            var activeTasks: [Int: URLSessionDataTask] = [:]
-            var nextTaskId: Int = 1
+        final class FetchStorage: Sendable {
+            private struct State {
+                var activeTasks: [Int: URLSessionDataTask] = [:]
+                var nextTaskId: Int = 1
+            }
+            private let state = Mutex(State())
+
+            func allocateTaskId() -> Int {
+                state.withLock { s in
+                    let id = s.nextTaskId
+                    s.nextTaskId += 1
+                    return id
+                }
+            }
+
+            func storeTask(_ taskId: Int, _ task: URLSessionDataTask) {
+                state.withLock { $0.activeTasks[taskId] = task }
+            }
+
+            func removeTask(_ taskId: Int) {
+                state.withLock { _ = $0.activeTasks.removeValue(forKey: taskId) }
+            }
+
+            func cancelTask(_ taskId: Int) {
+                let task = state.withLock { $0.activeTasks[taskId] }
+                task?.cancel()
+            }
         }
         let fetchStorage = FetchStorage()
         let noRedirectSession = URLSession(
@@ -76,8 +101,7 @@ public struct WebAPIModule {
                 }
             }
 
-            let taskId = fetchStorage.nextTaskId
-            fetchStorage.nextTaskId += 1
+            let taskId = fetchStorage.allocateTaskId()
 
             runtime.eventLoop.retainHandle()
 
@@ -86,7 +110,7 @@ public struct WebAPIModule {
             let task = session.dataTask(with: request) { data, response, error in
                 runtime.eventLoop.enqueueCallback {
                     runtime.eventLoop.releaseHandle()
-                    fetchStorage.activeTasks.removeValue(forKey: taskId)
+                    fetchStorage.removeTask(taskId)
 
                     let ctx = runtime.context
 
@@ -148,7 +172,7 @@ public struct WebAPIModule {
                 }
             }
 
-            fetchStorage.activeTasks[taskId] = task
+            fetchStorage.storeTask(taskId, task)
             task.resume()
 
             return taskId
@@ -157,7 +181,7 @@ public struct WebAPIModule {
 
         // __fetchCancel(taskId)
         let fetchCancelBlock: @convention(block) (Int) -> Void = { taskId in
-            fetchStorage.activeTasks[taskId]?.cancel()
+            fetchStorage.cancelTask(taskId)
         }
         context.setObject(fetchCancelBlock, forKeyedSubscript: "__fetchCancel" as NSString)
 

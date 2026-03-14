@@ -3,6 +3,7 @@ import Foundation
 import Network
 import NIOCore
 import NIOTransportServices
+import Synchronization
 
 /// Real TCP client + server implementation of Node.js `net` module.
 /// Client uses NWConnection; server uses NIOTransportServices (NIOTSListenerBootstrap).
@@ -644,17 +645,16 @@ final class NIOAcceptedSocket: @unchecked Sendable {
 
 // MARK: - AtomicCounter
 
-/// Simple thread-safe counter using DispatchQueue.
-final class AtomicCounter: @unchecked Sendable {
-    private var value: Int
-    private let lock = DispatchQueue(label: "com.noco.atomic-counter")
+/// Simple thread-safe counter using Mutex.
+final class AtomicCounter: Sendable {
+    private let state: Mutex<Int>
 
     init(initial: Int) {
-        self.value = initial
+        self.state = Mutex(initial)
     }
 
     func next() -> Int {
-        lock.sync {
+        state.withLock { value in
             let current = value
             value += 1
             return current

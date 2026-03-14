@@ -1,5 +1,6 @@
 import Foundation
 import JavaScriptCore
+import Synchronization
 
 /// Manages the event loop: timers, nextTick queue, and microtask processing.
 public final class EventLoop: @unchecked Sendable {
@@ -7,14 +8,16 @@ public final class EventLoop: @unchecked Sendable {
     private var timers: [Int: TimerEntry] = [:]
     private var nextTimerId: Int = 1
     private var nextTickQueue: [JSValue] = []
-    private var _running = false
-    /// Dedicated queue for thread-safe access to pendingCallbacks and _activeHandles.
-    /// Separate from `queue` (jsQueue) to avoid deadlock when run() executes on jsQueue.
-    private let ioLock = DispatchQueue(label: "com.nodecore.eventloop.io")
-    private var pendingCallbacks: [() -> Void] = []
-    /// Number of active I/O handles (e.g. TCP sockets) keeping the loop alive.
-    private var _activeHandles: Int = 0
     private let wakeup = DispatchSemaphore(value: 0)
+
+    /// Thread-safe I/O state protected by Mutex.
+    /// Accessed from both jsQueue and external queues (NIO, NWConnection, etc.).
+    private struct IOState: Sendable {
+        var pendingCallbacks: [@Sendable () -> Void] = []
+        var activeHandles: Int = 0
+        var running: Bool = false
+    }
+    private let ioState = Mutex(IOState())
 
     /// Called after each callback execution to check/clear uncaught JS exceptions.
     var onUncaughtException: (() -> Void)?
@@ -78,18 +81,16 @@ public final class EventLoop: @unchecked Sendable {
     /// Enqueue a callback from external sources (e.g. NWConnection).
     /// Thread-safe: can be called from any queue.
     func enqueueCallback(_ block: @escaping @Sendable () -> Void) {
-        ioLock.async { [self] in
-            pendingCallbacks.append(block)
-        }
+        ioState.withLock { $0.pendingCallbacks.append(block) }
         wakeup.signal()
     }
 
     /// Drain the pending callbacks queue.
     func drainCallbacks() {
-        var cbs: [() -> Void] = []
-        ioLock.sync { [self] in
-            cbs = pendingCallbacks
-            pendingCallbacks.removeAll()
+        let cbs = ioState.withLock { s in
+            let cbs = s.pendingCallbacks
+            s.pendingCallbacks.removeAll()
+            return cbs
         }
         for cb in cbs {
             cb()
@@ -102,31 +103,26 @@ public final class EventLoop: @unchecked Sendable {
 
     /// Increment active I/O handle count. Thread-safe.
     func retainHandle() {
-        ioLock.sync { [self] in _activeHandles += 1 }
+        ioState.withLock { $0.activeHandles += 1 }
     }
 
     /// Decrement active I/O handle count. Thread-safe.
     func releaseHandle() {
-        ioLock.sync { [self] in _activeHandles -= 1 }
+        ioState.withLock { $0.activeHandles -= 1 }
     }
 
     /// Check if there's pending work.
     var hasPendingWork: Bool {
-        var hasCallbacks = false
-        var handles = 0
-        ioLock.sync { [self] in
-            hasCallbacks = !pendingCallbacks.isEmpty
-            handles = _activeHandles
-        }
+        let (hasCallbacks, handles) = ioState.withLock { ($0.pendingCallbacks.isEmpty == false, $0.activeHandles) }
         return !timers.isEmpty || !nextTickQueue.isEmpty || hasCallbacks || handles > 0
     }
 
     /// Run the event loop until no pending work or timeout.
     func run(timeout: TimeInterval = 30) {
-        ioLock.sync { [self] in _running = true }
+        ioState.withLock { $0.running = true }
         let deadline = timeout.isInfinite ? Date.distantFuture : Date().addingTimeInterval(timeout)
 
-        while ioLock.sync(execute: { [self] in _running }) && hasPendingWork && Date() < deadline {
+        while ioState.withLock({ $0.running }) && hasPendingWork && Date() < deadline {
             drainNextTick()
             drainCallbacks()
 
@@ -153,7 +149,7 @@ public final class EventLoop: @unchecked Sendable {
                 drainMicrotasks?()
             }
 
-            let callbacksEmpty = ioLock.sync { [self] in pendingCallbacks.isEmpty }
+            let callbacksEmpty = ioState.withLock { $0.pendingCallbacks.isEmpty }
             if !firedAny && nextTickQueue.isEmpty && callbacksEmpty {
                 // Wait until signaled, next timer fires, or run deadline expires
                 let remaining = max(deadline.timeIntervalSinceNow, 0)
@@ -167,12 +163,12 @@ public final class EventLoop: @unchecked Sendable {
                 _ = wakeup.wait(timeout: .now() + waitInterval)
             }
         }
-        ioLock.sync { [self] in _running = false }
+        ioState.withLock { $0.running = false }
     }
 
     /// Stop the event loop.
     func stop() {
-        ioLock.sync { [self] in _running = false }
+        ioState.withLock { $0.running = false }
         wakeup.signal()
     }
 
@@ -180,10 +176,10 @@ public final class EventLoop: @unchecked Sendable {
     func reset() {
         timers.removeAll()
         nextTickQueue.removeAll()
-        pendingCallbacks.removeAll()
-        ioLock.sync { [self] in
-            _activeHandles = 0
-            _running = false
+        ioState.withLock { s in
+            s.pendingCallbacks.removeAll()
+            s.activeHandles = 0
+            s.running = false
         }
     }
 }
