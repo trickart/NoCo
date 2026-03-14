@@ -181,6 +181,9 @@ public final class ModuleLoader {
     /// Load a JS file (or JSON file) as a CommonJS module.
     @discardableResult
     public func loadFile(at path: String) -> JSValue {
+        // シンボリックリンクを実体パスに解決（Node.js互換: __dirname/__filenameは実体基準）
+        let path = (path as NSString).resolvingSymlinksInPath
+
         guard let runtime = runtime else {
             return JSValue(undefinedIn: JSContext.current())
         }

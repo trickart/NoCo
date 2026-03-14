@@ -59,13 +59,16 @@ struct RunCommand: ParsableCommand {
 
     private func runJSFile(script: String, execPath: String, userArgs: [String]) throws {
         let path = (script as NSString).standardizingPath
-        let absPath: String
+        var absPath: String
         if path.hasPrefix("/") {
             absPath = path
         } else {
             absPath = (FileManager.default.currentDirectoryPath as NSString)
                 .appendingPathComponent(path)
         }
+        // シンボリックリンクを実体パスに解決（Node.js互換）
+        absPath = (absPath as NSString).resolvingSymlinksInPath
+
         guard FileManager.default.fileExists(atPath: absPath) else {
             throw NoCoError.fileNotFound(absPath)
         }

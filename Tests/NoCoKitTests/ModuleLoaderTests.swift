@@ -319,3 +319,60 @@ private func fixturesPath() -> String {
     let only = ModuleLoader.stripShebang("#!/usr/bin/env node")
     #expect(only == "///usr/bin/env node")
 }
+
+// MARK: - Symlink realpath resolution
+
+@Test func requireViaSymlinkResolvesDirname() async throws {
+    let fm = FileManager.default
+    let tmpBase = NSTemporaryDirectory() + "noco_symlink_test_\(UUID().uuidString)"
+    let realDir = tmpBase + "/real"
+    let linkDir = tmpBase + "/links"
+    defer { try? fm.removeItem(atPath: tmpBase) }
+
+    // real/lib.js — require('../lib.js') からの相対パスが実体基準で解決されることを確認
+    try fm.createDirectory(atPath: realDir, withIntermediateDirectories: true)
+    try fm.createDirectory(atPath: linkDir, withIntermediateDirectories: true)
+
+    // real/helper.js
+    try "module.exports = { value: 'from_helper' };".write(
+        toFile: realDir + "/helper.js", atomically: true, encoding: .utf8)
+
+    // real/main.js — 相対パスで helper.js を require
+    try "module.exports = require('./helper').value;".write(
+        toFile: realDir + "/main.js", atomically: true, encoding: .utf8)
+
+    // links/main.js → real/main.js へのシンボリックリンク
+    try fm.createSymbolicLink(
+        atPath: linkDir + "/main.js",
+        withDestinationPath: realDir + "/main.js")
+
+    let runtime = NodeRuntime()
+    // シンボリックリンク経由でrequire — __dirnameがrealDirになり、./helperが正しく解決される
+    let result = runtime.moduleLoader.loadFile(at: linkDir + "/main.js")
+    #expect(result.toString() == "from_helper")
+}
+
+@Test func requireViaSymlinkDirnameIsRealPath() async throws {
+    let fm = FileManager.default
+    let tmpBase = NSTemporaryDirectory() + "noco_symlink_dirname_\(UUID().uuidString)"
+    let realDir = tmpBase + "/real"
+    let linkDir = tmpBase + "/links"
+    defer { try? fm.removeItem(atPath: tmpBase) }
+
+    try fm.createDirectory(atPath: realDir, withIntermediateDirectories: true)
+    try fm.createDirectory(atPath: linkDir, withIntermediateDirectories: true)
+
+    // real/check.js — __dirname を返す
+    try "module.exports = __dirname;".write(
+        toFile: realDir + "/check.js", atomically: true, encoding: .utf8)
+
+    // links/check.js → real/check.js
+    try fm.createSymbolicLink(
+        atPath: linkDir + "/check.js",
+        withDestinationPath: realDir + "/check.js")
+
+    let runtime = NodeRuntime()
+    let result = runtime.moduleLoader.loadFile(at: linkDir + "/check.js")
+    let resolvedRealDir = (realDir as NSString).resolvingSymlinksInPath
+    #expect(result.toString() == resolvedRealDir)
+}
