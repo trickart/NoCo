@@ -246,12 +246,8 @@ public final class ModuleLoader {
             transformedSource = ESMTransformer.transformDynamicImport(jsSource)
         }
 
-        // Wrap in CommonJS function
-        let wrapped = """
-            (function(exports, require, module, __filename, __dirname) {
-            \(transformedSource)
-            })
-            """
+        // Wrap in CommonJS function (no leading newline to preserve line numbers)
+        let wrapped = "(function(exports, require, module, __filename, __dirname) {\(transformedSource)\n})"
 
         guard let fn = context.evaluateScript(wrapped, withSourceURL: URL(fileURLWithPath: path))
         else {

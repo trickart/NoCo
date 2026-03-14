@@ -23,12 +23,8 @@ public enum ESMTransformer {
         // 4. Transform dynamic import() — applies to all files
         result = transformDynamicImportInSource(result, excluded: buildExcludedRanges(in: result))
 
-        // 5. Prepend import_meta definition and __esModule marker
-        let header = """
-            Object.defineProperty(module.exports, '__esModule', {value: true});
-            var import_meta = Object.freeze({ url: 'file://' + __filename, dirname: __dirname, filename: __filename });
-
-            """
+        // 5. Prepend import_meta definition and __esModule marker (single line to preserve line numbers)
+        let header = "Object.defineProperty(module.exports, '__esModule', {value: true}); var import_meta = Object.freeze({ url: 'file://' + __filename, dirname: __dirname, filename: __filename });"
         result = header + result
 
         return result

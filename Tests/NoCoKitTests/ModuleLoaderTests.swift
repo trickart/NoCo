@@ -292,8 +292,8 @@ private func fixturesPath() -> String {
             e.line;
         }
     """)
-    // CommonJSラッパーで1行追加されるため、ファイル上の3行目 → e.line は4
-    #expect(result?.toInt32() == 4)
+    // CommonJSラッパーをソース1行目と同一行に連結するため、行番号はそのまま3
+    #expect(result?.toInt32() == 3)
 }
 
 @Test func requireShebangCRLF() async throws {
