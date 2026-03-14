@@ -73,7 +73,7 @@ public struct Lockfile: Sendable {
 
     /// Add a resolved package entry to the lockfile
     public mutating func addPackage(_ pkg: ResolvedPackage) {
-        let key = "node_modules/\(pkg.name)"
+        let key = pkg.installPath
         packages[key] = LockfilePackageInfo(
             version: pkg.version,
             resolved: pkg.tarballURL,
