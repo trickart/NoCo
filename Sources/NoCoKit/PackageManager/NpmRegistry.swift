@@ -97,6 +97,7 @@ public struct NpmVersionInfo: Sendable {
     public let devDependencies: [String: String]
     public let peerDependencies: [String: String]
     public let peerDependenciesMeta: [String: PeerDepMeta]
+    public let bundledDependencies: [String]
     public let dist: NpmDist
     public let bin: [String: String]?
 
@@ -115,6 +116,10 @@ public struct NpmVersionInfo: Sendable {
                 }
             }
         }
+
+        let bundled = json["bundledDependencies"] as? [String]
+            ?? json["bundleDependencies"] as? [String]
+            ?? []
 
         let distJson = json["dist"] as? [String: Any] ?? [:]
         let dist = NpmDist(
@@ -135,6 +140,7 @@ public struct NpmVersionInfo: Sendable {
                               devDependencies: devDeps,
                               peerDependencies: peerDeps,
                               peerDependenciesMeta: peerMeta,
+                              bundledDependencies: bundled,
                               dist: dist, bin: bin)
     }
 }

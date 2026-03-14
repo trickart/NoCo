@@ -138,7 +138,10 @@ public final class DependencyResolver: Sendable {
         state.withLock { $0.resolved[name] = pkg }
 
         // Resolve transitive dependencies
+        let bundledSet = Set(versionInfo.bundledDependencies)
         for (depName, depRange) in versionInfo.dependencies {
+            // bundledDependencies に含まれるものはスキップ（tarball内に同梱済み）
+            if bundledSet.contains(depName) { continue }
             try await resolveDependency(name: depName, rangeStr: depRange, parentPath: parentPath + [name])
         }
 
