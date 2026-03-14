@@ -18,7 +18,7 @@ public final class PackageInstaller: Sendable {
     }
 
     /// Install a list of resolved packages
-    public func install(packages: [ResolvedPackage]) async throws {
+    public func install(packages: [ResolvedPackage], scriptRunner: ScriptRunner? = nil) async throws {
         let nodeModulesDir = (projectDir as NSString).appendingPathComponent("node_modules")
         try FileManager.default.createDirectory(atPath: nodeModulesDir, withIntermediateDirectories: true)
 
@@ -47,6 +47,11 @@ public final class PackageInstaller: Sendable {
             }
 
             try await group.waitForAll()
+        }
+
+        // Run lifecycle scripts after all packages are downloaded and extracted
+        if let runner = scriptRunner {
+            try runner.processPackages(packages, nodeModulesDir: nodeModulesDir)
         }
     }
 

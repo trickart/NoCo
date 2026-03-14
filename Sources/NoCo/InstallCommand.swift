@@ -20,6 +20,18 @@ struct InstallCommand: AsyncParsableCommand {
           help: "Skip devDependencies")
     var production: Bool = false
 
+    @Option(name: .customLong("allow-scripts"),
+            help: "Allow lifecycle scripts: 'all' or comma-separated package names")
+    var allowScripts: String?
+
+    @Flag(name: .customLong("ignore-scripts"),
+          help: "Explicitly disable lifecycle scripts (default behavior)")
+    var ignoreScripts: Bool = false
+
+    @Flag(name: .customLong("list-scripts"),
+          help: "List lifecycle scripts without executing them")
+    var listScripts: Bool = false
+
     func run() async throws {
         let projectDir = FileManager.default.currentDirectoryPath
         let packageJsonPath = (projectDir as NSString).appendingPathComponent("package.json")
@@ -82,14 +94,50 @@ struct InstallCommand: AsyncParsableCommand {
             return
         }
 
+        // Determine script policy
+        let scriptPolicy: ScriptPolicy
+        if ignoreScripts {
+            scriptPolicy = .denyAll
+        } else if let allowValue = allowScripts {
+            if allowValue == "all" {
+                scriptPolicy = .allowAll
+            } else {
+                let names = Set(allowValue.split(separator: ",").map { String($0.trimmingCharacters(in: .whitespaces)) })
+                scriptPolicy = .allowList(names)
+            }
+        } else {
+            scriptPolicy = .denyAll
+        }
+
+        let scriptRunner = ScriptRunner(policy: scriptPolicy) { message in
+            print(message)
+        }
+
         // Install packages
         let installer = PackageInstaller(registry: registry, projectDir: projectDir) { message in
             print("\r\u{1B}[K\(message)", terminator: "")
             fflush(stdout)
         }
 
-        try await installer.install(packages: resolvedPackages)
+        try await installer.install(packages: resolvedPackages, scriptRunner: listScripts ? nil : scriptRunner)
         print("") // newline after progress
+
+        // List scripts mode
+        if listScripts {
+            let nodeModulesDir = (projectDir as NSString).appendingPathComponent("node_modules")
+            let scripts = scriptRunner.listScripts(resolvedPackages, nodeModulesDir: nodeModulesDir)
+            if scripts.isEmpty {
+                print("No lifecycle scripts found.")
+            } else {
+                print("Lifecycle scripts:")
+                for info in scripts {
+                    print("  \(info.packageName)@\(info.version):")
+                    for (phase, command) in info.orderedScripts {
+                        print("    \(phase): \(command)")
+                    }
+                }
+            }
+        }
 
         // Update package.json if packages were specified on command line
         if !packages.isEmpty {
