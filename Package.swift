@@ -22,8 +22,14 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "CNodeAPI",
+            path: "Sources/CNodeAPI",
+            publicHeadersPath: "include"
+        ),
+        .target(
             name: "NoCoKit",
             dependencies: [
+                "CNodeAPI",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -39,6 +45,12 @@ let package = Package(
             dependencies: [
                 "NoCoKit",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-exported_symbols_list",
+                    "-Xlinker", "\(Context.packageDirectory)/napi_exports.txt",
+                ]),
             ]
         ),
         .testTarget(
