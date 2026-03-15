@@ -1,5 +1,3 @@
-import Foundation
-
 /// Strips TypeScript type annotations from source code to produce valid JavaScript.
 /// Uses a regex and scanner-based approach similar to ESMTransformer.
 ///
@@ -232,41 +230,36 @@ public enum TypeScriptStripper {
 
     private static func removeImportTypes(_ source: String) -> String {
         let excluded = buildExcludedRanges(in: source)
-        // import type { ... } from '...'
-        // import type Name from '...'
-        // import type * as Name from '...'
-        let regex = try! NSRegularExpression(
-            pattern: #"(?:^|\n)\s*import\s+type\s+(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+['"][^'"]*['"]\s*;?"#
-        )
+        let regex = /(?:^|\n)\s*import\s+type\s+(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+['"][^'"]*['"]\s*;?/
         return removeMatches(regex, in: source, excluded: excluded)
     }
 
     private static func removeExportTypes(_ source: String) -> String {
         let excluded = buildExcludedRanges(in: source)
-        // export type { ... } from '...'
-        // export type { ... }
-        let regex = try! NSRegularExpression(
-            pattern: #"(?:^|\n)\s*export\s+type\s+\{[^}]*\}\s*(?:from\s+['"][^'"]*['"])?\s*;?"#
-        )
+        let regex = /(?:^|\n)\s*export\s+type\s+\{[^}]*\}\s*(?:from\s+['"][^'"]*['"])?\s*;?/
         return removeMatches(regex, in: source, excluded: excluded)
     }
 
     private static func removeInterfaces(_ source: String) -> String {
         var result = source
         let excluded = buildExcludedRanges(in: result)
-        // interface Name<...> extends ... {
-        let regex = try! NSRegularExpression(
-            pattern: #"(?:^|\n)\s*(?:export\s+)?interface\s+\w+"#
-        )
-        let nsSource = result as NSString
-        let matches = regex.matches(in: result, range: NSRange(location: 0, length: nsSource.length))
+        let regex = /(?:^|\n)\s*(?:export\s+)?interface\s+\w+/
 
-        for match in matches.reversed() {
-            if isInExcluded(match.range.location, excluded) { continue }
+        let matches = result.matches(of: regex)
+        guard !matches.isEmpty else { return result }
+
+        let records = matches.map { match -> (utf16Start: Int, utf16End: Int, matchStr: String) in
+            let start = result.utf16.distance(from: result.startIndex, to: match.range.lowerBound)
+            let end = result.utf16.distance(from: result.startIndex, to: match.range.upperBound)
+            return (start, end, String(result[match.range]))
+        }
+
+        for info in records.reversed() {
+            if isInExcluded(info.utf16Start, excluded) { continue }
 
             let chars = Array(result.utf16)
             // Find the opening `{`
-            var i = match.range.location + match.range.length
+            var i = info.utf16End
             while i < chars.count && chars[i] != 0x7B { i += 1 } // {
             if i >= chars.count { continue }
 
@@ -278,14 +271,15 @@ public enum TypeScriptStripper {
             let updatedChars = Array(result.utf16)
             if removeEnd < updatedChars.count && updatedChars[removeEnd] == 0x3B { removeEnd += 1 }
 
-            var removeStart = match.range.location
+            var removeStart = info.utf16Start
             // Preserve leading newline
-            let matchStr = nsSource.substring(with: match.range)
-            if matchStr.hasPrefix("\n") { removeStart += 1 }
+            if info.matchStr.hasPrefix("\n") { removeStart += 1 }
 
-            let removeRange = NSRange(location: removeStart, length: removeEnd - removeStart)
-            let replacement = preserveNewlines(in: result as NSString, range: removeRange)
-            result = (result as NSString).replacingCharacters(in: removeRange, with: replacement)
+            let startIdx = result.utf16.index(result.utf16.startIndex, offsetBy: removeStart)
+            let endIdx = result.utf16.index(result.utf16.startIndex, offsetBy: removeEnd)
+            let removedText = result[startIdx..<endIdx]
+            let replacement = preserveNewlines(in: removedText)
+            result.replaceSubrange(startIdx..<endIdx, with: replacement)
         }
 
         return result
@@ -294,18 +288,22 @@ public enum TypeScriptStripper {
     private static func removeTypeAliases(_ source: String) -> String {
         var result = source
         let excluded = buildExcludedRanges(in: result)
-        // type Name<...> = ...;
-        let regex = try! NSRegularExpression(
-            pattern: #"(?:^|\n)\s*(?:export\s+)?type\s+\w+[^=]*="#
-        )
-        let nsSource = result as NSString
-        let matches = regex.matches(in: result, range: NSRange(location: 0, length: nsSource.length))
+        let regex = /(?:^|\n)\s*(?:export\s+)?type\s+\w+[^=]*=/
 
-        for match in matches.reversed() {
-            if isInExcluded(match.range.location, excluded) { continue }
+        let matches = result.matches(of: regex)
+        guard !matches.isEmpty else { return result }
+
+        let records = matches.map { match -> (utf16Start: Int, utf16End: Int, matchStr: String) in
+            let start = result.utf16.distance(from: result.startIndex, to: match.range.lowerBound)
+            let end = result.utf16.distance(from: result.startIndex, to: match.range.upperBound)
+            return (start, end, String(result[match.range]))
+        }
+
+        for info in records.reversed() {
+            if isInExcluded(info.utf16Start, excluded) { continue }
 
             let chars = Array(result.utf16)
-            let afterEq = match.range.location + match.range.length
+            let afterEq = info.utf16End
 
             // Scan the type value: ends at `;` at depth 0
             let typeEnd = scanTypeEnd(
@@ -316,13 +314,14 @@ public enum TypeScriptStripper {
             var removeEnd = typeEnd
             if removeEnd < chars.count && chars[removeEnd] == 0x3B { removeEnd += 1 }
 
-            var removeStart = match.range.location
-            let matchStr = nsSource.substring(with: match.range)
-            if matchStr.hasPrefix("\n") { removeStart += 1 }
+            var removeStart = info.utf16Start
+            if info.matchStr.hasPrefix("\n") { removeStart += 1 }
 
-            let removeRange = NSRange(location: removeStart, length: removeEnd - removeStart)
-            let replacement = preserveNewlines(in: result as NSString, range: removeRange)
-            result = (result as NSString).replacingCharacters(in: removeRange, with: replacement)
+            let startIdx = result.utf16.index(result.utf16.startIndex, offsetBy: removeStart)
+            let endIdx = result.utf16.index(result.utf16.startIndex, offsetBy: removeEnd)
+            let removedText = result[startIdx..<endIdx]
+            let replacement = preserveNewlines(in: removedText)
+            result.replaceSubrange(startIdx..<endIdx, with: replacement)
         }
 
         return result
@@ -331,18 +330,22 @@ public enum TypeScriptStripper {
     private static func removeDeclareStatements(_ source: String) -> String {
         var result = source
         let excluded = buildExcludedRanges(in: result)
-        // declare const/let/var/function/class/module/namespace/enum/global/abstract/type/interface ...
-        let regex = try! NSRegularExpression(
-            pattern: #"(?:^|\n)\s*(?:export\s+)?declare\s+"#
-        )
-        let nsSource = result as NSString
-        let matches = regex.matches(in: result, range: NSRange(location: 0, length: nsSource.length))
+        let regex = /(?:^|\n)\s*(?:export\s+)?declare\s+/
 
-        for match in matches.reversed() {
-            if isInExcluded(match.range.location, excluded) { continue }
+        let matches = result.matches(of: regex)
+        guard !matches.isEmpty else { return result }
+
+        let records = matches.map { match -> (utf16Start: Int, utf16End: Int, matchStr: String) in
+            let start = result.utf16.distance(from: result.startIndex, to: match.range.lowerBound)
+            let end = result.utf16.distance(from: result.startIndex, to: match.range.upperBound)
+            return (start, end, String(result[match.range]))
+        }
+
+        for info in records.reversed() {
+            if isInExcluded(info.utf16Start, excluded) { continue }
 
             let chars = Array(result.utf16)
-            var i = match.range.location + match.range.length
+            var i = info.utf16End
 
             // Find end: either `;` at depth 0 or matching `}` if a block
             var braceDepth = 0
@@ -368,13 +371,14 @@ public enum TypeScriptStripper {
                 i += 1
             }
 
-            var removeStart = match.range.location
-            let matchStr = nsSource.substring(with: match.range)
-            if matchStr.hasPrefix("\n") { removeStart += 1 }
+            var removeStart = info.utf16Start
+            if info.matchStr.hasPrefix("\n") { removeStart += 1 }
 
-            let removeRange = NSRange(location: removeStart, length: i - removeStart)
-            let replacement = preserveNewlines(in: result as NSString, range: removeRange)
-            result = (result as NSString).replacingCharacters(in: removeRange, with: replacement)
+            let startIdx = result.utf16.index(result.utf16.startIndex, offsetBy: removeStart)
+            let endIdx = result.utf16.index(result.utf16.startIndex, offsetBy: i)
+            let removedText = result[startIdx..<endIdx]
+            let replacement = preserveNewlines(in: removedText)
+            result.replaceSubrange(startIdx..<endIdx, with: replacement)
         }
 
         return result
@@ -384,29 +388,29 @@ public enum TypeScriptStripper {
 
     private static func removeImplementsClause(_ source: String) -> String {
         let excluded = buildExcludedRanges(in: source)
-        // class Foo extends Bar implements Baz, Qux {  →  class Foo extends Bar {
-        let regex = try! NSRegularExpression(
-            pattern: #"\bimplements\s+[^{]+"#
-        )
-        return applyRegex(regex, to: source, excluded: excluded) { _, _ in "" }
+        let regex = /\bimplements\s+[^{]+/
+        return applyRegex(regex, to: source, excluded: excluded) { _ in "" }
     }
 
     private static func removeGenericTypeParameters(_ source: String) -> String {
         var result = source
         let excluded = buildExcludedRanges(in: result)
-        // function name<T, U extends V>( → function name(
-        // class Name<T> { → class Name {
-        let regex = try! NSRegularExpression(
-            pattern: #"((?:function\s*\*?\s*\w+|class\s+\w+)\s*)<"#
-        )
-        let nsSource = result as NSString
-        let matches = regex.matches(in: result, range: NSRange(location: 0, length: nsSource.length))
+        let regex = /((?:function\s*\*?\s*\w+|class\s+\w+)\s*)</
 
-        for match in matches.reversed() {
-            if isInExcluded(match.range.location, excluded) { continue }
+        let matches = result.matches(of: regex)
+        guard !matches.isEmpty else { return result }
+
+        let records = matches.map { match -> (utf16Start: Int, utf16End: Int) in
+            let start = result.utf16.distance(from: result.startIndex, to: match.range.lowerBound)
+            let end = result.utf16.distance(from: result.startIndex, to: match.range.upperBound)
+            return (start, end)
+        }
+
+        for info in records.reversed() {
+            if isInExcluded(info.utf16Start, excluded) { continue }
 
             let chars = Array(result.utf16)
-            let angleStart = match.range.location + match.range.length - 1 // position of `<`
+            let angleStart = info.utf16End - 1 // position of `<`
 
             // Scan to matching `>`
             var depth = 1
@@ -425,8 +429,9 @@ public enum TypeScriptStripper {
                 i += 1
             }
 
-            let removeRange = NSRange(location: angleStart, length: i - angleStart)
-            result = (result as NSString).replacingCharacters(in: removeRange, with: "")
+            let startIdx = result.utf16.index(result.utf16.startIndex, offsetBy: angleStart)
+            let endIdx = result.utf16.index(result.utf16.startIndex, offsetBy: i)
+            result.replaceSubrange(startIdx..<endIdx, with: "")
         }
 
         return result
@@ -434,56 +439,61 @@ public enum TypeScriptStripper {
 
     private static func removeAccessModifiers(_ source: String) -> String {
         let excluded = buildExcludedRanges(in: source)
-        // public/private/protected/abstract/override keyword followed by space
-        // Must be at start of a class member declaration
-        let regex = try! NSRegularExpression(
-            pattern: #"(?<=^|[\n;{])\s*\K(?:public|private|protected|abstract|override)\s+"#
-        )
-        // NSRegularExpression doesn't support \K, use a different approach
-        let regex2 = try! NSRegularExpression(
-            pattern: #"(?:(?:^|\n|;|\{)\s*)((?:public|private|protected|abstract|override)\s+)"#
-        )
-        let nsSource = source as NSString
-        let matches = regex2.matches(in: source, range: NSRange(location: 0, length: nsSource.length))
+        let regex = /(?:(?:^|\n|;|\{)\s*)((?:public|private|protected|abstract|override)\s+)/
+
+        let matches = source.matches(of: regex)
+        guard !matches.isEmpty else { return source }
+
+        let records = matches.map { match -> (utf16Start: Int, utf16Length: Int) in
+            let capture = match.output.1
+            let start = source.utf16.distance(from: source.startIndex, to: capture.startIndex)
+            let length = source.utf16.distance(from: capture.startIndex, to: capture.endIndex)
+            return (start, length)
+        }
 
         var result = source
-        for match in matches.reversed() {
-            let modRange = match.range(at: 1)
-            if isInExcluded(modRange.location, excluded) { continue }
-            result = (result as NSString).replacingCharacters(in: modRange, with: "")
+        for record in records.reversed() {
+            if isInExcluded(record.utf16Start, excluded) { continue }
+            let startIdx = result.utf16.index(result.utf16.startIndex, offsetBy: record.utf16Start)
+            let endIdx = result.utf16.index(startIdx, offsetBy: record.utf16Length)
+            result.replaceSubrange(startIdx..<endIdx, with: "")
         }
         return result
     }
 
     private static func removeReadonlyModifier(_ source: String) -> String {
         let excluded = buildExcludedRanges(in: source)
-        let regex = try! NSRegularExpression(pattern: #"\breadonly\s+"#)
-        return applySimpleRegex(regex, to: source, excluded: excluded, replacement: "")
+        let regex = /\breadonly\s+/
+        return applyRegex(regex, to: source, excluded: excluded) { _ in "" }
     }
 
     private static func removeDefiniteAssignment(_ source: String) -> String {
         let excluded = buildExcludedRanges(in: source)
-        // identifier!: or identifier! = or identifier!; → remove the `!`
-        let regex = try! NSRegularExpression(pattern: #"(\w)!\s*(?=[:=;,)\]])"#)
-        return applySimpleRegex(regex, to: source, excluded: excluded, replacement: "$1")
+        let regex = /(\w)!\s*(?=[:=;,)\]])/
+        return applyRegex(regex, to: source, excluded: excluded) { match in String(match.output.1) }
     }
 
     private static func removeFunctionReturnTypes(_ source: String) -> String {
         var result = source
         let excluded = buildExcludedRanges(in: result)
-        // ): Type { or ): Type => or ): Type;
-        let regex = try! NSRegularExpression(pattern: #"\)\s*:\s*"#)
-        let nsSource = result as NSString
-        let matches = regex.matches(in: result, range: NSRange(location: 0, length: nsSource.length))
+        let regex = /\)\s*:\s*/
 
-        for match in matches.reversed() {
-            if isInExcluded(match.range.location, excluded) { continue }
+        let matches = result.matches(of: regex)
+        guard !matches.isEmpty else { return result }
+
+        let records = matches.map { match -> (utf16Start: Int, utf16End: Int) in
+            let start = result.utf16.distance(from: result.startIndex, to: match.range.lowerBound)
+            let end = result.utf16.distance(from: result.startIndex, to: match.range.upperBound)
+            return (start, end)
+        }
+
+        for info in records.reversed() {
+            if isInExcluded(info.utf16Start, excluded) { continue }
 
             let chars = Array(result.utf16)
-            let typeStart = match.range.location + match.range.length
+            let typeStart = info.utf16End
 
-            // Scan the type: terminators are { and =>
-            // We use { as terminator. For =>, we check for = followed by >
+            // Scan the type: terminators are { and ;
             let typeEnd = scanTypeEnd(
                 chars, from: typeStart,
                 terminators: [0x7B, 0x3B] // { ;
@@ -504,12 +514,13 @@ public enum TypeScriptStripper {
             }
 
             // Replace ): TYPE with just )
-            let closeParenPos = match.range.location // position of )
-            let replaceRange = NSRange(
-                location: closeParenPos + 1,
-                length: actualEnd - closeParenPos - 1
-            )
-            result = (result as NSString).replacingCharacters(in: replaceRange, with: "")
+            let closeParenPos = info.utf16Start // position of )
+            let removeStart = closeParenPos + 1
+            let removeLength = actualEnd - removeStart
+
+            let startIdx = result.utf16.index(result.utf16.startIndex, offsetBy: removeStart)
+            let endIdx = result.utf16.index(startIdx, offsetBy: removeLength)
+            result.replaceSubrange(startIdx..<endIdx, with: "")
         }
 
         return result
@@ -552,50 +563,52 @@ public enum TypeScriptStripper {
         var result = source
         let excluded = buildExcludedRanges(in: result)
 
-        // Match `: TYPE` patterns inside function parameter lists.
-        // We find function-like constructs and process their parameter lists.
-        // Pattern: after identifier or `?`, a `:` followed by a type until `,` or `)` or `=`
-        let regex = try! NSRegularExpression(
-            pattern: #"(\w)\s*(\??)\s*:\s*(?=[^:,)=]*[,)=])"#
-        )
+        struct ParamMatch {
+            let utf16Start: Int
+            let utf16Length: Int
+            let matchStr: String
+        }
 
-        // Instead of the above (which is fragile), let's find all `:` that look like
-        // parameter type annotations and remove the type.
-        // Strategy: find `identifier?:` patterns where the identifier is preceded by
-        // `(`, `,`, or whitespace in a param-like context.
-
-        let colonRegex = try! NSRegularExpression(
-            pattern: #"(\w)\s*(\?)\s*:\s*"#
-        )
-        let nsSource = result as NSString
-        var colonMatches = colonRegex.matches(in: result, range: NSRange(location: 0, length: nsSource.length))
+        // Match optional params: identifier ? : type
+        let colonRegex = /(\w)\s*(\?)\s*:\s*/
+        let colonMatches1 = result.matches(of: colonRegex).map { match -> ParamMatch in
+            let start = result.utf16.distance(from: result.startIndex, to: match.range.lowerBound)
+            let length = result.utf16.distance(from: match.range.lowerBound, to: match.range.upperBound)
+            return ParamMatch(utf16Start: start, utf16Length: length, matchStr: String(result[match.range]))
+        }
 
         // Also match non-optional params: identifier followed by `:` where preceded by `(` or `,`
-        let colonRegex2 = try! NSRegularExpression(
-            pattern: #"(?<=[(,])\s*(?:\.\.\.)?(\w+)\s*:\s*"#
-        )
-        colonMatches += colonRegex2.matches(in: result, range: NSRange(location: 0, length: nsSource.length))
+        // Swift Regex doesn't support lookbehind, so we match the delimiter and use the
+        // full match range but record the substring after the delimiter for processing.
+        let colonRegex2 = /[(,](\s*(?:\.\.\.)?(\w+)\s*:\s*)/
+        let colonMatches2 = result.matches(of: colonRegex2).map { match -> ParamMatch in
+            // Use capture group 1 (everything after the delimiter) as the effective match
+            let capture = match.output.1
+            let start = result.utf16.distance(from: result.startIndex, to: capture.startIndex)
+            let length = result.utf16.distance(from: capture.startIndex, to: capture.endIndex)
+            return ParamMatch(utf16Start: start, utf16Length: length, matchStr: String(capture))
+        }
 
         // Deduplicate and sort by location descending
         var seen = Set<Int>()
-        var uniqueMatches: [NSTextCheckingResult] = []
-        for m in colonMatches {
-            if seen.insert(m.range.location).inserted {
+        var uniqueMatches: [ParamMatch] = []
+        for m in colonMatches1 + colonMatches2 {
+            if seen.insert(m.utf16Start).inserted {
                 uniqueMatches.append(m)
             }
         }
-        uniqueMatches.sort { $0.range.location > $1.range.location }
+        uniqueMatches.sort { $0.utf16Start > $1.utf16Start }
 
         for match in uniqueMatches {
-            if isInExcluded(match.range.location, excluded) { continue }
+            if isInExcluded(match.utf16Start, excluded) { continue }
 
             let chars = Array(result.utf16)
-            let afterColon = match.range.location + match.range.length
+            let afterColon = match.utf16Start + match.utf16Length
 
             // Find the colon position in the match
-            let matchStr = (result as NSString).substring(with: match.range)
+            let matchStr = match.matchStr
             guard let colonOffset = matchStr.lastIndex(of: ":") else { continue }
-            let colonPos = match.range.location + matchStr.distance(from: matchStr.startIndex, to: colonOffset)
+            let colonPos = match.utf16Start + matchStr.distance(from: matchStr.startIndex, to: colonOffset)
 
             // Verify this looks like a parameter (preceded by `(`, `,`, or param context)
             if !looksLikeParamType(Array(result.utf16), colonAt: colonPos) { continue }
@@ -611,7 +624,7 @@ public enum TypeScriptStripper {
 
             if hasQuestion {
                 // Remove `?: TYPE` (keep identifier, remove `?` and `: TYPE`)
-                let questionPos = match.range.location + matchStr.distance(
+                let questionPos = match.utf16Start + matchStr.distance(
                     from: matchStr.startIndex,
                     to: matchStr.firstIndex(of: "?")!
                 )
@@ -619,12 +632,14 @@ public enum TypeScriptStripper {
                 var identEnd = questionPos
                 while identEnd > 0 && isWhitespace(chars[identEnd - 1]) { identEnd -= 1 }
 
-                let removeRange = NSRange(location: identEnd, length: typeEnd - identEnd)
-                result = (result as NSString).replacingCharacters(in: removeRange, with: "")
+                let startIdx = result.utf16.index(result.utf16.startIndex, offsetBy: identEnd)
+                let endIdx = result.utf16.index(result.utf16.startIndex, offsetBy: typeEnd)
+                result.replaceSubrange(startIdx..<endIdx, with: "")
             } else {
                 // Remove `: TYPE` part only
-                let removeRange = NSRange(location: colonPos, length: typeEnd - colonPos)
-                result = (result as NSString).replacingCharacters(in: removeRange, with: "")
+                let startIdx = result.utf16.index(result.utf16.startIndex, offsetBy: colonPos)
+                let endIdx = result.utf16.index(result.utf16.startIndex, offsetBy: typeEnd)
+                result.replaceSubrange(startIdx..<endIdx, with: "")
             }
         }
 
@@ -657,18 +672,23 @@ public enum TypeScriptStripper {
     private static func removeVariableTypeAnnotations(_ source: String) -> String {
         var result = source
         let excluded = buildExcludedRanges(in: result)
-        // const/let/var identifier: TYPE = ... or const/let/var identifier: TYPE;
-        let regex = try! NSRegularExpression(
-            pattern: #"((?:const|let|var)\s+\w+)\s*:\s*"#
-        )
-        let nsSource = result as NSString
-        let matches = regex.matches(in: result, range: NSRange(location: 0, length: nsSource.length))
+        let regex = /((?:const|let|var)\s+\w+)\s*:\s*/
 
-        for match in matches.reversed() {
-            if isInExcluded(match.range.location, excluded) { continue }
+        let matches = result.matches(of: regex)
+        guard !matches.isEmpty else { return result }
+
+        let records = matches.map { match -> (utf16Start: Int, utf16End: Int, captureEndUtf16: Int) in
+            let start = result.utf16.distance(from: result.startIndex, to: match.range.lowerBound)
+            let end = result.utf16.distance(from: result.startIndex, to: match.range.upperBound)
+            let captureEnd = result.utf16.distance(from: result.startIndex, to: match.output.1.endIndex)
+            return (start, end, captureEnd)
+        }
+
+        for info in records.reversed() {
+            if isInExcluded(info.utf16Start, excluded) { continue }
 
             let chars = Array(result.utf16)
-            let typeStart = match.range.location + match.range.length
+            let typeStart = info.utf16End
 
             // Scan type until `=` or `;` or newline at depth 0
             let typeEnd = scanTypeEnd(
@@ -677,8 +697,7 @@ public enum TypeScriptStripper {
             )
 
             // Replace "const x: TYPE" with "const x"
-            let declEnd = match.range(at: 1).location + match.range(at: 1).length
-            let removeRange = NSRange(location: declEnd, length: typeEnd - declEnd)
+            let declEnd = info.captureEndUtf16
             // Add a space before `=` if the terminator is `=`
             let replacement: String
             if typeEnd < chars.count && chars[typeEnd] == 0x3D {
@@ -686,7 +705,9 @@ public enum TypeScriptStripper {
             } else {
                 replacement = ""
             }
-            result = (result as NSString).replacingCharacters(in: removeRange, with: replacement)
+            let startIdx = result.utf16.index(result.utf16.startIndex, offsetBy: declEnd)
+            let endIdx = result.utf16.index(result.utf16.startIndex, offsetBy: typeEnd)
+            result.replaceSubrange(startIdx..<endIdx, with: replacement)
         }
 
         return result
@@ -695,18 +716,22 @@ public enum TypeScriptStripper {
     private static func removeAsAssertions(_ source: String) -> String {
         var result = source
         let excluded = buildExcludedRanges(in: result)
-        // expr as Type — word boundary before `as`, not `as` in identifier
-        let regex = try! NSRegularExpression(
-            pattern: #"\s+as\s+(?![\n;,)}\]=])"#
-        )
-        let nsSource = result as NSString
-        let matches = regex.matches(in: result, range: NSRange(location: 0, length: nsSource.length))
+        let regex = /\s+as\s+(?![\n;,)}\]=])/
 
-        for match in matches.reversed() {
-            if isInExcluded(match.range.location, excluded) { continue }
+        let matches = result.matches(of: regex)
+        guard !matches.isEmpty else { return result }
+
+        let records = matches.map { match -> (utf16Start: Int, utf16End: Int) in
+            let start = result.utf16.distance(from: result.startIndex, to: match.range.lowerBound)
+            let end = result.utf16.distance(from: result.startIndex, to: match.range.upperBound)
+            return (start, end)
+        }
+
+        for info in records.reversed() {
+            if isInExcluded(info.utf16Start, excluded) { continue }
 
             let chars = Array(result.utf16)
-            let afterAs = match.range.location + match.range.length
+            let afterAs = info.utf16End
 
             // Scan the type
             let typeEnd = scanTypeEnd(
@@ -718,8 +743,9 @@ public enum TypeScriptStripper {
             var actualEnd = typeEnd
             while actualEnd > afterAs && isWhitespace(chars[actualEnd - 1]) { actualEnd -= 1 }
 
-            let removeRange = NSRange(location: match.range.location, length: actualEnd - match.range.location)
-            result = (result as NSString).replacingCharacters(in: removeRange, with: "")
+            let startIdx = result.utf16.index(result.utf16.startIndex, offsetBy: info.utf16Start)
+            let endIdx = result.utf16.index(result.utf16.startIndex, offsetBy: actualEnd)
+            result.replaceSubrange(startIdx..<endIdx, with: "")
         }
 
         return result
@@ -728,17 +754,22 @@ public enum TypeScriptStripper {
     private static func removeSatisfiesExpressions(_ source: String) -> String {
         var result = source
         let excluded = buildExcludedRanges(in: result)
-        let regex = try! NSRegularExpression(
-            pattern: #"\s+satisfies\s+"#
-        )
-        let nsSource = result as NSString
-        let matches = regex.matches(in: result, range: NSRange(location: 0, length: nsSource.length))
+        let regex = /\s+satisfies\s+/
 
-        for match in matches.reversed() {
-            if isInExcluded(match.range.location, excluded) { continue }
+        let matches = result.matches(of: regex)
+        guard !matches.isEmpty else { return result }
+
+        let records = matches.map { match -> (utf16Start: Int, utf16End: Int) in
+            let start = result.utf16.distance(from: result.startIndex, to: match.range.lowerBound)
+            let end = result.utf16.distance(from: result.startIndex, to: match.range.upperBound)
+            return (start, end)
+        }
+
+        for info in records.reversed() {
+            if isInExcluded(info.utf16Start, excluded) { continue }
 
             let chars = Array(result.utf16)
-            let afterSatisfies = match.range.location + match.range.length
+            let afterSatisfies = info.utf16End
 
             let typeEnd = scanTypeEnd(
                 chars, from: afterSatisfies,
@@ -748,34 +779,26 @@ public enum TypeScriptStripper {
             var actualEnd = typeEnd
             while actualEnd > afterSatisfies && isWhitespace(chars[actualEnd - 1]) { actualEnd -= 1 }
 
-            let removeRange = NSRange(location: match.range.location, length: actualEnd - match.range.location)
-            result = (result as NSString).replacingCharacters(in: removeRange, with: "")
+            let startIdx = result.utf16.index(result.utf16.startIndex, offsetBy: info.utf16Start)
+            let endIdx = result.utf16.index(result.utf16.startIndex, offsetBy: actualEnd)
+            result.replaceSubrange(startIdx..<endIdx, with: "")
         }
 
         return result
     }
 
     private static func removeOptionalParamMarker(_ source: String) -> String {
-        // Remove leftover `?` before `,` or `)` in function params
-        // This handles cases where param types were already stripped: `x? ,` → `x,`
         let excluded = buildExcludedRanges(in: source)
-        let regex = try! NSRegularExpression(
-            pattern: #"(\w)\?\s*(?=[,)])"#
-        )
-        return applySimpleRegex(regex, to: source, excluded: excluded, replacement: "$1")
+        let regex = /(\w)\?\s*(?=[,)])/
+        return applyRegex(regex, to: source, excluded: excluded) { match in String(match.output.1) }
     }
 
     // MARK: - Line Preservation
 
-    /// Return a string containing only the newline characters from the given range,
+    /// Return a string containing only the newline characters from the given text,
     /// so that line numbers in error messages are preserved after stripping.
-    private static func preserveNewlines(in source: NSString, range: NSRange) -> String {
-        let text = source.substring(with: range)
-        var newlines = ""
-        for ch in text {
-            if ch == "\n" { newlines.append("\n") }
-        }
-        return newlines
+    private static func preserveNewlines(in text: some StringProtocol) -> String {
+        String(text.filter { $0 == "\n" })
     }
 
     /// Count newlines in a UTF-16 character array within a range.
@@ -805,63 +828,61 @@ public enum TypeScriptStripper {
 
     /// Remove all regex matches (that are not in excluded ranges) from the source.
     /// Preserves newlines within the removed range to maintain line numbers.
-    private static func removeMatches(
-        _ regex: NSRegularExpression,
+    private static func removeMatches<Output>(
+        _ regex: Regex<Output>,
         in source: String,
         excluded: [ExcludedRange]
     ) -> String {
-        let nsSource = source as NSString
-        let matches = regex.matches(in: source, range: NSRange(location: 0, length: nsSource.length))
+        let matches = source.matches(of: regex)
+        guard !matches.isEmpty else { return source }
+
+        let records = matches.map { match -> (utf16Offset: Int, utf16Length: Int, matchStr: String) in
+            let offset = source.utf16.distance(from: source.startIndex, to: match.range.lowerBound)
+            let length = source.utf16.distance(from: match.range.lowerBound, to: match.range.upperBound)
+            return (offset, length, String(source[match.range]))
+        }
 
         var result = source
-        for match in matches.reversed() {
-            if isInExcluded(match.range.location, excluded) { continue }
+        for record in records.reversed() {
+            if isInExcluded(record.utf16Offset, excluded) { continue }
 
-            var removeRange = match.range
-            let matchStr = nsSource.substring(with: match.range)
-            if matchStr.hasPrefix("\n") {
-                removeRange = NSRange(location: match.range.location + 1, length: match.range.length - 1)
+            var removeOffset = record.utf16Offset
+            var removeLength = record.utf16Length
+            if record.matchStr.hasPrefix("\n") {
+                removeOffset += 1
+                removeLength -= 1
             }
-            let replacement = preserveNewlines(in: result as NSString, range: removeRange)
-            result = (result as NSString).replacingCharacters(in: removeRange, with: replacement)
+            let startIdx = result.utf16.index(result.utf16.startIndex, offsetBy: removeOffset)
+            let endIdx = result.utf16.index(startIdx, offsetBy: removeLength)
+            let replacement = preserveNewlines(in: result[startIdx..<endIdx])
+            result.replaceSubrange(startIdx..<endIdx, with: replacement)
         }
         return result
     }
 
     /// Apply a regex transformation, skipping matches in excluded ranges.
-    private static func applyRegex(
-        _ regex: NSRegularExpression,
+    private static func applyRegex<Output>(
+        _ regex: Regex<Output>,
         to source: String,
         excluded: [ExcludedRange],
-        transformer: (String, NSTextCheckingResult) -> String
+        transformer: (Regex<Output>.Match) -> String
     ) -> String {
-        let nsSource = source as NSString
-        let matches = regex.matches(in: source, range: NSRange(location: 0, length: nsSource.length))
+        let matches = source.matches(of: regex)
+        guard !matches.isEmpty else { return source }
 
-        var result = source
-        for match in matches.reversed() {
-            if isInExcluded(match.range.location, excluded) { continue }
-            let replacement = transformer(result, match)
-            result = (result as NSString).replacingCharacters(in: match.range, with: replacement)
+        let records: [(match: Regex<Output>.Match, utf16Offset: Int, utf16Length: Int)] = matches.map { match in
+            let offset = source.utf16.distance(from: source.startIndex, to: match.range.lowerBound)
+            let length = source.utf16.distance(from: match.range.lowerBound, to: match.range.upperBound)
+            return (match, offset, length)
         }
-        return result
-    }
-
-    /// Apply a regex with a template replacement string, skipping excluded ranges.
-    private static func applySimpleRegex(
-        _ regex: NSRegularExpression,
-        to source: String,
-        excluded: [ExcludedRange],
-        replacement: String
-    ) -> String {
-        let nsSource = source as NSString
-        let matches = regex.matches(in: source, range: NSRange(location: 0, length: nsSource.length))
 
         var result = source
-        for match in matches.reversed() {
-            if isInExcluded(match.range.location, excluded) { continue }
-            let replaced = regex.replacementString(for: match, in: result, offset: 0, template: replacement)
-            result = (result as NSString).replacingCharacters(in: match.range, with: replaced)
+        for record in records.reversed() {
+            if isInExcluded(record.utf16Offset, excluded) { continue }
+            let replacement = transformer(record.match)
+            let startIdx = result.utf16.index(result.utf16.startIndex, offsetBy: record.utf16Offset)
+            let endIdx = result.utf16.index(startIdx, offsetBy: record.utf16Length)
+            result.replaceSubrange(startIdx..<endIdx, with: replacement)
         }
         return result
     }
