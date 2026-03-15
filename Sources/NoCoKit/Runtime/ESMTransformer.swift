@@ -24,7 +24,7 @@ public enum ESMTransformer {
         result = transformDynamicImportInSource(result, excluded: buildExcludedRanges(in: result))
 
         // 5. Prepend import_meta definition and __esModule marker (single line to preserve line numbers)
-        let header = "Object.defineProperty(module.exports, '__esModule', {value: true}); var import_meta = Object.freeze({ url: 'file://' + __filename, dirname: __dirname, filename: __filename });"
+        let header = "Object.defineProperty(module.exports, '__esModule', {value: true}); var import_meta = Object.freeze({ url: 'file://' + __filename, dirname: __dirname, filename: __filename, resolve: function(specifier) { return 'file://' + require('path').resolve(__dirname, specifier); } });"
         result = header + result
 
         return result
@@ -156,11 +156,12 @@ public enum ESMTransformer {
 
     private static func transformImports(_ source: String, excluded: [ExcludedRange]) -> String {
         var result = source
+        var exc = excluded
 
         // import x, { a, b } from 'y'  (default + named)
         result = applyRegex(
-            /(?:^|\n|;)\s*import\s+(\w+)\s*,\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/,
-            to: result, excluded: excluded
+            /(?:^|\n|;)\s*import\s+([\w$]+)\s*,\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/,
+            to: result, excluded: exc
         ) { match in
             let defaultName = String(match.output.1)
             let named = String(match.output.2).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -168,42 +169,46 @@ public enum ESMTransformer {
             let destructured = transformNamedImports(named)
             return "var __m = __esm_import('\(specifier)', __dirname); var \(defaultName) = __m.default; var { \(destructured) } = __m;"
         }
+        exc = buildExcludedRanges(in: result)
 
         // import * as ns from 'y'
         result = applyRegex(
-            /(?:^|\n|;)\s*import\s*\*\s*as\s+(\w+)\s+from\s*['"]([^'"]+)['"]/,
-            to: result, excluded: excluded
+            /(?:^|\n|;)\s*import\s*\*\s*as\s+([\w$]+)\s+from\s*['"]([^'"]+)['"]/,
+            to: result, excluded: exc
         ) { match in
             let ns = String(match.output.1)
             let specifier = String(match.output.2)
             return "var \(ns) = __esm_import('\(specifier)', __dirname);"
         }
+        exc = buildExcludedRanges(in: result)
 
         // import { a, b } from 'y'
         result = applyRegex(
             /(?:^|\n|;)\s*import\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/,
-            to: result, excluded: excluded
+            to: result, excluded: exc
         ) { match in
             let named = String(match.output.1)
             let specifier = String(match.output.2)
             let destructured = transformNamedImports(named)
             return "var { \(destructured) } = __esm_import('\(specifier)', __dirname);"
         }
+        exc = buildExcludedRanges(in: result)
 
         // import x from 'y'
         result = applyRegex(
-            /(?:^|\n|;)\s*import\s+(\w+)\s+from\s*['"]([^'"]+)['"]/,
-            to: result, excluded: excluded
+            /(?:^|\n|;)\s*import\s+([\w$]+)\s+from\s*['"]([^'"]+)['"]/,
+            to: result, excluded: exc
         ) { match in
             let name = String(match.output.1)
             let specifier = String(match.output.2)
             return "var __m = __esm_import('\(specifier)', __dirname); var \(name) = __m.default;"
         }
+        exc = buildExcludedRanges(in: result)
 
         // import 'y'  (side-effect only)
         result = applyRegex(
             /(?:^|\n|;)\s*import\s*['"]([^'"]+)['"]/,
-            to: result, excluded: excluded
+            to: result, excluded: exc
         ) { match in
             let specifier = String(match.output.1)
             return "__esm_import('\(specifier)', __dirname);"
@@ -227,41 +232,45 @@ public enum ESMTransformer {
 
     private static func transformExports(_ source: String, excluded: [ExcludedRange]) -> String {
         var result = source
+        var exc = excluded
 
         // export default function name(...) {
         result = applyRegex(
-            /(?:^|\n|;)\s*export\s+default\s+((?:async\s+)?function\s*\*?\s*(\w+)\s*\([^)]*\)\s*\{)/,
-            to: result, excluded: excluded
+            /(?:^|\n|;)\s*export\s+default\s+((?:async\s+)?function\s*\*?\s*([\w$]+)\s*\([^)]*\)\s*\{)/,
+            to: result, excluded: exc
         ) { match in
             let funcDecl = String(match.output.1)
             let name = String(match.output.2)
             return "__esm_export_default(module, \(name));\n\(funcDecl)"
         }
+        exc = buildExcludedRanges(in: result)
 
         // export default class Name {
         result = applyRegex(
-            /(?:^|\n|;)\s*export\s+default\s+(class\s+(\w+)\s*(?:extends\s+[^{]+)?\{)/,
-            to: result, excluded: excluded
+            /(?:^|\n|;)\s*export\s+default\s+(class\s+([\w$]+)\s*(?:extends\s+[^{]+)?\{)/,
+            to: result, excluded: exc
         ) { match in
             let classDecl = String(match.output.1)
             let name = String(match.output.2)
             return "__esm_export(module, 'default', function() { return \(name); });\n\(classDecl)"
         }
+        exc = buildExcludedRanges(in: result)
 
         // export default expr (must come after function/class)
         result = applyRegex(
             /(?:^|\n|;)\s*export\s+default\s+(?!function\b|class\b)(.+)/,
-            to: result, excluded: excluded
+            to: result, excluded: exc
         ) { match in
             var expr = String(match.output.1).trimmingCharacters(in: .whitespacesAndNewlines)
             if expr.hasSuffix(";") { expr = String(expr.dropLast()) }
             return "__esm_export_default(module, \(expr));"
         }
+        exc = buildExcludedRanges(in: result)
 
         // export { a, b } from 'y'  (re-export named)
         result = applyRegex(
             /(?:^|\n|;)\s*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/,
-            to: result, excluded: excluded
+            to: result, excluded: exc
         ) { match in
             let named = String(match.output.1)
             let specifier = String(match.output.2)
@@ -277,51 +286,56 @@ public enum ESMTransformer {
             }
             return "(function() { var __re = __esm_import('\(specifier)', __dirname); \(exportLines.joined(separator: " ")) })();"
         }
+        exc = buildExcludedRanges(in: result)
 
         // export * from 'y'
         result = applyRegex(
             /(?:^|\n|;)\s*export\s*\*\s*from\s*['"]([^'"]+)['"]/,
-            to: result, excluded: excluded
+            to: result, excluded: exc
         ) { match in
             let specifier = String(match.output.1)
             return "__esm_export_star(module, __esm_import('\(specifier)', __dirname));"
         }
+        exc = buildExcludedRanges(in: result)
 
         // export function name(...) {
         result = applyRegex(
-            /(?:^|\n|;)\s*export\s+((?:async\s+)?function\s*\*?\s*(\w+)\s*\([^)]*\)\s*\{)/,
-            to: result, excluded: excluded
+            /(?:^|\n|;)\s*export\s+((?:async\s+)?function\s*\*?\s*([\w$]+)\s*\([^)]*\)\s*\{)/,
+            to: result, excluded: exc
         ) { match in
             let funcDecl = String(match.output.1)
             let name = String(match.output.2)
             return "__esm_export(module, '\(name)', function() { return \(name); });\n\(funcDecl)"
         }
+        exc = buildExcludedRanges(in: result)
 
         // export class Name {
         result = applyRegex(
-            /(?:^|\n|;)\s*export\s+(class\s+(\w+)\s*(?:extends\s+[^{]+)?\{)/,
-            to: result, excluded: excluded
+            /(?:^|\n|;)\s*export\s+(class\s+([\w$]+)\s*(?:extends\s+[^{]+)?\{)/,
+            to: result, excluded: exc
         ) { match in
             let classDecl = String(match.output.1)
             let name = String(match.output.2)
             return "__esm_export(module, '\(name)', function() { return \(name); });\n\(classDecl)"
         }
+        exc = buildExcludedRanges(in: result)
 
         // export const/let/var
         result = applyRegex(
             /(?:^|\n|;)\s*export\s+((?:const|let|var)\s+.+)/,
-            to: result, excluded: excluded
+            to: result, excluded: exc
         ) { match in
             let decl = String(match.output.1)
             let names = extractDeclaredNames(from: decl)
             let exports = names.map { "__esm_export(module, '\($0)', function() { return \($0); });" }
             return "\(decl)\n\(exports.joined(separator: "\n"))"
         }
+        exc = buildExcludedRanges(in: result)
 
         // export { a, b }  (local re-export, no 'from')
         result = applyRegex(
             /(?:^|\n|;)\s*export\s*\{([^}]*)\}\s*(?:;|\n|$)/,
-            to: result, excluded: excluded
+            to: result, excluded: exc
         ) { match in
             let named = String(match.output.1)
             let parts = named.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -436,7 +450,7 @@ public enum ESMTransformer {
 
         // Use a regex that captures an optional preceding character to simulate lookbehind.
         // Group 1 captures the char before "import(" if present; we skip if it's [.\w].
-        let regex = /(^|[^.\w])import\s*\(/
+        let regex = /(^|[^.\w$])import\s*\(/
         let matches = source.matches(of: regex)
         guard !matches.isEmpty else { return source }
 

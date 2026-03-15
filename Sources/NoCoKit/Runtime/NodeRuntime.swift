@@ -257,6 +257,72 @@ public final class NodeRuntime: @unchecked Sendable {
             }
             """)
 
+        // Global performance (Web API compatible)
+        context.evaluateScript("""
+            (function(g) {
+                if (typeof g.performance === 'undefined') {
+                    var _timeOrigin = Date.now();
+                    var marks = {};
+                    g.performance = {
+                        now: function() { return Date.now() - _timeOrigin; },
+                        timeOrigin: _timeOrigin,
+                        mark: function(name) { marks[name] = { startTime: Date.now() - _timeOrigin }; },
+                        measure: function(name, start, end) {
+                            var s = marks[start] ? marks[start].startTime : 0;
+                            var e = marks[end] ? marks[end].startTime : Date.now() - _timeOrigin;
+                            return { name: name, duration: e - s, startTime: s };
+                        },
+                        clearMarks: function() { marks = {}; },
+                        getEntries: function() { return []; },
+                        getEntriesByName: function() { return []; },
+                        getEntriesByType: function() { return []; },
+                        toJSON: function() { return { timeOrigin: _timeOrigin }; }
+                    };
+                }
+                // Minimal Event constructor
+                if (typeof g.Event === 'undefined') {
+                    g.Event = function Event(type, options) {
+                        this.type = type;
+                        this.bubbles = options && options.bubbles || false;
+                        this.cancelable = options && options.cancelable || false;
+                        this.composed = options && options.composed || false;
+                        this.defaultPrevented = false;
+                        this.target = null;
+                        this.currentTarget = null;
+                        this.timeStamp = Date.now();
+                    };
+                    g.Event.prototype.preventDefault = function() { this.defaultPrevented = true; };
+                    g.Event.prototype.stopPropagation = function() {};
+                    g.Event.prototype.stopImmediatePropagation = function() {};
+                    g.CustomEvent = function CustomEvent(type, options) {
+                        g.Event.call(this, type, options);
+                        this.detail = options && options.detail || null;
+                    };
+                    g.CustomEvent.prototype = Object.create(g.Event.prototype);
+                    g.CustomEvent.prototype.constructor = g.CustomEvent;
+                }
+                // Minimal EventTarget for compatibility
+                if (typeof g.EventTarget === 'undefined') {
+                    g.EventTarget = function EventTarget() {
+                        this._listeners = {};
+                    };
+                    g.EventTarget.prototype.addEventListener = function(type, listener) {
+                        if (!this._listeners[type]) this._listeners[type] = [];
+                        this._listeners[type].push(listener);
+                    };
+                    g.EventTarget.prototype.removeEventListener = function(type, listener) {
+                        if (!this._listeners[type]) return;
+                        this._listeners[type] = this._listeners[type].filter(function(l) { return l !== listener; });
+                    };
+                    g.EventTarget.prototype.dispatchEvent = function(event) {
+                        var listeners = this._listeners[event.type] || [];
+                        for (var i = 0; i < listeners.length; i++) listeners[i].call(this, event);
+                        return true;
+                    };
+                }
+            })(this);
+            """)
+
         // __urlParse bridge: parse a URL string using Foundation.URLComponents
         let urlParseBlock: @convention(block) (String) -> JSValue = { href in
             let ctx = JSContext.current()!

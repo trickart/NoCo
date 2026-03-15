@@ -52,9 +52,18 @@ public struct FSModule: NodeModule {
         let fm = FileManager.default
         let config = runtime.fsConfiguration
 
+        // Helper: strip file:// URL prefix if present
+        func stripFileURL(_ path: String) -> String {
+            if path.hasPrefix("file://") {
+                let stripped = String(path.dropFirst("file://".count))
+                return stripped.removingPercentEncoding ?? stripped
+            }
+            return path
+        }
+
         // Helper: validate path within sandbox
         func validatePath(_ path: String) -> String? {
-            let resolved = (path as NSString).standardizingPath
+            let resolved = (stripFileURL(path) as NSString).standardizingPath
             if let root = config.rootDirectory {
                 let rootResolved = (root as NSString).standardizingPath
                 if !resolved.hasPrefix(rootResolved) {
@@ -881,9 +890,18 @@ public struct FSModule: NodeModule {
         let fdTable = FileDescriptorTable()
         let fm = FileManager.default
 
+        // Helper: strip file:// URL prefix if present
+        func stripFileURL(_ path: String) -> String {
+            if path.hasPrefix("file://") {
+                let stripped = String(path.dropFirst("file://".count))
+                return stripped.removingPercentEncoding ?? stripped
+            }
+            return path
+        }
+
         // Helper: validate path within sandbox
         func validatePath(_ path: String) -> String? {
-            let resolved = (path as NSString).standardizingPath
+            let resolved = (stripFileURL(path) as NSString).standardizingPath
             if let root = config.rootDirectory {
                 let rootResolved = (root as NSString).standardizingPath
                 if !resolved.hasPrefix(rootResolved) {
