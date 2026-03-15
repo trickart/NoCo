@@ -21,10 +21,10 @@ public enum ESMTransformer {
         result = transformImportMeta(result, excluded: buildExcludedRanges(in: result))
 
         // 4. Transform dynamic import() — applies to all files
-        result = transformDynamicImportInSource(result, excluded: buildExcludedRanges(in: result))
+        result = transformDynamicImportInSource(result, excluded: buildExcludedRanges(in: result), dirnameVar: "__noco_dirname__")
 
         // 5. Prepend import_meta definition and __esModule marker (single line to preserve line numbers)
-        let header = "Object.defineProperty(module.exports, '__esModule', {value: true}); var import_meta = Object.freeze({ url: 'file://' + __filename, dirname: __dirname, filename: __filename, resolve: function(specifier) { return 'file://' + require('path').resolve(__dirname, specifier); } });"
+        let header = "Object.defineProperty(module.exports, '__esModule', {value: true}); var import_meta = Object.freeze({ url: 'file://' + __noco_filename__, dirname: __noco_dirname__, filename: __noco_filename__, resolve: function(specifier) { return 'file://' + require('path').resolve(__noco_dirname__, specifier); } });"
         result = header + result
 
         return result
@@ -167,7 +167,7 @@ public enum ESMTransformer {
             let named = String(match.output.2).trimmingCharacters(in: .whitespacesAndNewlines)
             let specifier = String(match.output.3)
             let destructured = transformNamedImports(named)
-            return "var __m = __esm_import('\(specifier)', __dirname); var \(defaultName) = __m.default; var { \(destructured) } = __m;"
+            return "var __m = __esm_import('\(specifier)', __noco_dirname__); var \(defaultName) = __m.default; var { \(destructured) } = __m;"
         }
         exc = buildExcludedRanges(in: result)
 
@@ -178,7 +178,7 @@ public enum ESMTransformer {
         ) { match in
             let ns = String(match.output.1)
             let specifier = String(match.output.2)
-            return "var \(ns) = __esm_import('\(specifier)', __dirname);"
+            return "var \(ns) = __esm_import('\(specifier)', __noco_dirname__);"
         }
         exc = buildExcludedRanges(in: result)
 
@@ -190,7 +190,7 @@ public enum ESMTransformer {
             let named = String(match.output.1)
             let specifier = String(match.output.2)
             let destructured = transformNamedImports(named)
-            return "var { \(destructured) } = __esm_import('\(specifier)', __dirname);"
+            return "var { \(destructured) } = __esm_import('\(specifier)', __noco_dirname__);"
         }
         exc = buildExcludedRanges(in: result)
 
@@ -201,7 +201,7 @@ public enum ESMTransformer {
         ) { match in
             let name = String(match.output.1)
             let specifier = String(match.output.2)
-            return "var __m = __esm_import('\(specifier)', __dirname); var \(name) = __m.default;"
+            return "var __m = __esm_import('\(specifier)', __noco_dirname__); var \(name) = __m.default;"
         }
         exc = buildExcludedRanges(in: result)
 
@@ -211,7 +211,7 @@ public enum ESMTransformer {
             to: result, excluded: exc
         ) { match in
             let specifier = String(match.output.1)
-            return "__esm_import('\(specifier)', __dirname);"
+            return "__esm_import('\(specifier)', __noco_dirname__);"
         }
 
         return result
@@ -284,7 +284,7 @@ public enum ESMTransformer {
                     exportLines.append("__esm_export(module, '\(tokens[0])', function() { return __re.\(tokens[0]); });")
                 }
             }
-            return "(function() { var __re = __esm_import('\(specifier)', __dirname); \(exportLines.joined(separator: " ")) })();"
+            return "(function() { var __re = __esm_import('\(specifier)', __noco_dirname__); \(exportLines.joined(separator: " ")) })();"
         }
         exc = buildExcludedRanges(in: result)
 
@@ -294,7 +294,7 @@ public enum ESMTransformer {
             to: result, excluded: exc
         ) { match in
             let specifier = String(match.output.1)
-            return "__esm_export_star(module, __esm_import('\(specifier)', __dirname));"
+            return "__esm_export_star(module, __esm_import('\(specifier)', __noco_dirname__));"
         }
         exc = buildExcludedRanges(in: result)
 
@@ -445,7 +445,7 @@ public enum ESMTransformer {
 
     // MARK: - Dynamic import()
 
-    private static func transformDynamicImportInSource(_ source: String, excluded: [ExcludedRange]) -> String {
+    private static func transformDynamicImportInSource(_ source: String, excluded: [ExcludedRange], dirnameVar: String = "__dirname") -> String {
         guard source.contains("import(") else { return source }
 
         // Use a regex that captures an optional preceding character to simulate lookbehind.
@@ -468,12 +468,12 @@ public enum ESMTransformer {
         result += source[lastEnd...]
 
         if result.contains("__importDynamic(") {
-            result = addDirnameToImportDynamic(result)
+            result = addDirnameToImportDynamic(result, dirnameVar: dirnameVar)
         }
         return result
     }
 
-    private static func addDirnameToImportDynamic(_ source: String) -> String {
+    private static func addDirnameToImportDynamic(_ source: String, dirnameVar: String = "__noco_dirname__") -> String {
         var result = ""
         let marker = "__importDynamic("
         var searchStart = source.startIndex
@@ -494,7 +494,7 @@ public enum ESMTransformer {
             if depth == 0 {
                 let argContent = source[markerRange.upperBound..<i]
                 result += argContent
-                result += ", __dirname)"
+                result += ", \(dirnameVar))"
                 searchStart = source.index(after: i)
             } else {
                 result += source[markerRange.upperBound...]

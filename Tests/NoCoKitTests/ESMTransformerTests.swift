@@ -7,14 +7,14 @@ import Testing
 @Test func transformDefaultImport() async throws {
     let source = "import foo from 'bar';"
     let result = ESMTransformer.transform(source)
-    #expect(result.contains("__esm_import('bar', __dirname)"))
+    #expect(result.contains("__esm_import('bar', __noco_dirname__)"))
     #expect(result.contains("foo = __m.default"))
 }
 
 @Test func transformNamedImport() async throws {
     let source = "import { readFile, writeFile } from 'fs';"
     let result = ESMTransformer.transform(source)
-    #expect(result.contains("__esm_import('fs', __dirname)"))
+    #expect(result.contains("__esm_import('fs', __noco_dirname__)"))
     #expect(result.contains("readFile"))
     #expect(result.contains("writeFile"))
 }
@@ -28,19 +28,19 @@ import Testing
 @Test func transformNamespaceImport() async throws {
     let source = "import * as fs from 'fs';"
     let result = ESMTransformer.transform(source)
-    #expect(result.contains("var fs = __esm_import('fs', __dirname)"))
+    #expect(result.contains("var fs = __esm_import('fs', __noco_dirname__)"))
 }
 
 @Test func transformSideEffectImport() async throws {
     let source = "import './polyfill';"
     let result = ESMTransformer.transform(source)
-    #expect(result.contains("__esm_import('./polyfill', __dirname)"))
+    #expect(result.contains("__esm_import('./polyfill', __noco_dirname__)"))
 }
 
 @Test func transformMixedImport() async throws {
     let source = "import def, { named } from 'mod';"
     let result = ESMTransformer.transform(source)
-    #expect(result.contains("__esm_import('mod', __dirname)"))
+    #expect(result.contains("__esm_import('mod', __noco_dirname__)"))
     #expect(result.contains("def = __m.default"))
     #expect(result.contains("named"))
 }
@@ -111,14 +111,14 @@ import Testing
 @Test func transformReExportNamed() async throws {
     let source = "export { foo } from 'bar';"
     let result = ESMTransformer.transform(source)
-    #expect(result.contains("__esm_import('bar', __dirname)"))
+    #expect(result.contains("__esm_import('bar', __noco_dirname__)"))
     #expect(result.contains("__esm_export(module, 'foo'"))
 }
 
 @Test func transformReExportAll() async throws {
     let source = "export * from 'bar';"
     let result = ESMTransformer.transform(source)
-    #expect(result.contains("__esm_export_star(module, __esm_import('bar', __dirname))"))
+    #expect(result.contains("__esm_export_star(module, __esm_import('bar', __noco_dirname__))"))
 }
 
 // MARK: - Minified (no space) patterns
@@ -126,20 +126,20 @@ import Testing
 @Test func transformMinifiedNamedImport() async throws {
     let source = "import{a}from'b';"
     let result = ESMTransformer.transform(source)
-    #expect(result.contains("__esm_import('b', __dirname)"))
+    #expect(result.contains("__esm_import('b', __noco_dirname__)"))
     #expect(result.contains("a"))
 }
 
 @Test func transformMinifiedNamespaceImport() async throws {
     let source = "import*as ns from'mod';"
     let result = ESMTransformer.transform(source)
-    #expect(result.contains("var ns = __esm_import('mod', __dirname)"))
+    #expect(result.contains("var ns = __esm_import('mod', __noco_dirname__)"))
 }
 
 @Test func transformMinifiedSideEffectImport() async throws {
     let source = "import'./module';"
     let result = ESMTransformer.transform(source)
-    #expect(result.contains("__esm_import('./module', __dirname)"))
+    #expect(result.contains("__esm_import('./module', __noco_dirname__)"))
 }
 
 @Test func transformMinifiedExportNamedList() async throws {
@@ -152,13 +152,13 @@ import Testing
 @Test func transformMinifiedReExportAll() async throws {
     let source = "export*from'module';"
     let result = ESMTransformer.transform(source)
-    #expect(result.contains("__esm_export_star(module, __esm_import('module', __dirname))"))
+    #expect(result.contains("__esm_export_star(module, __esm_import('module', __noco_dirname__))"))
 }
 
 @Test func transformMinifiedReExportNamed() async throws {
     let source = "export{foo}from'bar';"
     let result = ESMTransformer.transform(source)
-    #expect(result.contains("__esm_import('bar', __dirname)"))
+    #expect(result.contains("__esm_import('bar', __noco_dirname__)"))
     #expect(result.contains("__esm_export(module, 'foo'"))
 }
 
