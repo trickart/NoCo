@@ -24,7 +24,7 @@ public enum ESMTransformer {
         result = transformDynamicImportInSource(result, excluded: buildExcludedRanges(in: result))
 
         // 5. Prepend import_meta definition and __esModule marker (single line to preserve line numbers)
-        let header = "Object.defineProperty(module.exports, '__esModule', {value: true}); var import_meta = Object.freeze({ url: 'file://' + __filename, dirname: __dirname, filename: __filename });"
+        let header = "Object.defineProperty(module.exports, '__esModule', {value: true}); var import_meta = Object.freeze({ url: 'file://' + __filename, dirname: __dirname, filename: __filename, resolve: function(specifier) { return 'file://' + require('path').resolve(__dirname, specifier); } });"
         result = header + result
 
         return result
@@ -160,7 +160,7 @@ public enum ESMTransformer {
 
         // import x, { a, b } from 'y'  (default + named)
         result = applyRegex(
-            /(?:^|\n|;)\s*import\s+(\w+)\s*,\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/,
+            /(?:^|\n|;)\s*import\s+([\w$]+)\s*,\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/,
             to: result, excluded: exc
         ) { match in
             let defaultName = String(match.output.1)
@@ -173,7 +173,7 @@ public enum ESMTransformer {
 
         // import * as ns from 'y'
         result = applyRegex(
-            /(?:^|\n|;)\s*import\s*\*\s*as\s+(\w+)\s+from\s*['"]([^'"]+)['"]/,
+            /(?:^|\n|;)\s*import\s*\*\s*as\s+([\w$]+)\s+from\s*['"]([^'"]+)['"]/,
             to: result, excluded: exc
         ) { match in
             let ns = String(match.output.1)
@@ -196,7 +196,7 @@ public enum ESMTransformer {
 
         // import x from 'y'
         result = applyRegex(
-            /(?:^|\n|;)\s*import\s+(\w+)\s+from\s*['"]([^'"]+)['"]/,
+            /(?:^|\n|;)\s*import\s+([\w$]+)\s+from\s*['"]([^'"]+)['"]/,
             to: result, excluded: exc
         ) { match in
             let name = String(match.output.1)
@@ -236,7 +236,7 @@ public enum ESMTransformer {
 
         // export default function name(...) {
         result = applyRegex(
-            /(?:^|\n|;)\s*export\s+default\s+((?:async\s+)?function\s*\*?\s*(\w+)\s*\([^)]*\)\s*\{)/,
+            /(?:^|\n|;)\s*export\s+default\s+((?:async\s+)?function\s*\*?\s*([\w$]+)\s*\([^)]*\)\s*\{)/,
             to: result, excluded: exc
         ) { match in
             let funcDecl = String(match.output.1)
@@ -247,7 +247,7 @@ public enum ESMTransformer {
 
         // export default class Name {
         result = applyRegex(
-            /(?:^|\n|;)\s*export\s+default\s+(class\s+(\w+)\s*(?:extends\s+[^{]+)?\{)/,
+            /(?:^|\n|;)\s*export\s+default\s+(class\s+([\w$]+)\s*(?:extends\s+[^{]+)?\{)/,
             to: result, excluded: exc
         ) { match in
             let classDecl = String(match.output.1)
@@ -300,7 +300,7 @@ public enum ESMTransformer {
 
         // export function name(...) {
         result = applyRegex(
-            /(?:^|\n|;)\s*export\s+((?:async\s+)?function\s*\*?\s*(\w+)\s*\([^)]*\)\s*\{)/,
+            /(?:^|\n|;)\s*export\s+((?:async\s+)?function\s*\*?\s*([\w$]+)\s*\([^)]*\)\s*\{)/,
             to: result, excluded: exc
         ) { match in
             let funcDecl = String(match.output.1)
@@ -311,7 +311,7 @@ public enum ESMTransformer {
 
         // export class Name {
         result = applyRegex(
-            /(?:^|\n|;)\s*export\s+(class\s+(\w+)\s*(?:extends\s+[^{]+)?\{)/,
+            /(?:^|\n|;)\s*export\s+(class\s+([\w$]+)\s*(?:extends\s+[^{]+)?\{)/,
             to: result, excluded: exc
         ) { match in
             let classDecl = String(match.output.1)
@@ -450,7 +450,7 @@ public enum ESMTransformer {
 
         // Use a regex that captures an optional preceding character to simulate lookbehind.
         // Group 1 captures the char before "import(" if present; we skip if it's [.\w].
-        let regex = /(^|[^.\w])import\s*\(/
+        let regex = /(^|[^.\w$])import\s*\(/
         let matches = source.matches(of: regex)
         guard !matches.isEmpty else { return source }
 

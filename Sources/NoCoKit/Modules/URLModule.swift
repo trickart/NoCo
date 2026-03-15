@@ -141,6 +141,35 @@ public struct URLModule: NodeModule {
         }
         urlModule.setValue(unsafeBitCast(resolve, to: AnyObject.self), forProperty: "resolve")
 
+        // url.fileURLToPath(url)
+        let fileURLToPath: @convention(block) (JSValue) -> JSValue = { urlVal in
+            let ctx = JSContext.current()!
+            let str = urlVal.isString ? urlVal.toString()! : urlVal.forProperty("href")?.toString() ?? urlVal.toString()!
+            if str.hasPrefix("file://") {
+                let path = String(str.dropFirst("file://".count))
+                let decoded = path.removingPercentEncoding ?? path
+                return JSValue(object: decoded, in: ctx)
+            }
+            ctx.exception = ctx.createError("The URL must be of scheme file", code: "ERR_INVALID_URL_SCHEME")
+            return JSValue(undefinedIn: ctx)
+        }
+        urlModule.setValue(unsafeBitCast(fileURLToPath, to: AnyObject.self), forProperty: "fileURLToPath")
+
+        // url.pathToFileURL(path)
+        let pathToFileURL: @convention(block) (String) -> JSValue = { path in
+            let ctx = JSContext.current()!
+            let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+            let href = "file://" + encoded
+            let urlObj = ctx.evaluateScript("new URL('\(href.replacingOccurrences(of: "'", with: "\\'"))')")
+            return urlObj ?? JSValue(undefinedIn: ctx)
+        }
+        urlModule.setValue(unsafeBitCast(pathToFileURL, to: AnyObject.self), forProperty: "pathToFileURL")
+
+        // url.domainToASCII / url.domainToUnicode stubs
+        let domainToASCII: @convention(block) (String) -> String = { domain in domain }
+        urlModule.setValue(unsafeBitCast(domainToASCII, to: AnyObject.self), forProperty: "domainToASCII")
+        urlModule.setValue(unsafeBitCast(domainToASCII, to: AnyObject.self), forProperty: "domainToUnicode")
+
         return urlModule
     }
 }
