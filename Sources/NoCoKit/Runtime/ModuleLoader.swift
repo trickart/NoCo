@@ -208,6 +208,17 @@ public final class ModuleLoader {
             return loadingModule.forProperty("exports")
         }
 
+        // Handle .node native addons
+        if path.hasSuffix(".node") {
+            if let exports = NAPIModule.load(path: path, context: runtime.context, runtime: runtime) {
+                loadingModules.removeValue(forKey: path)
+                moduleCache[path] = exports
+                return exports
+            }
+            loadingModules.removeValue(forKey: path)
+            return JSValue(undefinedIn: runtime.context)
+        }
+
         guard let source = try? String(contentsOfFile: path, encoding: .utf8) else {
             let error = runtime.context.createError(
                 "Cannot read module '\(path)'", code: "MODULE_NOT_FOUND")
@@ -395,8 +406,8 @@ public final class ModuleLoader {
             return candidate
         }
 
-        // Try with extensions: .js, .mjs, .cjs, .ts, .mts, .cts, .json
-        for ext in [".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".json"] {
+        // Try with extensions: .js, .mjs, .cjs, .ts, .mts, .cts, .json, .node
+        for ext in [".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".json", ".node"] {
             let withExt = candidate + ext
             if fm.fileExists(atPath: withExt) {
                 return withExt
