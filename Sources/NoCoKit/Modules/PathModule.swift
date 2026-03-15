@@ -147,6 +147,19 @@ public struct PathModule: NodeModule {
         // path.posix = path (we only implement posix)
         path.setValue(path, forProperty: "posix")
 
+        // path.win32 stub (same as posix with win32-style sep/delimiter)
+        let win32Script = """
+        (function(posix) {
+            var win32 = {};
+            Object.keys(posix).forEach(function(k) { win32[k] = posix[k]; });
+            win32.sep = '\\\\';
+            win32.delimiter = ';';
+            return win32;
+        })
+        """
+        let win32 = context.evaluateScript(win32Script)!.call(withArguments: [path])!
+        path.setValue(win32, forProperty: "win32")
+
         return path
     }
 

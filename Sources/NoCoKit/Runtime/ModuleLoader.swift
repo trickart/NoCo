@@ -268,7 +268,14 @@ public final class ModuleLoader {
         }
 
         // Wrap in CommonJS function (no leading newline to preserve line numbers)
-        let wrapped = "(function(exports, require, module, __filename, __dirname) {\(transformedSource)\n})"
+        // ESM files may declare their own const __dirname/__filename (e.g. from import.meta.url),
+        // which conflicts with wrapper parameters. Use unique names for ESM files.
+        let wrapped: String
+        if ESMDetector.shared.isESM(path: path) {
+            wrapped = "(function(exports, require, module, __noco_filename__, __noco_dirname__) {\(transformedSource)\n})"
+        } else {
+            wrapped = "(function(exports, require, module, __filename, __dirname) {\(transformedSource)\n})"
+        }
 
         guard let fn = context.evaluateScript(wrapped, withSourceURL: URL(fileURLWithPath: path))
         else {
@@ -279,6 +286,12 @@ public final class ModuleLoader {
         // Create a local require that resolves relative to this module's directory
         let localRequire: @convention(block) (String) -> JSValue = { [weak self] name in
             guard let self = self else { return JSValue(undefinedIn: JSContext.current()) }
+            // Private imports (#xxx) — resolve via package.json "imports" field
+            if name.hasPrefix("#") {
+                if let resolved = self.resolvePrivateImport(name, from: dirname) {
+                    return self.loadFile(at: resolved)
+                }
+            }
             if name.hasPrefix(".") || name.hasPrefix("/") {
                 let resolved = self.resolveRelativePath(name, from: dirname)
                 if let resolved = resolved {
@@ -377,6 +390,30 @@ public final class ModuleLoader {
         loadingModules.removeValue(forKey: path)
         moduleCache[path] = finalExports
         return finalExports
+    }
+
+    /// Resolve a `#` private import (package.json "imports" field).
+    func resolvePrivateImport(_ name: String, from dir: String) -> String? {
+        guard name.hasPrefix("#") else { return nil }
+        let fm = FileManager.default
+        var searchDir = dir
+        while true {
+            let packageJsonPath = (searchDir as NSString).appendingPathComponent("package.json")
+            if fm.fileExists(atPath: packageJsonPath),
+               let data = fm.contents(atPath: packageJsonPath),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let imports = json["imports"] as? [String: Any] {
+                if let entry = imports[name] {
+                    if let resolved = extractExportPath(entry) {
+                        return resolveRelativePath(resolved, from: searchDir)
+                    }
+                }
+            }
+            let parent = (searchDir as NSString).deletingLastPathComponent
+            if parent == searchDir { break }
+            searchDir = parent
+        }
+        return nil
     }
 
     /// Resolve a file path from a module name.

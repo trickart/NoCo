@@ -23,7 +23,17 @@ public enum ESMRuntime {
 
             // Use require for builtin/absolute/relative resolution
             let moduleValue: JSValue
-            if resolved.hasPrefix(".") || resolved.hasPrefix("/") {
+            if resolved.hasPrefix("#") {
+                // Private import — resolve via package.json "imports" field
+                if let path = loader.resolvePrivateImport(resolved, from: basedir) {
+                    moduleValue = loader.loadFile(at: path)
+                } else {
+                    let error = runtime.context.createError(
+                        "Cannot find module '\(specifier)'", code: "MODULE_NOT_FOUND")
+                    runtime.context.exception = error
+                    return JSValue(undefinedIn: runtime.context)
+                }
+            } else if resolved.hasPrefix(".") || resolved.hasPrefix("/") {
                 // Resolve relative to basedir
                 if let path = loader.resolveRelativePath(resolved, from: basedir) {
                     moduleValue = loader.loadFile(at: path)

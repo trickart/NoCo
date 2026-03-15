@@ -114,6 +114,71 @@ public struct UtilModule: NodeModule {
             util.TextDecoder = typeof TextDecoder !== 'undefined' ? TextDecoder : undefined;
             util.TextEncoder = typeof TextEncoder !== 'undefined' ? TextEncoder : undefined;
 
+            var ansiStyles = {
+                reset: ['\\x1b[0m', '\\x1b[0m'],
+                bold: ['\\x1b[1m', '\\x1b[22m'],
+                dim: ['\\x1b[2m', '\\x1b[22m'],
+                italic: ['\\x1b[3m', '\\x1b[23m'],
+                underline: ['\\x1b[4m', '\\x1b[24m'],
+                inverse: ['\\x1b[7m', '\\x1b[27m'],
+                hidden: ['\\x1b[8m', '\\x1b[28m'],
+                strikethrough: ['\\x1b[9m', '\\x1b[29m'],
+                black: ['\\x1b[30m', '\\x1b[39m'],
+                red: ['\\x1b[31m', '\\x1b[39m'],
+                green: ['\\x1b[32m', '\\x1b[39m'],
+                yellow: ['\\x1b[33m', '\\x1b[39m'],
+                blue: ['\\x1b[34m', '\\x1b[39m'],
+                magenta: ['\\x1b[35m', '\\x1b[39m'],
+                cyan: ['\\x1b[36m', '\\x1b[39m'],
+                white: ['\\x1b[37m', '\\x1b[39m'],
+                gray: ['\\x1b[90m', '\\x1b[39m'],
+                grey: ['\\x1b[90m', '\\x1b[39m'],
+                bgBlack: ['\\x1b[40m', '\\x1b[49m'],
+                bgRed: ['\\x1b[41m', '\\x1b[49m'],
+                bgGreen: ['\\x1b[42m', '\\x1b[49m'],
+                bgYellow: ['\\x1b[43m', '\\x1b[49m'],
+                bgBlue: ['\\x1b[44m', '\\x1b[49m'],
+                bgMagenta: ['\\x1b[45m', '\\x1b[49m'],
+                bgCyan: ['\\x1b[46m', '\\x1b[49m'],
+                bgWhite: ['\\x1b[47m', '\\x1b[49m'],
+            };
+
+            util.styleText = function styleText(format, text) {
+                if (Array.isArray(format)) {
+                    var result = text;
+                    for (var i = 0; i < format.length; i++) {
+                        result = util.styleText(format[i], result);
+                    }
+                    return result;
+                }
+                var style = ansiStyles[format];
+                if (!style) return String(text);
+                return style[0] + text + style[1];
+            };
+
+            util.stripVTControlCharacters = function stripVTControlCharacters(str) {
+                return String(str).replace(/\\x1b\\[[0-9;]*m/g, '');
+            };
+
+            util.parseEnv = function parseEnv(content) {
+                var result = {};
+                var lines = String(content).split('\\n');
+                for (var i = 0; i < lines.length; i++) {
+                    var line = lines[i].trim();
+                    if (!line || line[0] === '#') continue;
+                    var eq = line.indexOf('=');
+                    if (eq === -1) continue;
+                    var key = line.substring(0, eq).trim();
+                    var val = line.substring(eq + 1).trim();
+                    if ((val[0] === '"' && val[val.length-1] === '"') ||
+                        (val[0] === "'" && val[val.length-1] === "'")) {
+                        val = val.substring(1, val.length - 1);
+                    }
+                    result[key] = val;
+                }
+                return result;
+            };
+
             return util;
         })();
         """
