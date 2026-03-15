@@ -18,7 +18,20 @@ public final class NodeRuntime: @unchecked Sendable {
     internal var registeredModules: [String: NodeModule.Type] = [:]
 
     /// The dedicated serial queue for all JS operations.
-    private let jsQueue = DispatchQueue(label: "com.nodecore.js", qos: .userInitiated)
+    private let jsQueue: DispatchQueue
+
+    /// Worker thread context. nil for the main thread.
+    public let workerContext: WorkerContext?
+
+    /// Context passed to a worker thread runtime.
+    public struct WorkerContext {
+        public let threadId: Int
+        public let workerDataJSON: String?
+        /// Called from the worker's jsQueue to send a message (JSON) to the parent.
+        public let parentSendMessage: @Sendable (String) -> Void
+        /// Called from the parent to request the worker to stop.
+        public let onTerminate: @Sendable () -> Void
+    }
 
     /// Console output handler. Called for every console.log/warn/error/etc.
     /// Defaults to writing to stdout (log/info/debug) or stderr (warn/error).
@@ -58,8 +71,18 @@ public final class NodeRuntime: @unchecked Sendable {
     public var fsConfiguration = FSConfiguration()
 
     /// Initialize a new NodeRuntime with optional configuration.
-    public init(argv: [String] = CommandLine.arguments, configure: ((NodeRuntime) -> Void)? = nil) {
+    public init(
+        argv: [String] = CommandLine.arguments,
+        workerContext: WorkerContext? = nil,
+        configure: ((NodeRuntime) -> Void)? = nil
+    ) {
         self.argv = argv
+        self.workerContext = workerContext
+        if workerContext != nil {
+            jsQueue = DispatchQueue(label: "com.nodecore.js.worker-\(workerContext!.threadId)", qos: .userInitiated)
+        } else {
+            jsQueue = DispatchQueue(label: "com.nodecore.js", qos: .userInitiated)
+        }
         context = JSContext()!
         eventLoop = EventLoop(queue: jsQueue)
         moduleLoader = ModuleLoader(runtime: self)
