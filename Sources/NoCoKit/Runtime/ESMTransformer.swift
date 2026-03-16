@@ -81,8 +81,8 @@ public enum ESMTransformer {
                 continue
             }
 
-            // String literals
-            if ch == 0x27 || ch == 0x22 || ch == 0x60 {
+            // Single/double-quoted string literals
+            if ch == 0x27 || ch == 0x22 {
                 let quote = ch
                 let start = i
                 i += 1
@@ -92,6 +92,12 @@ public enum ESMTransformer {
                     i += 1
                 }
                 ranges.append(ExcludedRange(start: start, end: i))
+                continue
+            }
+
+            // Template literal
+            if ch == 0x60 {
+                i = scanTemplateLiteral(chars: chars, len: len, from: i, ranges: &ranges)
                 continue
             }
 
@@ -127,6 +133,140 @@ public enum ESMTransformer {
         }
 
         return ranges
+    }
+
+    /// Scan a template literal starting at the opening backtick.
+    /// Text segments (outside `${}`) are added as excluded ranges.
+    /// Expression segments (`${}` interiors) are NOT excluded so transforms apply inside them.
+    /// Returns the index after the closing backtick.
+    private static func scanTemplateLiteral(
+        chars: [UInt16], len: Int, from start: Int, ranges: inout [ExcludedRange]
+    ) -> Int {
+        var i = start + 1  // skip opening backtick
+        var textStart = start  // include opening backtick in first text segment
+
+        while i < len {
+            let ch = chars[i]
+
+            // Escape sequence
+            if ch == 0x5C {
+                i += 2
+                continue
+            }
+
+            // Closing backtick — end of template literal
+            if ch == 0x60 {
+                i += 1  // skip closing backtick
+                ranges.append(ExcludedRange(start: textStart, end: i))
+                return i
+            }
+
+            // Start of expression: ${
+            if ch == 0x24 && i + 1 < len && chars[i + 1] == 0x7B {
+                // Add text segment up to (including) ${ as excluded
+                let exprOpen = i + 2
+                ranges.append(ExcludedRange(start: textStart, end: exprOpen))
+
+                // Scan inside ${...} — this is code, NOT excluded
+                i = exprOpen
+                var braceDepth = 1
+                while i < len && braceDepth > 0 {
+                    let c = chars[i]
+
+                    // Nested template literal — recurse
+                    if c == 0x60 {
+                        i = scanTemplateLiteral(chars: chars, len: len, from: i, ranges: &ranges)
+                        continue
+                    }
+
+                    // String literals inside expression
+                    if c == 0x27 || c == 0x22 {
+                        let q = c
+                        let sStart = i
+                        i += 1
+                        while i < len {
+                            if chars[i] == 0x5C { i += 2; continue }
+                            if chars[i] == q { i += 1; break }
+                            i += 1
+                        }
+                        ranges.append(ExcludedRange(start: sStart, end: i))
+                        continue
+                    }
+
+                    // Single-line comment
+                    if c == 0x2F && i + 1 < len && chars[i + 1] == 0x2F {
+                        let cStart = i
+                        i += 2
+                        while i < len && chars[i] != 0x0A { i += 1 }
+                        ranges.append(ExcludedRange(start: cStart, end: i))
+                        continue
+                    }
+
+                    // Multi-line comment
+                    if c == 0x2F && i + 1 < len && chars[i + 1] == 0x2A {
+                        let cStart = i
+                        i += 2
+                        while i + 1 < len {
+                            if chars[i] == 0x2A && chars[i + 1] == 0x2F {
+                                i += 2
+                                break
+                            }
+                            i += 1
+                        }
+                        ranges.append(ExcludedRange(start: cStart, end: i))
+                        continue
+                    }
+
+                    // Regex literal inside expression (heuristic)
+                    if c == 0x2F {
+                        let prevNonSpace = findPrevNonSpace(chars, before: i)
+                        let isRegex: Bool
+                        if prevNonSpace < 0 {
+                            isRegex = true
+                        } else {
+                            let prev = chars[prevNonSpace]
+                            isRegex = [0x3D, 0x28, 0x5B, 0x21, 0x26, 0x7C, 0x3F, 0x3A, 0x2C, 0x3B, 0x7B, 0x7D, 0x0A, 0x0D].contains(prev)
+                        }
+                        if isRegex {
+                            let rStart = i
+                            i += 1
+                            while i < len {
+                                if chars[i] == 0x5C { i += 2; continue }
+                                if chars[i] == 0x2F {
+                                    i += 1
+                                    while i < len && isIdentChar(chars[i]) { i += 1 }
+                                    break
+                                }
+                                if chars[i] == 0x0A { break }
+                                i += 1
+                            }
+                            ranges.append(ExcludedRange(start: rStart, end: i))
+                            continue
+                        }
+                    }
+
+                    if c == 0x7B { braceDepth += 1 }
+                    else if c == 0x7D { braceDepth -= 1 }
+
+                    if braceDepth > 0 { i += 1 }
+                }
+
+                // braceDepth == 0: closing } found, i points at }
+                if braceDepth == 0 {
+                    i += 1  // skip closing }
+                }
+                textStart = i - 1  // start next text segment from the closing }
+                continue
+            }
+
+            i += 1
+        }
+
+        // Unterminated template literal — exclude what we have
+        if i > textStart {
+            ranges.append(ExcludedRange(start: textStart, end: i))
+        }
+        return i
     }
 
     private static func findPrevNonSpace(_ chars: [UInt16], before index: Int) -> Int {

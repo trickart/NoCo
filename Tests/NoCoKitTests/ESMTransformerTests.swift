@@ -213,6 +213,45 @@ import Testing
     #expect(!result.contains("__esm_import('bar'"))
 }
 
+// MARK: - Template Literal Nesting
+
+@Test func ignoreImportInTemplateLiteral() async throws {
+    let source = "const s = `import { foo } from 'bar'`;"
+    let result = ESMTransformer.transform(source)
+    #expect(!result.contains("__esm_import('bar'"))
+}
+
+@Test func transformImportMetaInTemplateExpression() async throws {
+    let source = "const s = `url: ${import.meta.url}`;"
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("import_meta.url"))
+}
+
+@Test func transformImportMetaInNestedTemplate() async throws {
+    let source = "const s = `outer ${`inner ${import.meta.url}`}`;"
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("import_meta.url"))
+}
+
+@Test func transformImportMetaAfterNestedTemplate() async throws {
+    let source = "const s = `${`nested`}`;\nconsole.log(import.meta.url);"
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("import_meta.url"))
+}
+
+@Test func transformMultipleExpressionsWithImportMeta() async throws {
+    let source = "const s = `${import.meta.url} and ${import.meta.dirname}`;"
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("import_meta.url"))
+    #expect(result.contains("import_meta.dirname"))
+}
+
+@Test func templateExpressionWithBraceInString() async throws {
+    let source = #"const s = `${"}"} ${import.meta.url}`;"#
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("import_meta.url"))
+}
+
 // MARK: - __esModule marker
 
 @Test func addsEsModuleMarker() async throws {
