@@ -155,7 +155,7 @@ public enum ESMRuntime {
         let wrapScript = context.evaluateScript("""
             (function(mod) {
                 var ns = Object.create(null);
-                if (mod && typeof mod === 'object') {
+                if (mod && (typeof mod === 'object' || typeof mod === 'function')) {
                     var keys = Object.keys(mod);
                     for (var i = 0; i < keys.length; i++) {
                         (function(k) {
