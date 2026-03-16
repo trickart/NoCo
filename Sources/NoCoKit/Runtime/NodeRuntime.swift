@@ -249,6 +249,7 @@ public final class NodeRuntime: @unchecked Sendable {
         registerModule(WorkerThreadsModule.self)
         registerModule(V8Module.self)
         registerModule(DNSModule.self)
+        registerModule(TLSModule.self)
 
         // Ensure global is set (ProcessModule sets it, but guard as fallback)
         context.evaluateScript("""

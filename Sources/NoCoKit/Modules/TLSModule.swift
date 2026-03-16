@@ -3,41 +3,59 @@ import Foundation
 import Network
 import NIOCore
 import NIOTransportServices
+import Security
 import Synchronization
 
-/// Real TCP client + server implementation of Node.js `net` module.
-/// Client uses NWConnection; server uses NIOTransportServices (NIOTSListenerBootstrap).
-public struct NetModule: NodeModule {
-    public static let moduleName = "net"
+/// Implements Node.js `tls` module with TLS client/server support.
+/// Client uses NWConnection with TLS; server uses NIOTransportServices with TLS.
+public struct TLSModule: NodeModule {
+    public static let moduleName = "tls"
 
     @discardableResult
     public static func install(in context: JSContext, runtime: NodeRuntime) -> JSValue {
-        // Per-runtime storage (captured by closures below, accessed only from jsQueue)
-        final class NetStorage {
-            var sockets: [Int: TCPSocket] = [:]
+        // Per-runtime storage
+        final class TLSStorage {
+            var sockets: [Int: TLSTCPSocket] = [:]
             var nextSocketId: Int = 1
-            var servers: [Int: NIOTCPServer] = [:]
+            var servers: [Int: NIOTLSServer] = [:]
             var nextServerId: Int = 1
             var nioSockets: [Int: NIOAcceptedSocket] = [:]
         }
-        let storage = NetStorage()
-        // Thread-safe counter for NIO socket IDs (accessed from NIO thread)
-        let nioSocketIdCounter = AtomicCounter(initial: 100000)
+        let storage = TLSStorage()
+        let nioSocketIdCounter = AtomicCounter(initial: 200000)
 
-        // __netConnect(host, port, jsSocket) -> socketId
-        let connectBlock: @convention(block) (String, Int, JSValue) -> Int = { host, port, jsSocket in
+        // __tlsConnect(host, port, servername, rejectUnauthorized, cert, key, ca, jsSocket) -> socketId
+        let connectBlock: @convention(block) (String, Int, JSValue, Bool, JSValue, JSValue, JSValue, JSValue) -> Int = {
+            host, port, servernameVal, rejectUnauthorized, certVal, keyVal, caVal, jsSocket in
             let id = storage.nextSocketId
             storage.nextSocketId += 1
-            let tcp = TCPSocket(host: host, port: UInt16(port), eventLoop: runtime.eventLoop)
+
+            let servername = servernameVal.isUndefined || servernameVal.isNull ? host : servernameVal.toString()!
+            let cert = certVal.isUndefined || certVal.isNull ? nil : certVal.toString()
+            let key = keyVal.isUndefined || keyVal.isNull ? nil : keyVal.toString()
+
+            let tlsOptions = TLSModule.createClientTLSOptions(
+                servername: servername,
+                rejectUnauthorized: rejectUnauthorized,
+                certPEM: cert,
+                keyPEM: key
+            )
+
+            let tcp = TLSTCPSocket(
+                host: host,
+                port: UInt16(port),
+                eventLoop: runtime.eventLoop,
+                tlsOptions: tlsOptions
+            )
             tcp.jsSocket = jsSocket
             storage.sockets[id] = tcp
             runtime.eventLoop.retainHandle()
             tcp.start()
             return id
         }
-        context.setObject(connectBlock, forKeyedSubscript: "__netConnect" as NSString)
+        context.setObject(connectBlock, forKeyedSubscript: "__tlsConnect" as NSString)
 
-        // __netWrite(socketId, dataArray, callback) -> Bool
+        // __tlsWrite(socketId, dataArray, callback) -> Bool
         let writeBlock: @convention(block) (Int, JSValue, JSValue) -> Bool = { id, dataVal, cb in
             let len = Int(dataVal.forProperty("length")?.toInt32() ?? 0)
             var bytes = Data(count: len)
@@ -64,9 +82,9 @@ public struct NetModule: NodeModule {
             }
             return true
         }
-        context.setObject(writeBlock, forKeyedSubscript: "__netWrite" as NSString)
+        context.setObject(writeBlock, forKeyedSubscript: "__tlsWrite" as NSString)
 
-        // __netDestroy(socketId)
+        // __tlsDestroy(socketId)
         let destroyBlock: @convention(block) (Int) -> Void = { id in
             if let nioSock = storage.nioSockets[id] {
                 nioSock.close()
@@ -78,41 +96,46 @@ public struct NetModule: NodeModule {
             storage.sockets.removeValue(forKey: id)
             runtime.eventLoop.releaseHandle()
         }
-        context.setObject(destroyBlock, forKeyedSubscript: "__netDestroy" as NSString)
+        context.setObject(destroyBlock, forKeyedSubscript: "__tlsDestroy" as NSString)
 
-        // __netSetTimeout(socketId, timeoutMs)
+        // __tlsSetTimeout(socketId, timeoutMs)
         let setTimeoutBlock: @convention(block) (Int, Int) -> Void = { id, ms in
             storage.sockets[id]?.setIdleTimeout(ms: ms)
         }
-        context.setObject(setTimeoutBlock, forKeyedSubscript: "__netSetTimeout" as NSString)
+        context.setObject(setTimeoutBlock, forKeyedSubscript: "__tlsSetTimeout" as NSString)
 
-        // __netCreateServer() -> serverId
-        let createServerBlock: @convention(block) () -> Int = {
+        // __tlsCreateServer(certPEM, keyPEM) -> serverId or -1
+        let createServerBlock: @convention(block) (String, String) -> Int = { certPEM, keyPEM in
+            guard let tlsOpts = PEMHelper.createTLSOptions(certPEM: certPEM, keyPEM: keyPEM, passphrase: nil) else {
+                return -1
+            }
             let id = storage.nextServerId
             storage.nextServerId += 1
-            let server = NIOTCPServer(eventLoop: runtime.eventLoop, nioSocketIdCounter: nioSocketIdCounter) { nioSock in
-                // Called from eventLoop callback (on jsQueue) to register the socket
+            let server = NIOTLSServer(
+                eventLoop: runtime.eventLoop,
+                nioSocketIdCounter: nioSocketIdCounter,
+                tlsOptions: tlsOpts
+            ) { nioSock in
                 storage.nioSockets[nioSock.socketId] = nioSock
                 runtime.eventLoop.retainHandle()
             }
             storage.servers[id] = server
             return id
         }
-        context.setObject(createServerBlock, forKeyedSubscript: "__netCreateServer" as NSString)
+        context.setObject(createServerBlock, forKeyedSubscript: "__tlsCreateServer" as NSString)
 
-        // __netServerListen(serverId, port, host, jsServer)
+        // __tlsServerListen(serverId, port, host, jsServer)
         let serverListenBlock: @convention(block) (Int, Int, String, JSValue) -> Void = { id, port, host, jsServer in
             guard let server = storage.servers[id] else { return }
             server.jsServer = jsServer
             runtime.eventLoop.retainHandle()
             server.bind(host: host, port: port)
         }
-        context.setObject(serverListenBlock, forKeyedSubscript: "__netServerListen" as NSString)
+        context.setObject(serverListenBlock, forKeyedSubscript: "__tlsServerListen" as NSString)
 
-        // __netServerClose(serverId)
+        // __tlsServerClose(serverId)
         let serverCloseBlock: @convention(block) (Int) -> Void = { id in
             guard let server = storage.servers[id] else { return }
-            // Close all accepted sockets belonging to this server
             for (sid, nioSock) in storage.nioSockets {
                 nioSock.close()
                 storage.nioSockets.removeValue(forKey: sid)
@@ -122,9 +145,9 @@ public struct NetModule: NodeModule {
             storage.servers.removeValue(forKey: id)
             runtime.eventLoop.releaseHandle()
         }
-        context.setObject(serverCloseBlock, forKeyedSubscript: "__netServerClose" as NSString)
+        context.setObject(serverCloseBlock, forKeyedSubscript: "__tlsServerClose" as NSString)
 
-        // __netServerAddress(serverId)
+        // __tlsServerAddress(serverId)
         let serverAddressBlock: @convention(block) (Int) -> JSValue = { id in
             let ctx = JSContext.current()!
             guard let server = storage.servers[id] else {
@@ -136,50 +159,43 @@ public struct NetModule: NodeModule {
             obj.setValue("IPv4", forProperty: "family")
             return obj
         }
-        context.setObject(serverAddressBlock, forKeyedSubscript: "__netServerAddress" as NSString)
+        context.setObject(serverAddressBlock, forKeyedSubscript: "__tlsServerAddress" as NSString)
 
-        // __netNioSocketSetOnData(socketId, jsSocket)
+        // __tlsNioSocketSetOnData(socketId, jsSocket)
         let nioSocketSetOnDataBlock: @convention(block) (Int, JSValue) -> Void = { id, jsSocket in
             guard let nioSock = storage.nioSockets[id] else { return }
             nioSock.jsSocket = jsSocket
         }
-        context.setObject(nioSocketSetOnDataBlock, forKeyedSubscript: "__netNioSocketSetOnData" as NSString)
+        context.setObject(nioSocketSetOnDataBlock, forKeyedSubscript: "__tlsNioSocketSetOnData" as NSString)
 
+        // JS implementation
         let script = """
         (function() {
             var EventEmitter = this.__NoCo_EventEmitter;
+            var net = require('net');
 
-            function Socket(options) {
-                if (!(this instanceof Socket)) {
-                    return new Socket(options);
-                }
+            // TLSSocket extends net.Socket
+            function TLSSocket(options) {
+                if (!(this instanceof TLSSocket)) return new TLSSocket(options);
                 this._events = Object.create(null);
                 this._maxListeners = 10;
                 this.readable = true;
                 this.writable = true;
                 this.destroyed = false;
                 this.connecting = false;
+                this.encrypted = true;
+                this.authorized = false;
+                this.authorizationError = null;
                 this.remoteAddress = null;
                 this.remotePort = null;
                 this._socketId = -1;
                 this._timeoutMs = 0;
                 this._encoding = null;
             }
-            Socket.prototype = Object.create(EventEmitter.prototype);
-            Socket.prototype.constructor = Socket;
+            TLSSocket.prototype = Object.create(EventEmitter.prototype);
+            TLSSocket.prototype.constructor = TLSSocket;
 
-            Socket.prototype.connect = function(port, host, callback) {
-                if (typeof host === 'function') { callback = host; host = 'localhost'; }
-                if (!host) host = 'localhost';
-                this.connecting = true;
-                this.remoteAddress = host;
-                this.remotePort = port;
-                if (callback) this.once('connect', callback);
-                this._socketId = __netConnect(host, port, this);
-                return this;
-            };
-
-            Socket.prototype.write = function(data, encoding, callback) {
+            TLSSocket.prototype.write = function(data, encoding, callback) {
                 if (typeof encoding === 'function') { callback = encoding; encoding = null; }
                 encoding = encoding || 'utf8';
                 var buf;
@@ -194,10 +210,10 @@ public struct NetModule: NodeModule {
                 for (var i = 0; i < buf.length; i++) {
                     arr.push(buf._data ? buf._data[i] : buf[i]);
                 }
-                return __netWrite(this._socketId, arr, callback || null);
+                return __tlsWrite(this._socketId, arr, callback || null);
             };
 
-            Socket.prototype.end = function(data, encoding, callback) {
+            TLSSocket.prototype.end = function(data, encoding, callback) {
                 if (typeof data === 'function') { callback = data; data = null; }
                 if (typeof encoding === 'function') { callback = encoding; encoding = null; }
                 if (data) this.write(data, encoding);
@@ -206,68 +222,86 @@ public struct NetModule: NodeModule {
                 return this;
             };
 
-            Socket.prototype.destroy = function(err) {
+            TLSSocket.prototype.destroy = function(err) {
                 if (this.destroyed) return this;
                 this.destroyed = true;
                 this.writable = false;
                 this.readable = false;
                 if (this._socketId >= 0) {
-                    __netDestroy(this._socketId);
+                    __tlsDestroy(this._socketId);
                 }
                 if (err) this.emit('error', err);
                 return this;
             };
 
-            Socket.prototype.setTimeout = function(timeout, callback) {
+            TLSSocket.prototype.setTimeout = function(timeout, callback) {
                 if (callback) this.once('timeout', callback);
                 this._timeoutMs = timeout;
                 if (this._socketId >= 0) {
-                    __netSetTimeout(this._socketId, timeout);
+                    __tlsSetTimeout(this._socketId, timeout);
                 }
                 return this;
             };
 
-            Socket.prototype.setNoDelay = function() { return this; };
-            Socket.prototype.setKeepAlive = function() { return this; };
-            Socket.prototype.ref = function() { return this; };
-            Socket.prototype.unref = function() { return this; };
+            TLSSocket.prototype.setNoDelay = function() { return this; };
+            TLSSocket.prototype.setKeepAlive = function() { return this; };
+            TLSSocket.prototype.ref = function() { return this; };
+            TLSSocket.prototype.unref = function() { return this; };
 
-            Socket.prototype.setEncoding = function(enc) {
+            TLSSocket.prototype.setEncoding = function(enc) {
                 this._encoding = enc;
                 return this;
             };
 
-            Socket.prototype.pipe = function(dest) {
+            TLSSocket.prototype.getPeerCertificate = function() {
+                return {};
+            };
+
+            TLSSocket.prototype.getCipher = function() {
+                return { name: 'TLS_AES_256_GCM_SHA384', standardName: 'TLS_AES_256_GCM_SHA384', version: 'TLSv1.3' };
+            };
+
+            TLSSocket.prototype.getProtocol = function() {
+                return 'TLSv1.3';
+            };
+
+            TLSSocket.prototype.pipe = function(dest) {
                 var self = this;
-                this.on('data', function(chunk) {
-                    dest.write(chunk);
-                });
-                this.on('end', function() {
-                    if (typeof dest.end === 'function') dest.end();
-                });
+                this.on('data', function(chunk) { dest.write(chunk); });
+                this.on('end', function() { if (typeof dest.end === 'function') dest.end(); });
                 return dest;
             };
 
             var origEmit = EventEmitter.prototype.emit;
-            Socket.prototype.emit = function(event) {
+            TLSSocket.prototype.emit = function(event) {
                 if (event === 'data' && this._encoding && arguments[1] instanceof Buffer) {
                     arguments[1] = arguments[1].toString(this._encoding);
                 }
                 return origEmit.apply(this, arguments);
             };
 
-            function Server(options, connectionListener) {
-                if (!(this instanceof Server)) return new Server(options, connectionListener);
+            // tls.Server
+            function Server(options, secureConnectionListener) {
+                if (!(this instanceof Server)) return new Server(options, secureConnectionListener);
                 if (typeof options === 'function') {
-                    connectionListener = options;
+                    secureConnectionListener = options;
                     options = {};
                 }
+                options = options || {};
                 this._events = Object.create(null);
                 this._maxListeners = 10;
-                this._serverId = __netCreateServer();
+                this._options = options;
                 this.listening = false;
                 this.maxConnections = 0;
-                if (connectionListener) this.on('connection', connectionListener);
+
+                var certPEM = options.cert ? options.cert.toString() : '';
+                var keyPEM = options.key ? options.key.toString() : '';
+                this._serverId = __tlsCreateServer(certPEM, keyPEM);
+                if (this._serverId < 0) {
+                    throw new Error('Failed to parse TLS certificate/key');
+                }
+
+                if (secureConnectionListener) this.on('secureConnection', secureConnectionListener);
             }
             Server.prototype = Object.create(EventEmitter.prototype);
             Server.prototype.constructor = Server;
@@ -278,99 +312,187 @@ public struct NetModule: NodeModule {
                 if (!host) host = '0.0.0.0';
                 if (callback) this.once('listening', callback);
                 this.listening = true;
-                __netServerListen(this._serverId, port || 0, host, this);
+                __tlsServerListen(this._serverId, port || 0, host, this);
                 return this;
             };
 
             Server.prototype.close = function(callback) {
                 if (callback) this.once('close', callback);
                 this.listening = false;
-                __netServerClose(this._serverId);
+                __tlsServerClose(this._serverId);
                 this.emit('close');
                 return this;
             };
 
             Server.prototype.address = function() {
-                return __netServerAddress(this._serverId);
+                return __tlsServerAddress(this._serverId);
             };
 
             Server.prototype.ref = function() { return this; };
             Server.prototype.unref = function() { return this; };
 
             Server.prototype._handleConnection = function(socketId, remoteAddr, remotePort) {
-                var socket = new Socket();
+                var socket = new TLSSocket();
                 socket._socketId = socketId;
                 socket.remoteAddress = remoteAddr;
                 socket.remotePort = remotePort;
                 socket.connecting = false;
-                __netNioSocketSetOnData(socketId, socket);
-                this.emit('connection', socket);
+                socket.authorized = true;
+                __tlsNioSocketSetOnData(socketId, socket);
+                this.emit('secureConnection', socket);
             };
 
-            function connect(port, host, callback) {
-                if (typeof port === 'object') {
-                    var opts = port;
+            // tls.connect(options, callback)
+            function connect(port, host, options, callback) {
+                // Parse arguments: connect(port[, host][, options][, callback])
+                // or connect(options[, callback])
+                if (typeof port === 'object' && port !== null) {
+                    // connect(options[, callback])
                     callback = host;
-                    return new Socket().connect(opts.port, opts.host || 'localhost', callback);
-                }
-                return new Socket().connect(port, host, callback);
-            }
-
-            function createConnection(port, host, callback) {
-                return connect(port, host, callback);
-            }
-
-            function isIP(input) {
-                if (typeof input !== 'string') return 0;
-                if (/^(\\d{1,3}\\.){3}\\d{1,3}$/.test(input)) {
-                    var parts = input.split('.');
-                    for (var i = 0; i < 4; i++) {
-                        if (parseInt(parts[i], 10) > 255) return 0;
+                    options = port;
+                    port = options.port;
+                    host = options.host || 'localhost';
+                } else {
+                    if (typeof host === 'function') {
+                        callback = host;
+                        host = 'localhost';
+                        options = {};
+                    } else if (typeof host === 'object' && host !== null) {
+                        callback = options;
+                        options = host;
+                        host = options.host || 'localhost';
+                    } else if (typeof options === 'function') {
+                        callback = options;
+                        options = {};
                     }
-                    return 4;
+                    if (!host) host = 'localhost';
+                    if (!options) options = {};
                 }
-                if (input.indexOf(':') !== -1 && /^[0-9a-fA-F:]+$/.test(input)) return 6;
-                return 0;
+
+                var socket = new TLSSocket();
+                socket.connecting = true;
+                socket.remoteAddress = host;
+                socket.remotePort = port;
+
+                if (callback) socket.once('secureConnect', callback);
+
+                var servername = options.servername || host;
+                var rejectUnauthorized = options.rejectUnauthorized !== false;
+                var cert = options.cert || null;
+                var key = options.key || null;
+                var ca = options.ca || null;
+
+                socket._socketId = __tlsConnect(
+                    host, port,
+                    servername,
+                    rejectUnauthorized,
+                    cert ? cert.toString() : null,
+                    key ? key.toString() : null,
+                    ca ? ca.toString() : null,
+                    socket
+                );
+
+                return socket;
             }
 
-            function isIPv4(input) { return isIP(input) === 4; }
-            function isIPv6(input) { return isIP(input) === 6; }
+            function createServer(options, secureConnectionListener) {
+                return new Server(options, secureConnectionListener);
+            }
+
+            function createSecureContext(options) {
+                options = options || {};
+                return {
+                    cert: options.cert || null,
+                    key: options.key || null,
+                    ca: options.ca || null,
+                    minVersion: options.minVersion || 'TLSv1.2',
+                    maxVersion: options.maxVersion || 'TLSv1.3'
+                };
+            }
 
             return {
-                Socket: Socket,
+                TLSSocket: TLSSocket,
                 Server: Server,
                 connect: connect,
-                createConnection: createConnection,
-                createServer: function(options, connectionListener) {
-                    return new Server(options, connectionListener);
-                },
-                isIP: isIP,
-                isIPv4: isIPv4,
-                isIPv6: isIPv6
+                createServer: createServer,
+                createSecureContext: createSecureContext,
+                DEFAULT_MIN_VERSION: 'TLSv1.2',
+                DEFAULT_MAX_VERSION: 'TLSv1.3',
+                rootCertificates: [],
+                getCiphers: function() {
+                    return ['TLS_AES_256_GCM_SHA384', 'TLS_CHACHA20_POLY1305_SHA256', 'TLS_AES_128_GCM_SHA256'];
+                }
             };
         })();
         """
 
         return context.evaluateScript(script)!
     }
+
+    // MARK: - Client TLS Options
+
+    /// Create NWProtocolTLS.Options for a TLS client connection.
+    static func createClientTLSOptions(
+        servername: String,
+        rejectUnauthorized: Bool,
+        certPEM: String?,
+        keyPEM: String?
+    ) -> NWProtocolTLS.Options {
+        let options = NWProtocolTLS.Options()
+        let secOptions = options.securityProtocolOptions
+
+        // Set SNI
+        sec_protocol_options_set_tls_server_name(secOptions, servername)
+
+        // Set minimum TLS version
+        sec_protocol_options_set_min_tls_protocol_version(secOptions, .TLSv12)
+
+        // Skip server certificate verification if rejectUnauthorized is false
+        if !rejectUnauthorized {
+            sec_protocol_options_set_verify_block(secOptions, { _, _, completionHandler in
+                completionHandler(true)
+            }, DispatchQueue.global())
+        }
+
+        // Client certificate (mTLS)
+        if let certPEM, let keyPEM {
+            if let tlsIdentityOptions = PEMHelper.createTLSOptions(certPEM: certPEM, keyPEM: keyPEM, passphrase: nil) {
+                let identitySecOptions = tlsIdentityOptions.securityProtocolOptions
+                // Copy identity from the PEMHelper-created options
+                // We need to get the identity and set it on our options
+                // PEMHelper sets it via sec_protocol_options_set_local_identity
+                // For simplicity, just use the PEMHelper options directly
+                // but add our SNI and verify settings
+                sec_protocol_options_set_tls_server_name(identitySecOptions, servername)
+                if !rejectUnauthorized {
+                    sec_protocol_options_set_verify_block(identitySecOptions, { _, _, completionHandler in
+                        completionHandler(true)
+                    }, DispatchQueue.global())
+                }
+                return tlsIdentityOptions
+            }
+        }
+
+        return options
+    }
 }
 
-// MARK: - TCPSocket (client)
+// MARK: - TLSTCPSocket (client)
 
-/// Wraps NWConnection to provide TCP client functionality.
-final class TCPSocket: @unchecked Sendable {
+/// TLS-enabled TCP client using NWConnection with TLS parameters.
+final class TLSTCPSocket: @unchecked Sendable {
     let connection: NWConnection
     let eventLoop: EventLoop
     var jsSocket: JSValue?
     private var idleTimeoutMs: Int = 0
     private var idleTimer: DispatchWorkItem?
 
-    init(host: String, port: UInt16, eventLoop: EventLoop, connectionTimeoutSec: Int = 10) {
+    init(host: String, port: UInt16, eventLoop: EventLoop, tlsOptions: NWProtocolTLS.Options, connectionTimeoutSec: Int = 10) {
         let nwHost = NWEndpoint.Host(host)
         let nwPort = NWEndpoint.Port(integerLiteral: port)
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.connectionTimeout = connectionTimeoutSec
-        let params = NWParameters(tls: nil, tcp: tcpOptions)
+        let params = NWParameters(tls: tlsOptions, tcp: tcpOptions)
         self.connection = NWConnection(host: nwHost, port: nwPort, using: params)
         self.eventLoop = eventLoop
     }
@@ -383,7 +505,9 @@ final class TCPSocket: @unchecked Sendable {
                 self.eventLoop.enqueueCallback {
                     guard let sock = self.jsSocket else { return }
                     sock.setValue(false, forProperty: "connecting")
+                    sock.setValue(true, forProperty: "authorized")
                     sock.invokeMethod("emit", withArguments: ["connect"])
+                    sock.invokeMethod("emit", withArguments: ["secureConnect"])
                 }
                 self.startReceiving()
             case .failed(let error):
@@ -486,22 +610,24 @@ final class TCPSocket: @unchecked Sendable {
     }
 }
 
-// MARK: - NIOTCPServer
+// MARK: - NIOTLSServer
 
-/// TCP server using NIOTransportServices (NIOTSListenerBootstrap).
-final class NIOTCPServer: TCPServerDelegate, @unchecked Sendable {
+/// TLS server using NIOTransportServices (NIOTSListenerBootstrap) with TLS.
+final class NIOTLSServer: TCPServerDelegate, @unchecked Sendable {
     let eventLoop: EventLoop
     let nioSocketIdCounter: AtomicCounter
     let onRegister: (NIOAcceptedSocket) -> Void
+    let tlsOptions: NWProtocolTLS.Options
     var jsServer: JSValue?
     var boundPort: Int = 0
     var boundHost: String = ""
     private var group: NIOTSEventLoopGroup?
     private var channel: Channel?
 
-    init(eventLoop: EventLoop, nioSocketIdCounter: AtomicCounter, onRegister: @escaping (NIOAcceptedSocket) -> Void) {
+    init(eventLoop: EventLoop, nioSocketIdCounter: AtomicCounter, tlsOptions: NWProtocolTLS.Options, onRegister: @escaping (NIOAcceptedSocket) -> Void) {
         self.eventLoop = eventLoop
         self.nioSocketIdCounter = nioSocketIdCounter
+        self.tlsOptions = tlsOptions
         self.onRegister = onRegister
     }
 
@@ -511,6 +637,7 @@ final class NIOTCPServer: TCPServerDelegate, @unchecked Sendable {
         let serverRef = self
 
         let bootstrap = NIOTSListenerBootstrap(group: group)
+            .tlsOptions(tlsOptions)
             .childChannelInitializer { channel in
                 channel.pipeline.addHandler(TCPBridgeHandler(server: serverRef))
             }
@@ -542,7 +669,6 @@ final class NIOTCPServer: TCPServerDelegate, @unchecked Sendable {
         let g = group
         channel = nil
         group = nil
-        // Perform shutdown on a background queue to avoid blocking jsQueue
         DispatchQueue.global().async {
             ch?.close(promise: nil)
             try? g?.syncShutdownGracefully()
@@ -551,130 +677,5 @@ final class NIOTCPServer: TCPServerDelegate, @unchecked Sendable {
 
     func nextSocketId() -> Int {
         nioSocketIdCounter.next()
-    }
-}
-
-// MARK: - TCPServerDelegate
-
-/// Protocol for TCP server types that work with TCPBridgeHandler.
-protocol TCPServerDelegate: AnyObject, Sendable {
-    var eventLoop: EventLoop { get }
-    var jsServer: JSValue? { get }
-    var onRegister: (NIOAcceptedSocket) -> Void { get }
-    func nextSocketId() -> Int
-    func handleConnection(socketId: Int, remoteAddr: String, remotePort: Int)
-}
-
-extension TCPServerDelegate {
-    func handleConnection(socketId: Int, remoteAddr: String, remotePort: Int) {
-        jsServer?.invokeMethod("_handleConnection", withArguments: [socketId, remoteAddr, remotePort])
-    }
-}
-
-// MARK: - TCPBridgeHandler
-
-/// NIO ChannelInboundHandler for raw TCP (no HTTP codec).
-final class TCPBridgeHandler: ChannelInboundHandler, @unchecked Sendable {
-    typealias InboundIn = ByteBuffer
-    typealias OutboundOut = ByteBuffer
-
-    let server: any TCPServerDelegate
-    var acceptedSocket: NIOAcceptedSocket?
-
-    init(server: any TCPServerDelegate) {
-        self.server = server
-    }
-
-    func channelActive(context: ChannelHandlerContext) {
-        let remoteAddr = context.remoteAddress?.ipAddress ?? "127.0.0.1"
-        let remotePort = context.remoteAddress?.port ?? 0
-        let socketId = server.nextSocketId()
-        let nioSock = NIOAcceptedSocket(socketId: socketId, channel: context.channel, eventLoop: server.eventLoop)
-        self.acceptedSocket = nioSock
-
-        server.eventLoop.enqueueCallback { [weak self] in
-            guard let self else { return }
-            self.server.onRegister(nioSock)
-            self.server.handleConnection(socketId: socketId, remoteAddr: remoteAddr, remotePort: remotePort)
-        }
-    }
-
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        var buf = unwrapInboundIn(data)
-        guard let bytes = buf.readBytes(length: buf.readableBytes) else { return }
-        acceptedSocket?.deliverData(bytes)
-    }
-
-    func channelInactive(context: ChannelHandlerContext) {
-        acceptedSocket?.deliverEnd()
-    }
-}
-
-// MARK: - NIOAcceptedSocket
-
-/// Represents a server-accepted TCP connection via NIO channel.
-final class NIOAcceptedSocket: @unchecked Sendable {
-    let socketId: Int
-    var channel: Channel?
-    let eventLoop: EventLoop
-    var jsSocket: JSValue?
-
-    init(socketId: Int, channel: Channel, eventLoop: EventLoop) {
-        self.socketId = socketId
-        self.channel = channel
-        self.eventLoop = eventLoop
-    }
-
-    func write(_ data: Data, completion: @escaping () -> Void) {
-        guard let channel = channel else { return }
-        var buf = channel.allocator.buffer(capacity: data.count)
-        buf.writeBytes(data)
-        channel.writeAndFlush(buf, promise: nil)
-        completion()
-    }
-
-    func close() {
-        channel?.close(promise: nil)
-        channel = nil
-    }
-
-    func deliverData(_ bytes: [UInt8]) {
-        eventLoop.enqueueCallback { [weak self] in
-            guard let self, let sock = self.jsSocket, let ctx = sock.context else { return }
-            let bufCtor = ctx.objectForKeyedSubscript("Buffer" as NSString)
-            let jsArr = JSValue(newArrayIn: ctx)!
-            for (i, byte) in bytes.enumerated() {
-                jsArr.setValue(byte, at: i)
-            }
-            let buf = bufCtor?.invokeMethod("from", withArguments: [jsArr])
-            sock.invokeMethod("emit", withArguments: ["data", buf as Any])
-        }
-    }
-
-    func deliverEnd() {
-        eventLoop.enqueueCallback { [weak self] in
-            guard let self, let sock = self.jsSocket else { return }
-            sock.invokeMethod("emit", withArguments: ["end"])
-            sock.invokeMethod("emit", withArguments: ["close", false])
-        }
-    }
-}
-
-// MARK: - AtomicCounter
-
-/// Simple thread-safe counter using Mutex.
-final class AtomicCounter: Sendable {
-    private let state: Mutex<Int>
-
-    init(initial: Int) {
-        self.state = Mutex(initial)
-    }
-
-    func next() -> Int {
-        state.withLock { value in
-            let current = value
-            value += 1
-            return current
-        }
     }
 }
