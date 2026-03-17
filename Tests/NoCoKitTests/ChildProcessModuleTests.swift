@@ -420,4 +420,136 @@ func execFileErrorCallback() async throws {
     let hasErr = runtime.evaluate("result.hasErr")
     #expect(hasErr?.toBool() == true)
 }
+
+// MARK: - fork Tests
+
+/// Find the noco binary in the build directory.
+private func nocoExecPath() -> String {
+    // During swift test, the binary is at .build/debug/noco
+    let testBinary = ProcessInfo.processInfo.arguments[0]
+    let buildDir = URL(fileURLWithPath: testBinary)
+        .deletingLastPathComponent().path
+    let candidate = buildDir + "/noco"
+    if FileManager.default.isExecutableFile(atPath: candidate) {
+        return candidate
+    }
+    // Fallback: search relative to source tree
+    var dir = URL(fileURLWithPath: #filePath)
+    for _ in 0..<5 {
+        dir = dir.deletingLastPathComponent()
+        let path = dir.appendingPathComponent(".build/debug/noco").path
+        if FileManager.default.isExecutableFile(atPath: path) {
+            return path
+        }
+    }
+    return candidate
+}
+
+@Test(.timeLimit(.minutes(1)))
+func forkReceiveMessageFromChild() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_send.js").path
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var received = null;
+        var child = cp.fork('\(fixturePath)', { execPath: '\(execPath)' });
+        child.on('message', function(msg) {
+            received = msg;
+            child.disconnect();
+        });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("JSON.stringify(received)")
+    #expect(result?.toString() == "{\"hello\":\"from child\"}")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func forkSendMessageToChild() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_echo.js").path
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var received = null;
+        var child = cp.fork('\(fixturePath)', { execPath: '\(execPath)' });
+        child.on('message', function(msg) {
+            received = msg;
+            child.disconnect();
+        });
+        child.send({ ping: 'pong' });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("JSON.stringify(received)")
+    #expect(result?.toString() == "{\"ping\":\"pong\"}")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func forkDisconnect() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_echo.js").path
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var disconnected = false;
+        var child = cp.fork('\(fixturePath)', { execPath: '\(execPath)' });
+        child.on('disconnect', function() {
+            disconnected = true;
+        });
+        // Wait for IPC to be established, then disconnect
+        child.on('message', function() {});
+        setTimeout(function() {
+            child.disconnect();
+        }, 500);
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("disconnected")
+    #expect(result?.toBool() == true)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func forkChildExit() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_send.js").path
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var exitCode = -1;
+        var child = cp.fork('\(fixturePath)', { execPath: '\(execPath)' });
+        child.on('exit', function(code) {
+            exitCode = code;
+        });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("exitCode")
+    #expect(result?.toInt32() == 0)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func forkSilentOption() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_send.js").path
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var child = cp.fork('\(fixturePath)', { silent: true, execPath: '\(execPath)' });
+        var hasStdout = child.stdout !== null;
+        var hasStderr = child.stderr !== null;
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let hasStdout = runtime.evaluate("hasStdout")
+    let hasStderr = runtime.evaluate("hasStderr")
+    #expect(hasStdout?.toBool() == true)
+    #expect(hasStderr?.toBool() == true)
+}
 #endif

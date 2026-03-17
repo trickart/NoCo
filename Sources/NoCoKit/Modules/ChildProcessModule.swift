@@ -213,6 +213,35 @@ public struct ChildProcessModule: NodeModule {
         }
         cp.setValue(unsafeBitCast(spawnSync, to: AnyObject.self), forProperty: "spawnSync")
 
+        // MARK: - fork(modulePath, args?, options?)
+
+        let fork: @convention(block) () -> JSValue = {
+            let jsArgs = JSContext.currentArguments() as? [JSValue] ?? []
+            let ctx = JSContext.current()!
+            guard let modulePath = jsArgs.first?.toString() else {
+                ctx.exception = ctx.createError("fork requires a module path")
+                return JSValue(undefinedIn: ctx)
+            }
+
+            var args: [String] = []
+            var options: JSValue? = nil
+            var idx = 1
+            if idx < jsArgs.count && jsArgs[idx].isArray {
+                let arr = jsArgs[idx]
+                let len = Int(arr.forProperty("length")!.toInt32())
+                args = (0..<len).map { arr.atIndex($0).toString() ?? "" }
+                idx += 1
+            }
+            if idx < jsArgs.count && jsArgs[idx].isObject && !isFunction(jsArgs[idx], in: ctx) {
+                options = jsArgs[idx]
+                idx += 1
+            }
+
+            return forkProcess(modulePath: modulePath, args: args, options: options,
+                               context: ctx, runtime: runtime)
+        }
+        cp.setValue(unsafeBitCast(fork, to: AnyObject.self), forProperty: "fork")
+
         return cp
     }
 
@@ -661,6 +690,410 @@ public struct ChildProcessModule: NodeModule {
             }
         }
         childProcess.invokeMethod("on", withArguments: ["close", unsafeBitCast(onClose, to: AnyObject.self)])
+    }
+
+    // MARK: - fork implementation
+
+    private static func forkProcess(
+        modulePath: String, args: [String], options: JSValue?,
+        context: JSContext, runtime: NodeRuntime
+    ) -> JSValue {
+        // Resolve modulePath to absolute path
+        let resolvedPath: String
+        if modulePath.hasPrefix("/") {
+            resolvedPath = modulePath
+        } else {
+            resolvedPath = FileManager.default.currentDirectoryPath + "/" + modulePath
+        }
+
+        // Create a Unix domain socket at a temp path for IPC
+        let socketPath = NSTemporaryDirectory() + "noco-ipc-\(UUID().uuidString).sock"
+        guard let serverFD = IPCChannel.createServer(at: socketPath) else {
+            context.exception = context.createError("Failed to create IPC socket")
+            return JSValue(undefinedIn: context)
+        }
+
+        // Get execPath (NoCo binary): options.execPath > process.execPath
+        let execPath: String
+        if let opts = options, let epVal = opts.forProperty("execPath"), epVal.isString {
+            execPath = epVal.toString()!
+        } else {
+            execPath = context.objectForKeyedSubscript("process")?
+                .forProperty("execPath")?.toString()
+                ?? ProcessInfo.processInfo.arguments[0]
+        }
+
+        // Build child process
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: execPath)
+        proc.arguments = [resolvedPath] + args
+
+        // Environment: inherit + NODE_CHANNEL_PATH
+        var env = ProcessInfo.processInfo.environment
+        if let opts = options, let envVal = opts.forProperty("env"), envVal.isObject && !envVal.isUndefined {
+            env = [:]
+            let keys = context.evaluateScript("(function(o) { return Object.keys(o); })")!
+            let keysArr = keys.call(withArguments: [envVal])!
+            let len = Int(keysArr.forProperty("length")!.toInt32())
+            for i in 0..<len {
+                let key = keysArr.atIndex(i).toString()!
+                let val = envVal.forProperty(key)?.toString() ?? ""
+                env[key] = val
+            }
+        }
+        env["NODE_CHANNEL_PATH"] = socketPath
+        proc.environment = env
+
+        // Options: cwd
+        if let opts = options, let cwdVal = opts.forProperty("cwd"), cwdVal.isString {
+            proc.currentDirectoryURL = URL(fileURLWithPath: cwdVal.toString()!)
+        }
+
+        // Options: silent
+        let silent: Bool
+        if let opts = options, let silentVal = opts.forProperty("silent"), !silentVal.isUndefined {
+            silent = silentVal.toBool()
+        } else {
+            silent = false
+        }
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+
+        if silent {
+            proc.standardOutput = stdoutPipe
+            proc.standardError = stderrPipe
+        } else {
+            proc.standardOutput = FileHandle.standardOutput
+            proc.standardError = FileHandle.standardError
+        }
+
+        // Create ChildProcess JS object with EventEmitter
+        let childProcess = JSValue(newObjectIn: context)!
+        context.evaluateScript("""
+            (function(cp) {
+                cp._listeners = {};
+                cp.on = function(event, fn) {
+                    if (!cp._listeners[event]) cp._listeners[event] = [];
+                    cp._listeners[event].push(fn);
+                    return cp;
+                };
+                cp.once = function(event, fn) {
+                    fn._once = true;
+                    return cp.on(event, fn);
+                };
+                cp.emit = function(event) {
+                    var args = Array.prototype.slice.call(arguments, 1);
+                    var fns = cp._listeners[event] || [];
+                    var remaining = [];
+                    for (var i = 0; i < fns.length; i++) {
+                        fns[i].apply(cp, args);
+                        if (!fns[i]._once) remaining.push(fns[i]);
+                    }
+                    cp._listeners[event] = remaining;
+                };
+                cp.removeListener = function(event, fn) {
+                    var fns = cp._listeners[event] || [];
+                    cp._listeners[event] = fns.filter(function(f) { return f !== fn; });
+                    return cp;
+                };
+                cp.removeAllListeners = function(event) {
+                    if (event) cp._listeners[event] = [];
+                    else cp._listeners = {};
+                    return cp;
+                };
+            })
+        """)!.call(withArguments: [childProcess])
+
+        childProcess.setValue(true, forProperty: "connected")
+        childProcess.setValue(false, forProperty: "killed")
+
+        // Install buffered send/disconnect — messages are queued until IPC is connected
+        context.evaluateScript("""
+            (function(cp) {
+                cp._ipcQueue = [];
+                cp._ipcConnected = false;
+                cp.send = function(msg) {
+                    if (cp._ipcConnected && cp._ipcSend) {
+                        cp._ipcSend(msg);
+                    } else {
+                        cp._ipcQueue.push(msg);
+                    }
+                };
+                cp.disconnect = function() {
+                    if (cp._ipcDisconnect) {
+                        cp._ipcDisconnect();
+                    }
+                };
+            })
+        """)!.call(withArguments: [childProcess])
+
+        // Setup stdout/stderr if silent
+        if silent {
+            let stdout = JSValue(newObjectIn: context)!
+            context.evaluateScript("""
+                (function(s) {
+                    s._listeners = {};
+                    s.on = function(event, fn) {
+                        if (!s._listeners[event]) s._listeners[event] = [];
+                        s._listeners[event].push(fn);
+                        return s;
+                    };
+                    s.once = function(event, fn) {
+                        fn._once = true;
+                        return s.on(event, fn);
+                    };
+                    s.emit = function(event) {
+                        var args = Array.prototype.slice.call(arguments, 1);
+                        var fns = s._listeners[event] || [];
+                        var remaining = [];
+                        for (var i = 0; i < fns.length; i++) {
+                            fns[i].apply(s, args);
+                            if (!fns[i]._once) remaining.push(fns[i]);
+                        }
+                        s._listeners[event] = remaining;
+                    };
+                    s.removeListener = function(event, fn) {
+                        var fns = s._listeners[event] || [];
+                        s._listeners[event] = fns.filter(function(f) { return f !== fn; });
+                        return s;
+                    };
+                    s.pipe = function(dest) {
+                        s.on('data', function(chunk) { dest.write(chunk); });
+                        s.on('end', function() { if (typeof dest.end === 'function') dest.end(); });
+                        if (typeof dest.emit === 'function') dest.emit('pipe', s);
+                        return dest;
+                    };
+                    s.setEncoding = function(enc) { s._encoding = enc; return s; };
+                })
+            """)!.call(withArguments: [stdout])
+            childProcess.setValue(stdout, forProperty: "stdout")
+
+            let stderr = JSValue(newObjectIn: context)!
+            context.evaluateScript("""
+                (function(s) {
+                    s._listeners = {};
+                    s.on = function(event, fn) {
+                        if (!s._listeners[event]) s._listeners[event] = [];
+                        s._listeners[event].push(fn);
+                        return s;
+                    };
+                    s.once = function(event, fn) {
+                        fn._once = true;
+                        return s.on(event, fn);
+                    };
+                    s.emit = function(event) {
+                        var args = Array.prototype.slice.call(arguments, 1);
+                        var fns = s._listeners[event] || [];
+                        var remaining = [];
+                        for (var i = 0; i < fns.length; i++) {
+                            fns[i].apply(s, args);
+                            if (!fns[i]._once) remaining.push(fns[i]);
+                        }
+                        s._listeners[event] = remaining;
+                    };
+                    s.removeListener = function(event, fn) {
+                        var fns = s._listeners[event] || [];
+                        s._listeners[event] = fns.filter(function(f) { return f !== fn; });
+                        return s;
+                    };
+                    s.setEncoding = function(enc) { s._encoding = enc; return s; };
+                    s.pipe = function(dest) {
+                        s.on('data', function(chunk) { dest.write(chunk); });
+                        s.on('end', function() { if (typeof dest.end === 'function') dest.end(); });
+                        if (typeof dest.emit === 'function') dest.emit('pipe', s);
+                        return dest;
+                    };
+                })
+            """)!.call(withArguments: [stderr])
+            childProcess.setValue(stderr, forProperty: "stderr")
+        } else {
+            childProcess.setValue(JSValue(nullIn: context), forProperty: "stdout")
+            childProcess.setValue(JSValue(nullIn: context), forProperty: "stderr")
+        }
+
+        // kill method
+        let kill: @convention(block) (JSValue) -> Void = { signal in
+            proc.terminate()
+        }
+        childProcess.setValue(unsafeBitCast(kill, to: AnyObject.self), forProperty: "kill")
+
+        // Launch
+        do {
+            runtime.eventLoop.retainHandle()  // for process
+            runtime.eventLoop.retainHandle()  // for IPC channel
+            try proc.run()
+            childProcess.setValue(Int(proc.processIdentifier), forProperty: "pid")
+
+            // Accept child connection on background thread, then setup IPC on event loop
+            let capturedSocketPath = socketPath
+            DispatchQueue.global().async {
+                // Accept blocks until child connects (or process exits)
+                guard let connFD = IPCChannel.acceptConnection(serverFD: serverFD) else {
+                    Darwin.close(serverFD)
+                    unlink(capturedSocketPath)
+                    runtime.eventLoop.enqueueCallback {
+                        runtime.eventLoop.releaseHandle()  // for IPC channel
+                    }
+                    return
+                }
+                // Close server socket, no longer needed
+                Darwin.close(serverFD)
+                unlink(capturedSocketPath)
+
+                let ipcChannel = IPCChannel(fileDescriptor: connFD, eventLoop: runtime.eventLoop)
+
+                runtime.eventLoop.enqueueCallback {
+                    // Install send/disconnect now that IPC is connected
+                    self.installIPCMethods(
+                        on: childProcess, ipcChannel: ipcChannel,
+                        runtime: runtime, context: runtime.context
+                    )
+
+                    // Start reading IPC messages
+                    ipcChannel.startReading(
+                        onMessage: { jsonString in
+                            let ctx = runtime.context
+                            let parsed = ctx.evaluateScript("JSON.parse")!
+                                .call(withArguments: [jsonString])!
+                            childProcess.invokeMethod("emit", withArguments: ["message", parsed])
+                        },
+                        onDisconnect: {
+                            childProcess.setValue(false, forProperty: "connected")
+                            childProcess.invokeMethod("emit", withArguments: ["disconnect"])
+                            runtime.eventLoop.releaseHandle()  // for IPC channel
+                        }
+                    )
+                }
+            }
+
+            // Setup stdout/stderr reading if silent
+            if silent {
+                stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    if data.isEmpty {
+                        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                        runtime.eventLoop.enqueueCallback {
+                            let s = childProcess.forProperty("stdout")!
+                            s.invokeMethod("emit", withArguments: ["end"])
+                        }
+                        return
+                    }
+                    let bytes = [UInt8](data)
+                    runtime.eventLoop.enqueueCallback {
+                        let ctx = runtime.context
+                        let s = childProcess.forProperty("stdout")!
+                        let encoding = s.forProperty("_encoding")?.toString()
+                        if encoding == "utf8" || encoding == "utf-8" {
+                            let str = String(data: Data(bytes), encoding: .utf8) ?? ""
+                            s.invokeMethod("emit", withArguments: ["data", str])
+                        } else {
+                            let bufferCtor = ctx.objectForKeyedSubscript("Buffer")!
+                            let fromFn = bufferCtor.objectForKeyedSubscript("from")!
+                            let arr = bytes.map { Int($0) }
+                            let buf = fromFn.call(withArguments: [arr])!
+                            s.invokeMethod("emit", withArguments: ["data", buf])
+                        }
+                    }
+                }
+
+                stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    if data.isEmpty {
+                        stderrPipe.fileHandleForReading.readabilityHandler = nil
+                        runtime.eventLoop.enqueueCallback {
+                            let s = childProcess.forProperty("stderr")!
+                            s.invokeMethod("emit", withArguments: ["end"])
+                        }
+                        return
+                    }
+                    let bytes = [UInt8](data)
+                    runtime.eventLoop.enqueueCallback {
+                        let ctx = runtime.context
+                        let s = childProcess.forProperty("stderr")!
+                        let encoding = s.forProperty("_encoding")?.toString()
+                        if encoding == "utf8" || encoding == "utf-8" {
+                            let str = String(data: Data(bytes), encoding: .utf8) ?? ""
+                            s.invokeMethod("emit", withArguments: ["data", str])
+                        } else {
+                            let bufferCtor = ctx.objectForKeyedSubscript("Buffer")!
+                            let fromFn = bufferCtor.objectForKeyedSubscript("from")!
+                            let arr = bytes.map { Int($0) }
+                            let buf = fromFn.call(withArguments: [arr])!
+                            s.invokeMethod("emit", withArguments: ["data", buf])
+                        }
+                    }
+                }
+            }
+
+            // Termination handler
+            proc.terminationHandler = { process in
+                let code = Int(process.terminationStatus)
+                let signal: String? = process.terminationReason == .uncaughtSignal ? "SIGTERM" : nil
+                runtime.eventLoop.enqueueCallback {
+                    childProcess.setValue(true, forProperty: "killed")
+                    if let sig = signal {
+                        childProcess.invokeMethod("emit", withArguments: ["exit", code, sig])
+                        childProcess.invokeMethod("emit", withArguments: ["close", code, sig])
+                    } else {
+                        childProcess.invokeMethod("emit", withArguments: ["exit", code])
+                        childProcess.invokeMethod("emit", withArguments: ["close", code])
+                    }
+                    runtime.eventLoop.releaseHandle()  // for process
+                }
+            }
+        } catch {
+            Darwin.close(serverFD)
+            unlink(socketPath)
+            runtime.eventLoop.releaseHandle()  // for process
+            runtime.eventLoop.releaseHandle()  // for IPC channel
+            runtime.eventLoop.enqueueCallback {
+                let ctx = runtime.context
+                let err = ctx.createError("fork \(resolvedPath) ENOENT", code: "ENOENT")
+                err.setValue("fork", forProperty: "syscall")
+                err.setValue(resolvedPath, forProperty: "path")
+                childProcess.invokeMethod("emit", withArguments: ["error", err])
+                childProcess.invokeMethod("emit", withArguments: ["close", -1])
+            }
+        }
+
+        return childProcess
+    }
+
+    /// Install send() and disconnect() on a child process, flushing any queued messages.
+    private static func installIPCMethods(
+        on childProcess: JSValue, ipcChannel: IPCChannel,
+        runtime: NodeRuntime, context: JSContext
+    ) {
+        let send: @convention(block) (JSValue) -> Void = { message in
+            let ctx = JSContext.current()!
+            let jsonStr = ctx.evaluateScript("JSON.stringify")!.call(withArguments: [message])!.toString()!
+            ipcChannel.write(jsonStr)
+        }
+        childProcess.setValue(unsafeBitCast(send, to: AnyObject.self), forProperty: "_ipcSend")
+
+        let disconnect: @convention(block) () -> Void = {
+            guard !ipcChannel.isClosed else { return }
+            ipcChannel.close()
+            childProcess.setValue(false, forProperty: "connected")
+            childProcess.invokeMethod("emit", withArguments: ["disconnect"])
+            runtime.eventLoop.releaseHandle()  // for IPC channel
+        }
+        childProcess.setValue(unsafeBitCast(disconnect, to: AnyObject.self), forProperty: "_ipcDisconnect")
+
+        // Mark as connected and flush queued messages
+        childProcess.setValue(true, forProperty: "_ipcConnected")
+        context.evaluateScript("""
+            (function(cp) {
+                cp.send = function(msg) { cp._ipcSend(msg); };
+                cp.disconnect = function() { cp._ipcDisconnect(); };
+                var q = cp._ipcQueue;
+                cp._ipcQueue = [];
+                for (var i = 0; i < q.length; i++) {
+                    cp.send(q[i]);
+                }
+            })
+        """)!.call(withArguments: [childProcess])
     }
 
     // MARK: - Sync execution
