@@ -869,6 +869,74 @@ func fsWatchDetectsChange() async throws {
     #expect(messages.contains(where: { $0.hasPrefix("event:change:") || $0.hasPrefix("event:rename:") }))
 }
 
+// MARK: - fs.unlink (async) Tests
+
+@Test(.timeLimit(.minutes(1)))
+func fsUnlinkAsync() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_unlink_async_\(UUID().uuidString).txt"
+    FileManager.default.createFile(atPath: tmpPath, contents: "temp".data(using: .utf8))
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 10000);
+        fs.unlink('\(tmpPath)', function(err) {
+            clearTimeout(keepAlive);
+            if (err) { console.log('error:' + err.code); return; }
+            console.log('deleted:' + !fs.existsSync('\(tmpPath)'));
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if messages.contains(where: { $0.hasPrefix("deleted:") || $0.hasPrefix("error:") }) { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("deleted:true"))
+    #expect(!FileManager.default.fileExists(atPath: tmpPath))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fsUnlinkAsyncNotFound() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 10000);
+        fs.unlink('/nonexistent_unlink_\(UUID().uuidString).txt', function(err) {
+            clearTimeout(keepAlive);
+            if (err) { console.log('error:' + err.code); return; }
+            console.log('deleted:ok');
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if messages.contains(where: { $0.hasPrefix("error:") || $0.hasPrefix("deleted:") }) { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("error:ENOENT"))
+}
+
 @Test func fsUtimesSyncWithNumber() async throws {
     let runtime = NodeRuntime()
     let tmpPath = NSTemporaryDirectory() + "nodecore_test_utimes_\(UUID().uuidString).txt"
