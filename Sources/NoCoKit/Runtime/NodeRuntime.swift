@@ -687,5 +687,68 @@ public final class NodeRuntime: @unchecked Sendable {
 
         // WebAPIModule depends on Blob (for File extends Blob), so install after Blob
         WebAPIModule.install(in: context, runtime: self)
+
+        // Setup child-side IPC if NODE_CHANNEL_PATH is set
+        #if os(macOS)
+        if let socketPath = ProcessInfo.processInfo.environment["NODE_CHANNEL_PATH"] {
+            setupChildIPC(socketPath: socketPath)
+        }
+        #endif
     }
+
+    #if os(macOS)
+    /// Setup IPC channel for the child side of a fork().
+    /// Connects to the parent's Unix domain socket, then installs
+    /// `process.send()`, `process.disconnect()`, `process.connected`,
+    /// and delivers incoming messages via `process.emit('message', data)`.
+    private func setupChildIPC(socketPath: String) {
+        guard let fd = IPCChannel.connectTo(path: socketPath) else { return }
+        let ipcChannel = IPCChannel(fileDescriptor: fd, eventLoop: eventLoop)
+        let process = context.objectForKeyedSubscript("process")!
+
+        process.setValue(true, forProperty: "connected")
+
+        // process.send(message)
+        let send: @convention(block) (JSValue) -> Void = { [weak self] message in
+            guard let self else { return }
+            let jsonStr = self.context.evaluateScript("JSON.stringify")!
+                .call(withArguments: [message])!.toString()!
+            ipcChannel.write(jsonStr)
+        }
+        process.setValue(unsafeBitCast(send, to: AnyObject.self), forProperty: "send")
+
+        // process.disconnect()
+        let disconnect: @convention(block) () -> Void = { [weak self] in
+            guard !ipcChannel.isClosed else { return }
+            ipcChannel.close()
+            let p = self?.context.objectForKeyedSubscript("process")
+            p?.setValue(false, forProperty: "connected")
+            p?.invokeMethod("emit", withArguments: ["disconnect"])
+            self?.eventLoop.releaseHandle()
+        }
+        process.setValue(unsafeBitCast(disconnect, to: AnyObject.self), forProperty: "disconnect")
+
+        // Retain handle to keep event loop alive while IPC is open
+        eventLoop.retainHandle()
+
+        // Start reading IPC messages (delivered via enqueueCallback, so safe after EventEmitter init)
+        ipcChannel.startReading(
+            onMessage: { [weak self] jsonString in
+                guard let self else { return }
+                let ctx = self.context
+                let parsed = ctx.evaluateScript("JSON.parse")!
+                    .call(withArguments: [jsonString])!
+                let p = ctx.objectForKeyedSubscript("process")!
+                p.invokeMethod("emit", withArguments: ["message", parsed])
+            },
+            onDisconnect: { [weak self] in
+                guard let self else { return }
+                let p = self.context.objectForKeyedSubscript("process")!
+                p.setValue(false, forProperty: "connected")
+                p.invokeMethod("emit", withArguments: ["disconnect"])
+                self.eventLoop.releaseHandle()
+            }
+        )
+    }
+    #endif
 }
