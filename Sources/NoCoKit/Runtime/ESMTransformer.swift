@@ -461,15 +461,7 @@ public enum ESMTransformer {
         exc = buildExcludedRanges(in: result)
 
         // export const/let/var
-        result = applyRegex(
-            /(?:^|\n|;)\s*export\s+((?:const|let|var)\s+.+)/,
-            to: result, excluded: exc
-        ) { match in
-            let decl = String(match.output.1)
-            let names = extractDeclaredNames(from: decl)
-            let exports = names.map { "__esm_export(module, '\($0)', function() { return \($0); });" }
-            return "\(decl)\n\(exports.joined(separator: "\n"))"
-        }
+        result = transformExportVarDeclarations(result, excluded: exc)
         exc = buildExcludedRanges(in: result)
 
         // export { a, b }  (local re-export, no 'from')
@@ -486,6 +478,130 @@ public enum ESMTransformer {
                 }
                 return "__esm_export(module, '\(tokens[0])', function() { return \(tokens[0]); });"
             }.joined(separator: "\n")
+        }
+
+        return result
+    }
+
+    /// Transform `export const/let/var` declarations, handling minified code where
+    /// multiple export statements appear on the same line separated by semicolons.
+    /// Uses bracket-depth tracking to find statement boundaries instead of greedy `.+`.
+    private static func transformExportVarDeclarations(_ source: String, excluded: [ExcludedRange]) -> String {
+        let headerPattern = /(?:^|\n|;)\s*export\s+(?:const|let|var)\s+/
+        let matches = source.matches(of: headerPattern)
+        guard !matches.isEmpty else { return source }
+
+        var result = source
+        // Process in reverse to preserve offsets
+        for match in matches.reversed() {
+            let utf16Offset = source.utf16.distance(from: source.startIndex, to: match.range.lowerBound)
+            if isInExcluded(utf16Offset, excluded) { continue }
+
+            // Skip the leading separator (newline or semicolon)
+            let matchStr = String(source[match.range])
+            var replaceStart = match.range.lowerBound
+            if let first = matchStr.first, first == "\n" || first == ";" {
+                replaceStart = source.index(after: replaceStart)
+            }
+            // Skip leading whitespace after separator
+            while replaceStart < source.endIndex && (source[replaceStart] == " " || source[replaceStart] == "\t") {
+                replaceStart = source.index(after: replaceStart)
+            }
+
+            // Find the "export " prefix end — we need to skip past "export " to get the declaration
+            let afterExport = match.range.upperBound  // points to right after "const/let/var "
+
+            // Find the end of this statement by tracking bracket depth
+            var depth = 0
+            var i = afterExport
+            var inSingleQuote = false
+            var inDoubleQuote = false
+            var inTemplate = false
+            var prevChar: Character = " "
+            while i < source.endIndex {
+                let ch = source[i]
+                if !inSingleQuote && !inDoubleQuote && !inTemplate {
+                    if ch == "'" { inSingleQuote = true }
+                    else if ch == "\"" { inDoubleQuote = true }
+                    else if ch == "`" { inTemplate = true }
+                    else if ch == "(" || ch == "[" || ch == "{" { depth += 1 }
+                    else if ch == ")" || ch == "]" || ch == "}" {
+                        depth -= 1
+                        if depth < 0 { break }
+                    }
+                    else if depth == 0 {
+                        if ch == ";" { break }
+                        if ch == "\n" {
+                            // Check if next non-whitespace is a new statement (not a continuation)
+                            var j = source.index(after: i)
+                            while j < source.endIndex && (source[j] == " " || source[j] == "\t") {
+                                j = source.index(after: j)
+                            }
+                            // If the next token starts with a keyword/identifier that looks like
+                            // a new statement, break here
+                            if j < source.endIndex {
+                                let remaining = source[j...]
+                                if remaining.hasPrefix("export ") || remaining.hasPrefix("import ") ||
+                                   remaining.hasPrefix("//") || remaining.hasPrefix("/*") {
+                                    break
+                                }
+                            }
+                        }
+                    }
+                } else if inSingleQuote {
+                    if ch == "'" && prevChar != "\\" { inSingleQuote = false }
+                } else if inDoubleQuote {
+                    if ch == "\"" && prevChar != "\\" { inDoubleQuote = false }
+                } else if inTemplate {
+                    if ch == "`" && prevChar != "\\" { inTemplate = false }
+                }
+                prevChar = ch
+                i = source.index(after: i)
+            }
+
+            let stmtEnd = i
+            let fullDecl = String(source[afterExport..<stmtEnd])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Get just the declaration part (without "export ")
+            // afterExport already points past "export const/let/var "
+            // But we need the keyword for the output
+            let exportAndDecl = String(source[replaceStart..<stmtEnd])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // Remove trailing semicolon for clean processing
+            let declForNames: String
+            if exportAndDecl.hasSuffix(";") {
+                declForNames = String(fullDecl.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                declForNames = fullDecl
+            }
+
+            // Extract the const/let/var keyword + rest for name extraction
+            let keywordAndRest: String
+            if let spaceIdx = exportAndDecl.dropFirst("export ".count).firstIndex(of: " ") {
+                // "export const foo = 1" -> "const foo = 1"
+                keywordAndRest = String(exportAndDecl.dropFirst("export ".count))
+            } else {
+                keywordAndRest = String(exportAndDecl.dropFirst("export ".count))
+            }
+
+            let names = extractDeclaredNames(from: keywordAndRest)
+            let exports = names.map { "__esm_export(module, '\($0)', function() { return \($0); });" }
+
+            // Build replacement: remove "export " prefix, keep the declaration, append exports
+            let declOnly = String(exportAndDecl.dropFirst("export ".count))
+            let replacement = "\(declOnly)\n\(exports.joined(separator: "\n"))"
+
+            // Replace in result using the corresponding positions
+            let resultReplaceStart = result.utf16.index(
+                result.utf16.startIndex,
+                offsetBy: source.utf16.distance(from: source.startIndex, to: replaceStart)
+            )
+            let resultReplaceEnd = result.utf16.index(
+                result.utf16.startIndex,
+                offsetBy: source.utf16.distance(from: source.startIndex, to: stmtEnd)
+            )
+            result.replaceSubrange(resultReplaceStart..<resultReplaceEnd, with: replacement)
         }
 
         return result
