@@ -311,6 +311,19 @@ public struct CryptoModule: NodeModule {
         }
         crypto.setValue(unsafeBitCast(randomFillSync, to: AnyObject.self), forProperty: "randomFillSync")
 
+        // crypto.getRandomValues(typedArray) — Web Crypto compatible
+        let getRandomValues: @convention(block) (JSValue) -> JSValue = { typedArray in
+            let length = Int(typedArray.forProperty("length")?.toInt32() ?? 0)
+            guard length > 0 else { return typedArray }
+            var bytes = [UInt8](repeating: 0, count: length)
+            _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+            for i in 0..<length {
+                typedArray.setValue(Int(bytes[i]), at: i)
+            }
+            return typedArray
+        }
+        crypto.setValue(unsafeBitCast(getRandomValues, to: AnyObject.self), forProperty: "getRandomValues")
+
         // crypto.randomUUID()
         let randomUUID: @convention(block) () -> String = {
             UUID().uuidString.lowercased()
