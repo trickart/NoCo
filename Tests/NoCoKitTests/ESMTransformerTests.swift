@@ -252,6 +252,48 @@ import Testing
     #expect(result.contains("import_meta.url"))
 }
 
+// MARK: - Minified export const/let/var on same line
+
+@Test func transformMultipleExportVarOnSameLine() async throws {
+    let source = "export var Foo = 42; export const bar = 1;"
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("__esm_export(module, 'Foo', function() { return Foo; })"))
+    #expect(result.contains("__esm_export(module, 'bar', function() { return bar; })"))
+    #expect(!result.contains("export var"))
+    #expect(!result.contains("export const"))
+}
+
+@Test func transformMultipleExportOnSameLineSemicolonSeparated() async throws {
+    let source = "export const a = 1;export let b = 2;export var c = 3;"
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("__esm_export(module, 'a', function() { return a; })"))
+    #expect(result.contains("__esm_export(module, 'b', function() { return b; })"))
+    #expect(result.contains("__esm_export(module, 'c', function() { return c; })"))
+}
+
+@Test func transformExportConstWithComplexExpression() async throws {
+    // export const with a function call containing parentheses
+    let source = "export const init = WebAssembly.compile(E()).then(f); export const parse = doSomething();"
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("__esm_export(module, 'init', function() { return init; })"))
+    #expect(result.contains("__esm_export(module, 'parse', function() { return parse; })"))
+}
+
+@Test func transformExportVarWithIIFE() async throws {
+    // export var followed by IIFE (like es-module-lexer's ImportType pattern)
+    let source = "export var ImportType;!function(A){A[A.Static=1]=\"Static\"}(ImportType||(ImportType={})); export const foo = 1;"
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("__esm_export(module, 'ImportType', function() { return ImportType; })"))
+    #expect(result.contains("__esm_export(module, 'foo', function() { return foo; })"))
+}
+
+@Test func transformExportConstWithNestedBrackets() async throws {
+    let source = "export const obj = {a: [1, 2], b: {c: 3}}; export const x = 1;"
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("__esm_export(module, 'obj', function() { return obj; })"))
+    #expect(result.contains("__esm_export(module, 'x', function() { return x; })"))
+}
+
 // MARK: - __esModule marker
 
 @Test func addsEsModuleMarker() async throws {
