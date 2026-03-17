@@ -183,3 +183,63 @@ private func fixtureDir() -> String {
     """)
     #expect(result?.toString() == "function")
 }
+
+// MARK: - file:// URL Import
+
+@Test func esmImportFileUrl() async throws {
+    let runtime = NodeRuntime()
+    let tmpPath = NSTemporaryDirectory() + "noco_test_esm_fileurl_\(UUID().uuidString).mjs"
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    try "exports.answer = 42;".write(toFile: tmpPath, atomically: true, encoding: .utf8)
+
+    let fileUrl = "file://\(tmpPath)"
+    let result = runtime.evaluate("""
+        (function() {
+            var m = __esm_import('\(fileUrl)', '/tmp');
+            return m.answer;
+        })()
+    """)
+    #expect(result?.toInt32() == 42)
+}
+
+@Test func esmImportFileUrlWithSpaces() async throws {
+    let runtime = NodeRuntime()
+    let dir = NSTemporaryDirectory() + "noco test spaces \(UUID().uuidString)"
+    try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    let tmpPath = dir + "/mod.js"
+    defer { try? FileManager.default.removeItem(atPath: dir) }
+
+    try "exports.val = 'ok';".write(toFile: tmpPath, atomically: true, encoding: .utf8)
+
+    // file:// URLs encode spaces as %20
+    let fileUrl = URL(fileURLWithPath: tmpPath).absoluteString
+    let result = runtime.evaluate("""
+        (function() {
+            var m = __esm_import('\(fileUrl)', '/tmp');
+            return m.val;
+        })()
+    """)
+    #expect(result?.toString() == "ok")
+}
+
+@Test func dynamicImportFileUrl() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_dyn_fileurl_\(UUID().uuidString).mjs"
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    try "exports.x = 99;".write(toFile: tmpPath, atomically: true, encoding: .utf8)
+
+    let fileUrl = URL(fileURLWithPath: tmpPath).absoluteString
+    runtime.evaluate("""
+        __importDynamic('\(fileUrl)', '/tmp').then(function(m) {
+            console.log('val:' + m.x);
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("val:99"))
+}

@@ -13,9 +13,16 @@ public enum ESMRuntime {
 
             let loader = runtime.moduleLoader!
 
-            // Strip node: prefix
+            // Convert file:// URLs to filesystem paths
             let resolved: String
-            if specifier.hasPrefix("node:") {
+            if specifier.hasPrefix("file://") {
+                if let url = URL(string: specifier), url.scheme == "file" {
+                    resolved = url.path
+                } else {
+                    resolved = String(specifier.dropFirst(7))
+                }
+            } else if specifier.hasPrefix("node:") {
+                // Strip node: prefix
                 resolved = String(specifier.dropFirst(5))
             } else {
                 resolved = specifier
