@@ -288,6 +288,34 @@ public struct FSModule: NodeModule {
         }
         fs.setValue(unsafeBitCast(unlinkSync, to: AnyObject.self), forProperty: "unlinkSync")
 
+        // fs.unlink(path, callback)
+        let unlink: @convention(block) (String, JSValue) -> Void = { [weak runtime] path, callback in
+            guard let resolved = validateWrite(path) else { return }
+            guard let runtime = runtime else { return }
+            DispatchQueue.global().async {
+                let localFm = FileManager.default
+                do {
+                    try localFm.removeItem(atPath: resolved)
+                    runtime.eventLoop.enqueueCallback {
+                        if !callback.isUndefined {
+                            callback.call(withArguments: [JSValue(nullIn: context)!])
+                        }
+                    }
+                } catch {
+                    runtime.eventLoop.enqueueCallback {
+                        let err = context.createSystemError(
+                            "ENOENT: no such file or directory, unlink '\(path)'",
+                            code: "ENOENT", syscall: "unlink", path: path
+                        )
+                        if !callback.isUndefined {
+                            callback.call(withArguments: [err as Any])
+                        }
+                    }
+                }
+            }
+        }
+        fs.setValue(unsafeBitCast(unlink, to: AnyObject.self), forProperty: "unlink")
+
         // fs.rmdirSync(path)
         let rmdirSync: @convention(block) (String, JSValue) -> Void = { path, options in
             guard let resolved = validateWrite(path) else { return }
