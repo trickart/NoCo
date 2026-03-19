@@ -265,3 +265,36 @@ private func fixtureDir() -> String {
     let value = exports.forProperty("value")?.toInt32()
     #expect(value == 42)
 }
+
+@Test func topLevelAwaitStaticImport() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let path = fixtureDir() + "/tla-import-chain.mjs"
+    let exports = runtime.moduleLoader.loadFile(at: path)
+
+    #expect(messages.contains("chain:99"))
+    let value = exports.forProperty("value")?.toInt32()
+    #expect(value == 99)
+}
+
+@Test func topLevelAwaitMultiImport() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let path = fixtureDir() + "/tla-multi-chain.mjs"
+    runtime.moduleLoader.loadFile(at: path)
+
+    #expect(messages.contains("multi:99:hello"))
+}
+
+@Test func topLevelAwaitReexport() async throws {
+    let runtime = NodeRuntime()
+    let path = fixtureDir() + "/tla-reexport.mjs"
+    let exports = runtime.moduleLoader.loadFile(at: path)
+
+    let value = exports.forProperty("value")?.toInt32()
+    #expect(value == 99)
+}

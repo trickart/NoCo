@@ -7,6 +7,7 @@ public final class ModuleLoader {
     private weak var runtime: NodeRuntime?
     private var moduleCache: [String: JSValue] = [:]
     private var loadingModules: [String: JSValue] = [:]
+    private var loadFileDepth: Int = 0
 
     init(runtime: NodeRuntime) {
         self.runtime = runtime
@@ -198,6 +199,9 @@ public final class ModuleLoader {
             return JSValue(undefinedIn: JSContext.current())
         }
 
+        loadFileDepth += 1
+        defer { loadFileDepth -= 1 }
+
         // Check cache by absolute path
         if let cached = moduleCache[path] {
             return cached
@@ -267,12 +271,19 @@ public final class ModuleLoader {
             transformedSource = ESMTransformer.transformDynamicImport(jsSource)
         }
 
+        // ESM 静的インポートの事前ロード: モジュール実行前に TLA 依存を解決
+        // evaluateScript("void 0") による microtask drain は JS コールバック内では動作しないため、
+        // 純粋な Swift コンテキストでインポート先を事前にロード・drain しておく
+        let isESM = ESMDetector.shared.isESM(path: path)
+        if isESM {
+            preloadStaticImports(source: jsSource, basedir: dirname, context: context)
+        }
+
         // Wrap in CommonJS function (no leading newline to preserve line numbers)
         // ESM files may declare their own const __dirname/__filename (e.g. from import.meta.url),
         // which conflicts with wrapper parameters. Use unique names for ESM files.
         let wrapped: String
-        let isESM = ESMDetector.shared.isESM(path: path)
-        let hasTLA = isESM && ESMTransformer.containsTopLevelAwait(transformedSource)
+        let hasTLA = isESM && ESMTransformer.containsTopLevelAwait(jsSource)
         if isESM {
             if hasTLA {
                 wrapped = "(async function(exports, require, module, __noco_filename__, __noco_dirname__) {\(transformedSource)\n})"
@@ -386,34 +397,48 @@ public final class ModuleLoader {
 
         // For top-level await modules, synchronously drain microtasks to resolve the Promise
         if hasTLA, let promise = result, !promise.isUndefined {
-            var settled = false
-            var rejected = false
-            var rejectionError: JSValue?
+            if loadFileDepth == 1 {
+                // トップレベル: microtask drain が動作する
+                var settled = false
+                var rejected = false
+                var rejectionError: JSValue?
 
-            let thenBlock: @convention(block) (JSValue) -> Void = { _ in
-                settled = true
-            }
-            let catchBlock: @convention(block) (JSValue) -> Void = { err in
-                settled = true
-                rejected = true
-                rejectionError = err
-            }
+                let thenBlock: @convention(block) (JSValue) -> Void = { _ in
+                    settled = true
+                }
+                let catchBlock: @convention(block) (JSValue) -> Void = { err in
+                    settled = true
+                    rejected = true
+                    rejectionError = err
+                }
 
-            promise.invokeMethod("then", withArguments: [
-                unsafeBitCast(thenBlock, to: AnyObject.self),
-            ])
-            promise.invokeMethod("catch", withArguments: [
-                unsafeBitCast(catchBlock, to: AnyObject.self),
-            ])
+                promise.invokeMethod("then", withArguments: [
+                    unsafeBitCast(thenBlock, to: AnyObject.self),
+                ])
+                promise.invokeMethod("catch", withArguments: [
+                    unsafeBitCast(catchBlock, to: AnyObject.self),
+                ])
 
-            // Drain microtasks (evaluateScript("void 0") flushes the JSC microtask queue)
-            for _ in 0..<10 {
-                context.evaluateScript("void 0")
-                if settled { break }
-            }
+                // Drain microtasks (evaluateScript("void 0") flushes the JSC microtask queue)
+                for _ in 0..<10 {
+                    context.evaluateScript("void 0")
+                    if settled { break }
+                }
 
-            if rejected, let err = rejectionError {
-                context.exception = err
+                if rejected, let err = rejectionError {
+                    context.exception = err
+                }
+            } else {
+                // ネストされた呼び出し: drain はスキップし、Promise をチェインして module.exports を返す
+                let thenBlock: @convention(block) (JSValue) -> JSValue = { _ in
+                    return module.forProperty("exports") ?? exports
+                }
+                let exportsPromise = promise.invokeMethod("then", withArguments: [
+                    unsafeBitCast(thenBlock, to: AnyObject.self),
+                ])!
+                loadingModules.removeValue(forKey: path)
+                moduleCache[path] = exportsPromise
+                return exportsPromise
             }
         }
 
@@ -694,6 +719,108 @@ public final class ModuleLoader {
         """
         let factory = context.evaluateScript(script)!
         return factory.call(withArguments: [fsModule])!
+    }
+
+    /// ESM 静的インポートの事前ロード
+    /// モジュール実行前に依存モジュールをロードし、TLA Promise を drain する。
+    /// JS コールバック外の純粋な Swift コンテキストで呼ばれるため、drain が動作する。
+    private func preloadStaticImports(source: String, basedir: String, context: JSContext) {
+        let specifiers = Self.extractStaticImportSpecifiers(source)
+        for spec in specifiers {
+            // ビルトインモジュールはスキップ（同期的にロードされる）
+            if spec.hasPrefix("node:") || (!spec.hasPrefix(".") && !spec.hasPrefix("/") && !spec.hasPrefix("#")) {
+                if let runtime = runtime, runtime.registeredModules[spec] != nil {
+                    continue
+                }
+                if spec == "process" || spec == "console" {
+                    continue
+                }
+            }
+
+            // パスを解決
+            let resolvedPath: String?
+            let cleanSpec = spec.hasPrefix("node:") ? String(spec.dropFirst(5)) : spec
+            if cleanSpec.hasPrefix("#") {
+                resolvedPath = resolvePrivateImport(cleanSpec, from: basedir)
+            } else if cleanSpec.hasPrefix(".") || cleanSpec.hasPrefix("/") {
+                resolvedPath = resolveRelativePath(cleanSpec, from: basedir)
+            } else {
+                // ビルトインチェック
+                if let runtime = runtime, runtime.registeredModules[cleanSpec] != nil {
+                    continue
+                }
+                resolvedPath = resolveNodeModules(cleanSpec, from: basedir, esmContext: true)
+            }
+
+            guard let path = resolvedPath else { continue }
+
+            // すでにキャッシュ済み（かつ Promise でない）ならスキップ
+            if let cached = moduleCache[path] {
+                if !Self.isThenable(cached) { continue }
+            }
+
+            // ロード
+            let result = loadFile(at: path)
+
+            // TLA Promise の drain
+            if Self.isThenable(result) {
+                var settled = false
+                var resolvedExports: JSValue?
+                let onResolve: @convention(block) (JSValue) -> Void = { val in
+                    settled = true
+                    resolvedExports = val
+                }
+                let onReject: @convention(block) (JSValue) -> Void = { _ in
+                    settled = true
+                }
+                result.invokeMethod("then", withArguments: [
+                    unsafeBitCast(onResolve, to: AnyObject.self),
+                    unsafeBitCast(onReject, to: AnyObject.self),
+                ])
+                for _ in 0..<30 {
+                    context.evaluateScript("void 0")
+                    if settled { break }
+                }
+                // 解決済みなら exports でキャッシュを更新（Promise から解決値へ）
+                if settled, let exports = resolvedExports {
+                    moduleCache[path] = exports
+                }
+            }
+        }
+    }
+
+    /// JSValue が thenable (Promise) かチェック
+    private static func isThenable(_ value: JSValue) -> Bool {
+        guard value.isObject else { return false }
+        guard let thenFn = value.forProperty("then") else { return false }
+        return thenFn.isObject && !thenFn.isUndefined
+    }
+
+    /// ESM ソースから静的インポートの specifier を抽出
+    static func extractStaticImportSpecifiers(_ source: String) -> [String] {
+        var specifiers: [String] = []
+        // import ... from 'specifier'
+        let importFromPattern = /import\s+(?:[\s\S]*?)\s+from\s*['"]([\s\S]*?)['"]/
+        for match in source.matches(of: importFromPattern) {
+            specifiers.append(String(match.output.1))
+        }
+        // import 'specifier' (side-effect only)
+        let importOnlyPattern = /(?:^|\n|;)\s*import\s*['"]([^'"]+)['"]/
+        for match in source.matches(of: importOnlyPattern) {
+            specifiers.append(String(match.output.1))
+        }
+        // export { ... } from 'specifier'
+        let reexportPattern = /export\s*\{[^}]*\}\s*from\s*['"]([^'"]+)['"]/
+        for match in source.matches(of: reexportPattern) {
+            specifiers.append(String(match.output.1))
+        }
+        // export * from 'specifier'
+        let starReexportPattern = /export\s*\*\s*from\s*['"]([^'"]+)['"]/
+        for match in source.matches(of: starReexportPattern) {
+            specifiers.append(String(match.output.1))
+        }
+        // 重複排除
+        return Array(Set(specifiers))
     }
 
     /// Clear the module cache.
