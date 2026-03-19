@@ -711,9 +711,10 @@ public final class NodeRuntime: @unchecked Sendable {
         // process.send(message)
         let send: @convention(block) (JSValue) -> Void = { [weak self] message in
             guard let self else { return }
-            let jsonStr = self.context.evaluateScript("JSON.stringify")!
-                .call(withArguments: [message])!.toString()!
-            ipcChannel.write(jsonStr)
+            let jsonResult = self.context.evaluateScript("JSON.stringify")!
+                .call(withArguments: [message])!
+            guard !jsonResult.isUndefined else { return }
+            ipcChannel.write(jsonResult.toString())
         }
         process.setValue(unsafeBitCast(send, to: AnyObject.self), forProperty: "send")
 
