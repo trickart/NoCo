@@ -171,3 +171,73 @@ import Synchronization
     let expected = (0..<10).map { "callback-\($0)" }
     #expect(messages.withLock { $0 } == expected)
 }
+
+// MARK: - Microtask drain before loop tests
+
+@Test func promiseResolveThenRegistersTimer() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        Promise.resolve().then(function() {
+            setTimeout(function() { console.log('from-promise'); }, 10);
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("from-promise"))
+}
+
+@Test func asyncFireAndForgetRegistersWork() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        (async function() {
+            setTimeout(function() { console.log('from-async'); }, 10);
+        })();
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("from-async"))
+}
+
+@Test func multipleAwaitChainRegistersWork() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        (async function() {
+            await Promise.resolve(1);
+            await Promise.resolve(2);
+            setTimeout(function() { console.log('after-awaits'); }, 10);
+        })();
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("after-awaits"))
+}
+
+@Test func promiseChainWithNextTick() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        Promise.resolve().then(function() {
+            console.log('promise');
+            process.nextTick(function() {
+                console.log('nextTick');
+                setTimeout(function() { console.log('timeout'); }, 10);
+            });
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("promise"))
+    #expect(messages.contains("nextTick"))
+    #expect(messages.contains("timeout"))
+}
