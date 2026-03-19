@@ -192,7 +192,7 @@ public struct NetModule: NodeModule {
                 }
                 var arr = [];
                 for (var i = 0; i < buf.length; i++) {
-                    arr.push(buf._data ? buf._data[i] : buf[i]);
+                    arr.push(buf[i]);
                 }
                 return __netWrite(this._socketId, arr, callback || null);
             };

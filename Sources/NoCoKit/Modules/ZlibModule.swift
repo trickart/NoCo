@@ -63,8 +63,7 @@ public struct ZlibModule: NodeModule {
             let ctx = JSContext.current()!
             let bufferCtor = ctx.objectForKeyedSubscript("Buffer" as NSString)!
 
-            guard let dataArr = bufVal.forProperty("_data"),
-                  let inputBytes = extractUint8Array(dataArr, in: ctx),
+            guard let inputBytes = extractUint8Array(bufVal, in: ctx),
                   !inputBytes.isEmpty else {
                 ctx.exception = JSValue(newErrorFromMessage: "deflateSync: invalid input", in: ctx)
                 return JSValue(undefinedIn: ctx)
@@ -88,8 +87,7 @@ public struct ZlibModule: NodeModule {
             let ctx = JSContext.current()!
             let bufferCtor = ctx.objectForKeyedSubscript("Buffer" as NSString)!
 
-            guard let dataArr = bufVal.forProperty("_data"),
-                  let inputBytes = extractUint8Array(dataArr, in: ctx),
+            guard let inputBytes = extractUint8Array(bufVal, in: ctx),
                   !inputBytes.isEmpty else {
                 ctx.exception = JSValue(newErrorFromMessage: "inflateSync: invalid input", in: ctx)
                 return JSValue(undefinedIn: ctx)
@@ -268,12 +266,7 @@ public struct ZlibModule: NodeModule {
                 this._handle = {
                     writeSync: function(flushFlag, chunk, inOff, inLen, outBuf, outOff, outLen) {
                         var inData;
-                        if (chunk && chunk._data) {
-                            inData = [];
-                            for (var i = inOff; i < inOff + inLen; i++) {
-                                inData.push(chunk._data[i]);
-                            }
-                        } else if (chunk) {
+                        if (chunk) {
                             inData = [];
                             for (var i = inOff; i < inOff + inLen; i++) {
                                 inData.push(chunk[i] || 0);
@@ -291,11 +284,7 @@ public struct ZlibModule: NodeModule {
                         var have = outBytes.length;
                         if (have > outLen) have = outLen;
                         for (var i = 0; i < have; i++) {
-                            if (outBuf._data) {
-                                outBuf._data[outOff + i] = outBytes[i];
-                            } else {
-                                outBuf[outOff + i] = outBytes[i];
-                            }
+                            outBuf[outOff + i] = outBytes[i];
                         }
                         var availInAfter = result.availIn;
                         var availOutAfter = outLen - have;
@@ -518,8 +507,7 @@ public struct ZlibModule: NodeModule {
         return { bufVal in
             let ctx = JSContext.current()!
             let bufferCtor = ctx.objectForKeyedSubscript("Buffer" as NSString)!
-            guard let dataArr = bufVal.forProperty("_data"),
-                  let inputBytes = extractUint8Array(dataArr, in: ctx),
+            guard let inputBytes = extractUint8Array(bufVal, in: ctx),
                   let compressed = performDeflate(inputBytes) else {
                 return JSValue(nullIn: ctx)
             }
@@ -536,8 +524,7 @@ public struct ZlibModule: NodeModule {
         return { bufVal in
             let ctx = JSContext.current()!
             let bufferCtor = ctx.objectForKeyedSubscript("Buffer" as NSString)!
-            guard let dataArr = bufVal.forProperty("_data"),
-                  let inputBytes = extractUint8Array(dataArr, in: ctx),
+            guard let inputBytes = extractUint8Array(bufVal, in: ctx),
                   let decompressed = performInflate(inputBytes) else {
                 return JSValue(nullIn: ctx)
             }

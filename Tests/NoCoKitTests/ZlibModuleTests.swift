@@ -100,10 +100,24 @@ import JavaScriptCore
     var messages: [(NodeRuntime.ConsoleLevel, String)] = []
     runtime.consoleHandler = { level, msg in messages.append((level, msg)) }
 
+    // Node.js accepts strings as input to deflateSync (auto-converts to Buffer)
     runtime.evaluate("""
         var zlib = require('zlib');
         try {
             zlib.deflateSync('not a buffer');
+            console.log('no-error');
+        } catch(e) {
+            console.log('error:' + e.message);
+        }
+    """)
+    #expect(messages.contains(where: { $0.1.contains("no-error") }))
+
+    // But truly invalid input (empty/null) should error
+    messages.removeAll()
+    runtime.evaluate("""
+        var zlib = require('zlib');
+        try {
+            zlib.deflateSync(null);
             console.log('no-error');
         } catch(e) {
             console.log('error:' + e.message);

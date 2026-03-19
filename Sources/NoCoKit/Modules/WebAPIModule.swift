@@ -1300,7 +1300,7 @@ public struct WebAPIModule {
                     } else if (body instanceof ArrayBuffer) {
                         bodyBytes = new Uint8Array(body);
                     } else if (typeof Buffer !== 'undefined' && body instanceof Buffer) {
-                        bodyBytes = body._data || new Uint8Array(0);
+                        bodyBytes = body;
                     } else if (typeof Blob !== 'undefined' && body instanceof Blob) {
                         bodyBytes = body._data || new Uint8Array(0);
                     }
