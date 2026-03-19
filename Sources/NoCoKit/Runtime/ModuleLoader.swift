@@ -271,8 +271,14 @@ public final class ModuleLoader {
         // ESM files may declare their own const __dirname/__filename (e.g. from import.meta.url),
         // which conflicts with wrapper parameters. Use unique names for ESM files.
         let wrapped: String
-        if ESMDetector.shared.isESM(path: path) {
-            wrapped = "(function(exports, require, module, __noco_filename__, __noco_dirname__) {\(transformedSource)\n})"
+        let isESM = ESMDetector.shared.isESM(path: path)
+        let hasTLA = isESM && ESMTransformer.containsTopLevelAwait(transformedSource)
+        if isESM {
+            if hasTLA {
+                wrapped = "(async function(exports, require, module, __noco_filename__, __noco_dirname__) {\(transformedSource)\n})"
+            } else {
+                wrapped = "(function(exports, require, module, __noco_filename__, __noco_dirname__) {\(transformedSource)\n})"
+            }
         } else {
             wrapped = "(function(exports, require, module, __filename, __dirname) {\(transformedSource)\n})"
         }
@@ -370,13 +376,46 @@ public final class ModuleLoader {
             unsafeBitCast(localResolvePathsBlock, to: AnyObject.self),
         ])
 
-        fn.call(withArguments: [
+        let result = fn.call(withArguments: [
             exports,
             localRequireObj,
             module,
             path,
             dirname,
         ])
+
+        // For top-level await modules, synchronously drain microtasks to resolve the Promise
+        if hasTLA, let promise = result, !promise.isUndefined {
+            var settled = false
+            var rejected = false
+            var rejectionError: JSValue?
+
+            let thenBlock: @convention(block) (JSValue) -> Void = { _ in
+                settled = true
+            }
+            let catchBlock: @convention(block) (JSValue) -> Void = { err in
+                settled = true
+                rejected = true
+                rejectionError = err
+            }
+
+            promise.invokeMethod("then", withArguments: [
+                unsafeBitCast(thenBlock, to: AnyObject.self),
+            ])
+            promise.invokeMethod("catch", withArguments: [
+                unsafeBitCast(catchBlock, to: AnyObject.self),
+            ])
+
+            // Drain microtasks (evaluateScript("void 0") flushes the JSC microtask queue)
+            for _ in 0..<10 {
+                context.evaluateScript("void 0")
+                if settled { break }
+            }
+
+            if rejected, let err = rejectionError {
+                context.exception = err
+            }
+        }
 
         // If an exception occurred during module loading, remove from loading
         // and let it propagate (don't log here — the top-level caller will).

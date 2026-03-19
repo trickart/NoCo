@@ -301,3 +301,61 @@ import Testing
     let result = ESMTransformer.transform(source)
     #expect(result.contains("Object.defineProperty(module.exports, '__esModule', {value: true})"))
 }
+
+// MARK: - Top-Level Await Detection
+
+@Test func detectTopLevelAwait() async throws {
+    let source = "const x = await fetch('/api');"
+    #expect(ESMTransformer.containsTopLevelAwait(source) == true)
+}
+
+@Test func detectTopLevelAwaitWithDynamicImport() async throws {
+    let source = "const m = await import('./foo.mjs');"
+    #expect(ESMTransformer.containsTopLevelAwait(source) == true)
+}
+
+@Test func noTopLevelAwaitInsideFunction() async throws {
+    let source = "async function f() { await p; }"
+    #expect(ESMTransformer.containsTopLevelAwait(source) == false)
+}
+
+@Test func noTopLevelAwaitInsideArrow() async throws {
+    let source = "const f = async () => { await p; };"
+    #expect(ESMTransformer.containsTopLevelAwait(source) == false)
+}
+
+@Test func noTopLevelAwaitInsideMethod() async throws {
+    let source = "class Foo { async bar() { await p; } }"
+    #expect(ESMTransformer.containsTopLevelAwait(source) == false)
+}
+
+@Test func awaitInStringIsNotTLA() async throws {
+    let source = "const s = 'await something';"
+    #expect(ESMTransformer.containsTopLevelAwait(source) == false)
+}
+
+@Test func awaitInCommentIsNotTLA() async throws {
+    let source = "// await something\nconst x = 1;"
+    #expect(ESMTransformer.containsTopLevelAwait(source) == false)
+}
+
+@Test func forAwaitIsTopLevel() async throws {
+    let source = "for await (const x of stream) { console.log(x); }"
+    #expect(ESMTransformer.containsTopLevelAwait(source) == true)
+}
+
+@Test func noAwaitAtAll() async throws {
+    let source = "const x = 1;\nconsole.log(x);"
+    #expect(ESMTransformer.containsTopLevelAwait(source) == false)
+}
+
+@Test func awaitInsideControlFlowIsTopLevel() async throws {
+    // if/for/while braces don't create function scope — TLA is valid inside them
+    let source = "if (true) { const x = await fetch('/api'); }"
+    #expect(ESMTransformer.containsTopLevelAwait(source) == true)
+}
+
+@Test func awaitAfterFunctionIsTopLevel() async throws {
+    let source = "function f() { return 1; }\nconst x = await Promise.resolve(42);"
+    #expect(ESMTransformer.containsTopLevelAwait(source) == true)
+}
