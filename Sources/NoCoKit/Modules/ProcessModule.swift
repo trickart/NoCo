@@ -224,6 +224,22 @@ public struct ProcessModule: NodeModule {
                     s._listeners[event] = fns.filter(function(f) { return f !== fn; });
                     return s;
                 };
+                s.off = s.removeListener;
+                s.removeAllListeners = function(event) {
+                    if (event) s._listeners[event] = [];
+                    else s._listeners = {};
+                    return s;
+                };
+                s._maxListeners = 10;
+                s.getMaxListeners = function() { return s._maxListeners; };
+                s.setMaxListeners = function(n) { s._maxListeners = n; return s; };
+                s.listenerCount = function(event) { return (s._listeners[event] || []).length; };
+                s.listeners = function(event) { return (s._listeners[event] || []).slice(); };
+                s.prependListener = function(event, fn) {
+                    if (!s._listeners[event]) s._listeners[event] = [];
+                    s._listeners[event].unshift(fn);
+                    return s;
+                };
             })
         """)!.call(withArguments: [stdout])
         process.setValue(stdout, forProperty: "stdout")
@@ -270,6 +286,22 @@ public struct ProcessModule: NodeModule {
                 s.removeListener = function(event, fn) {
                     var fns = s._listeners[event] || [];
                     s._listeners[event] = fns.filter(function(f) { return f !== fn; });
+                    return s;
+                };
+                s.off = s.removeListener;
+                s.removeAllListeners = function(event) {
+                    if (event) s._listeners[event] = [];
+                    else s._listeners = {};
+                    return s;
+                };
+                s._maxListeners = 10;
+                s.getMaxListeners = function() { return s._maxListeners; };
+                s.setMaxListeners = function(n) { s._maxListeners = n; return s; };
+                s.listenerCount = function(event) { return (s._listeners[event] || []).length; };
+                s.listeners = function(event) { return (s._listeners[event] || []).slice(); };
+                s.prependListener = function(event, fn) {
+                    if (!s._listeners[event]) s._listeners[event] = [];
+                    s._listeners[event].unshift(fn);
                     return s;
                 };
             })
