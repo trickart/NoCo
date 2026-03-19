@@ -122,6 +122,11 @@ public final class EventLoop: @unchecked Sendable {
         ioState.withLock { $0.running = true }
         let deadline = timeout.isInfinite ? Date.distantFuture : Date().addingTimeInterval(timeout)
 
+        // ループ前に microtask をドレインして fire-and-forget な Promise chain を処理
+        // これにより chain 内で登録された timer/handle が hasPendingWork に反映される
+        drainMicrotasks?()
+        drainNextTick()
+
         while ioState.withLock({ $0.running }) && hasPendingWork && Date() < deadline {
             drainNextTick()
             drainCallbacks()
