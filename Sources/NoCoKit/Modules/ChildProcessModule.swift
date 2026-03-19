@@ -377,6 +377,7 @@ public struct ChildProcessModule: NodeModule {
                     else cp._listeners = {};
                     return cp;
                 };
+                cp.off = cp.removeListener;
             })
         """)!.call(withArguments: [childProcess])
 
@@ -802,6 +803,7 @@ public struct ChildProcessModule: NodeModule {
                     else cp._listeners = {};
                     return cp;
                 };
+                cp.off = cp.removeListener;
             })
         """)!.call(withArguments: [childProcess])
 

@@ -552,4 +552,63 @@ func forkSilentOption() async throws {
     #expect(hasStdout?.toBool() == true)
     #expect(hasStderr?.toBool() == true)
 }
+
+@Test(.timeLimit(.minutes(1)))
+func forkOffRemovesListener() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_send.js").path
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var callCount = 0;
+        var child = cp.fork('\(fixturePath)', { execPath: '\(execPath)' });
+        function handler(msg) { callCount++; }
+        child.on('message', handler);
+        child.off('message', handler);
+        // 'off' で除去済みなので message が来ても callCount は 0 のまま
+        child.on('message', function() { child.disconnect(); });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("callCount")
+    #expect(result?.toInt32() == 0)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func forkOffIsFunction() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_send.js").path
+    let result = runtime.evaluate("""
+        var cp = require('child_process');
+        var child = cp.fork('\(fixturePath)', { execPath: '\(execPath)' });
+        var result = typeof child.off === 'function';
+        child.on('message', function() { child.disconnect(); });
+        result;
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    #expect(result?.toBool() == true)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func execOffRemovesListener() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var cp = require('child_process');
+        var child = cp.exec('echo hello');
+        var hasOff = typeof child.off === 'function';
+        var callCount = 0;
+        function handler() { callCount++; }
+        child.on('exit', handler);
+        child.off('exit', handler);
+        hasOff;
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    #expect(result?.toBool() == true)
+    let count = runtime.evaluate("callCount")
+    #expect(count?.toInt32() == 0)
+}
 #endif
