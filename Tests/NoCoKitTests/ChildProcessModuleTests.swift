@@ -554,6 +554,48 @@ func forkSilentOption() async throws {
 }
 
 @Test(.timeLimit(.minutes(1)))
+func forkStdioPipeOption() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_send.js").path
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var child = cp.fork('\(fixturePath)', { stdio: 'pipe', execPath: '\(execPath)' });
+        var hasStdout = child.stdout !== null && child.stdout !== undefined;
+        var hasStderr = child.stderr !== null && child.stderr !== undefined;
+        child.on('message', function() { child.disconnect(); });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let hasStdout = runtime.evaluate("hasStdout")
+    let hasStderr = runtime.evaluate("hasStderr")
+    #expect(hasStdout?.toBool() == true)
+    #expect(hasStderr?.toBool() == true)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func forkStdioPipeReceivesData() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_send.js").path
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var received = null;
+        var child = cp.fork('\(fixturePath)', { stdio: 'pipe', execPath: '\(execPath)' });
+        child.on('message', function(msg) {
+            received = msg;
+            child.disconnect();
+        });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("JSON.stringify(received)")
+    #expect(result?.toString() == "{\"hello\":\"from child\"}")
+}
+
+@Test(.timeLimit(.minutes(1)))
 func forkSendUndefinedFromChild() async throws {
     let runtime = NodeRuntime()
     let execPath = nocoExecPath()

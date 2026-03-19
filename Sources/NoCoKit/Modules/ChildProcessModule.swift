@@ -750,10 +750,12 @@ public struct ChildProcessModule: NodeModule {
             proc.currentDirectoryURL = URL(fileURLWithPath: cwdVal.toString()!)
         }
 
-        // Options: silent
+        // Options: silent or stdio: "pipe"
         let silent: Bool
         if let opts = options, let silentVal = opts.forProperty("silent"), !silentVal.isUndefined {
             silent = silentVal.toBool()
+        } else if let opts = options, let stdioVal = opts.forProperty("stdio"), stdioVal.isString, stdioVal.toString() == "pipe" {
+            silent = true
         } else {
             silent = false
         }
