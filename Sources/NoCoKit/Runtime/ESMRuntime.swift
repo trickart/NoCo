@@ -67,6 +67,21 @@ public enum ESMRuntime {
                 return JSValue(undefinedIn: runtime.context)
             }
 
+            // loadFile の結果が thenable (ネストされた TLA の Promise) かチェック
+            // 事前ロードで解決済みの場合はキャッシュヒットし、ここには到達しない
+            // 動的 import 等で未解決の Promise が返った場合はチェインする
+            if moduleValue.isObject,
+               let thenFn = moduleValue.forProperty("then"),
+               thenFn.isObject, !thenFn.isUndefined {
+                let ctx = runtime.context
+                let wrapBlock: @convention(block) (JSValue) -> JSValue = { resolved in
+                    return wrapAsNamespace(resolved, in: ctx)
+                }
+                return moduleValue.invokeMethod("then", withArguments: [
+                    unsafeBitCast(wrapBlock, to: AnyObject.self),
+                ])!
+            }
+
             // Wrap CJS module result as ESM namespace:
             // If the module already has __esModule marker, return as-is
             // Otherwise, create namespace with named exports + default
