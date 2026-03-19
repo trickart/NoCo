@@ -93,43 +93,45 @@ public struct BufferModule: NodeModule {
 
         let bufferScript = """
         (function(global) {
-            function Buffer(sizeOrArray) {
-                if (!(this instanceof Buffer)) {
-                    return new Buffer(sizeOrArray);
-                }
-                if (typeof sizeOrArray === 'number') {
-                    this._data = new Uint8Array(sizeOrArray);
-                } else if (sizeOrArray instanceof Uint8Array) {
-                    this._data = new Uint8Array(sizeOrArray);
-                } else if (Array.isArray(sizeOrArray)) {
-                    this._data = new Uint8Array(sizeOrArray);
-                } else {
-                    this._data = new Uint8Array(0);
-                }
-                this.length = this._data.length;
-                // Index access
-                for (var i = 0; i < this.length; i++) {
-                    Object.defineProperty(this, i, {
-                        get: (function(idx) { return function() { return this._data[idx]; }; })(i),
-                        set: (function(idx) { return function(v) { this._data[idx] = v; }; })(i),
-                        enumerable: true,
-                        configurable: true
-                    });
+            class Buffer extends Uint8Array {
+                constructor(arg, byteOffsetOrEncoding, length) {
+                    if (typeof arg === 'number') {
+                        super(arg);
+                    } else if (arg instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && arg instanceof SharedArrayBuffer)) {
+                        super(arg, byteOffsetOrEncoding || 0, length !== undefined ? length : arg.byteLength - (byteOffsetOrEncoding || 0));
+                    } else if (ArrayBuffer.isView(arg)) {
+                        super(new Uint8Array(arg.buffer, arg.byteOffset, arg.byteLength));
+                    } else if (Array.isArray(arg)) {
+                        super(arg);
+                    } else {
+                        super(0);
+                    }
                 }
             }
+
+            // Backward compatibility: _data getter returns this
+            Object.defineProperty(Buffer.prototype, '_data', {
+                get: function() { return this; },
+                configurable: true
+            });
 
             Buffer.from = function(value, encodingOrOffset, length) {
                 if (typeof value === 'string') {
                     var encoding = encodingOrOffset || 'utf8';
                     return Buffer._fromString(value, encoding);
                 }
-                if (value instanceof ArrayBuffer) {
+                if (value instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && value instanceof SharedArrayBuffer)) {
                     var offset = encodingOrOffset || 0;
                     var len = length !== undefined ? length : value.byteLength - offset;
-                    return new Buffer(new Uint8Array(value, offset, len));
+                    var view = new Uint8Array(value, offset, len);
+                    var buf = new Buffer(len);
+                    for (var i = 0; i < len; i++) buf[i] = view[i];
+                    return buf;
                 }
                 if (value instanceof Buffer) {
-                    return new Buffer(value._data);
+                    var buf = new Buffer(value.length);
+                    for (var i = 0; i < value.length; i++) buf[i] = value[i];
+                    return buf;
                 }
                 if (Array.isArray(value) || value instanceof Uint8Array) {
                     return new Buffer(value);
@@ -154,19 +156,22 @@ public struct BufferModule: NodeModule {
                     }
                     return new Buffer(arr);
                 }
-                if (encoding === 'base64') {
-                    var binary = atob(str);
+                if (encoding === 'base64' || encoding === 'base64url') {
+                    var input = str;
+                    if (encoding === 'base64url') {
+                        input = input.replace(/-/g, '+').replace(/_/g, '/');
+                    }
+                    var binary = atob(input);
                     var buf = new Buffer(binary.length);
                     for (var i = 0; i < binary.length; i++) {
-                        buf._data[i] = binary.charCodeAt(i);
+                        buf[i] = binary.charCodeAt(i);
                     }
-                    buf.length = binary.length;
                     return buf;
                 }
                 if (encoding === 'ascii' || encoding === 'latin1' || encoding === 'binary') {
                     var buf = new Buffer(str.length);
                     for (var i = 0; i < str.length; i++) {
-                        buf._data[i] = str.charCodeAt(i) & 0xFF;
+                        buf[i] = str.charCodeAt(i) & 0xFF;
                     }
                     return buf;
                 }
@@ -179,11 +184,11 @@ public struct BufferModule: NodeModule {
                 var buf = new Buffer(size);
                 if (fill !== undefined) {
                     if (typeof fill === 'number') {
-                        for (var i = 0; i < size; i++) buf._data[i] = fill & 0xFF;
+                        for (var i = 0; i < size; i++) buf[i] = fill & 0xFF;
                     } else if (typeof fill === 'string') {
                         var fillBuf = Buffer.from(fill, encoding || 'utf8');
                         for (var i = 0; i < size; i++) {
-                            buf._data[i] = fillBuf._data[i % fillBuf.length];
+                            buf[i] = fillBuf[i % fillBuf.length];
                         }
                     }
                 }
@@ -209,7 +214,7 @@ public struct BufferModule: NodeModule {
                 for (var j = 0; j < list.length; j++) {
                     var buf = list[j];
                     for (var i = 0; i < buf.length && offset < totalLength; i++, offset++) {
-                        result._data[offset] = buf._data ? buf._data[i] : buf[i];
+                        result[offset] = buf[i];
                     }
                 }
                 return result;
@@ -220,7 +225,7 @@ public struct BufferModule: NodeModule {
             };
 
             Buffer.isEncoding = function(encoding) {
-                return ['utf8', 'utf-8', 'hex', 'base64', 'ascii', 'latin1', 'binary'].indexOf(
+                return ['utf8', 'utf-8', 'hex', 'base64', 'base64url', 'ascii', 'latin1', 'binary'].indexOf(
                     (encoding || '').toLowerCase()
                 ) !== -1;
             };
@@ -234,7 +239,7 @@ public struct BufferModule: NodeModule {
                 encoding = (encoding || 'utf8').toLowerCase().replace('-', '');
                 start = start || 0;
                 end = end !== undefined ? end : this.length;
-                var data = this._data.subarray(start, end);
+                var data = Uint8Array.prototype.subarray.call(this, start, end);
 
                 if (encoding === 'utf8') {
                     var decoder = new TextDecoder('utf-8');
@@ -268,22 +273,24 @@ public struct BufferModule: NodeModule {
 
             Buffer.prototype.toJSON = function() {
                 var arr = [];
-                for (var i = 0; i < this.length; i++) arr.push(this._data[i]);
+                for (var i = 0; i < this.length; i++) arr.push(this[i]);
                 return { type: 'Buffer', data: arr };
             };
 
             Buffer.prototype.slice = function(start, end) {
-                var sliced = this._data.subarray(start, end);
-                return new Buffer(sliced);
+                var sliced = Uint8Array.prototype.subarray.call(this, start, end);
+                var buf = new Buffer(sliced.length);
+                for (var i = 0; i < sliced.length; i++) buf[i] = sliced[i];
+                return buf;
             };
 
             Buffer.prototype.subarray = Buffer.prototype.slice;
 
             Buffer.prototype.reduce = function(callback, initialValue) {
-                var acc = arguments.length >= 2 ? initialValue : this._data[0];
+                var acc = arguments.length >= 2 ? initialValue : this[0];
                 var start = arguments.length >= 2 ? 0 : 1;
                 for (var i = start; i < this.length; i++) {
-                    acc = callback(acc, this._data[i], i, this);
+                    acc = callback(acc, this[i], i, this);
                 }
                 return acc;
             };
@@ -294,7 +301,7 @@ public struct BufferModule: NodeModule {
                 sourceEnd = sourceEnd !== undefined ? sourceEnd : this.length;
                 var len = Math.min(sourceEnd - sourceStart, target.length - targetStart);
                 for (var i = 0; i < len; i++) {
-                    target._data[targetStart + i] = this._data[sourceStart + i];
+                    target[targetStart + i] = this[sourceStart + i];
                 }
                 return len;
             };
@@ -302,7 +309,7 @@ public struct BufferModule: NodeModule {
             Buffer.prototype.equals = function(other) {
                 if (this.length !== other.length) return false;
                 for (var i = 0; i < this.length; i++) {
-                    if (this._data[i] !== other._data[i]) return false;
+                    if (this[i] !== other[i]) return false;
                 }
                 return true;
             };
@@ -314,8 +321,8 @@ public struct BufferModule: NodeModule {
                 tEnd = tEnd || target.length;
                 var len = Math.min(sEnd - sStart, tEnd - tStart);
                 for (var i = 0; i < len; i++) {
-                    if (this._data[sStart + i] < target._data[tStart + i]) return -1;
-                    if (this._data[sStart + i] > target._data[tStart + i]) return 1;
+                    if (this[sStart + i] < target[tStart + i]) return -1;
+                    if (this[sStart + i] > target[tStart + i]) return 1;
                 }
                 if ((sEnd - sStart) < (tEnd - tStart)) return -1;
                 if ((sEnd - sStart) > (tEnd - tStart)) return 1;
@@ -329,7 +336,7 @@ public struct BufferModule: NodeModule {
                 var src = Buffer.from(string, encoding);
                 var maxLen = Math.min(src.length, this.length - offset, length || Infinity);
                 for (var i = 0; i < maxLen; i++) {
-                    this._data[offset + i] = src._data[i];
+                    this[offset + i] = src[i];
                 }
                 return maxLen;
             };
@@ -339,7 +346,7 @@ public struct BufferModule: NodeModule {
                 end = end || this.length;
                 var fillVal = typeof value === 'number' ? value & 0xFF : 0;
                 for (var i = offset; i < end; i++) {
-                    this._data[i] = fillVal;
+                    this[i] = fillVal;
                 }
                 return this;
             };
@@ -348,7 +355,7 @@ public struct BufferModule: NodeModule {
                 byteOffset = byteOffset || 0;
                 if (typeof value === 'number') {
                     for (var i = byteOffset; i < this.length; i++) {
-                        if (this._data[i] === value) return i;
+                        if (this[i] === value) return i;
                     }
                     return -1;
                 }
@@ -356,7 +363,7 @@ public struct BufferModule: NodeModule {
                 for (var i = byteOffset; i <= this.length - value.length; i++) {
                     var found = true;
                     for (var j = 0; j < value.length; j++) {
-                        if (this._data[i + j] !== value._data[j]) { found = false; break; }
+                        if (this[i + j] !== value[j]) { found = false; break; }
                     }
                     if (found) return i;
                 }
@@ -367,102 +374,102 @@ public struct BufferModule: NodeModule {
                 return this.indexOf(value, byteOffset) !== -1;
             };
 
-            Buffer.prototype.readUInt8 = function(offset) { return this._data[offset || 0]; };
-            Buffer.prototype.readUInt16BE = function(offset) { offset = offset || 0; return (this._data[offset] << 8) | this._data[offset+1]; };
-            Buffer.prototype.readUInt16LE = function(offset) { offset = offset || 0; return this._data[offset] | (this._data[offset+1] << 8); };
+            Buffer.prototype.readUInt8 = function(offset) { return this[offset || 0]; };
+            Buffer.prototype.readUInt16BE = function(offset) { offset = offset || 0; return (this[offset] << 8) | this[offset+1]; };
+            Buffer.prototype.readUInt16LE = function(offset) { offset = offset || 0; return this[offset] | (this[offset+1] << 8); };
             Buffer.prototype.readUInt32BE = function(offset) {
                 offset = offset || 0;
-                return ((this._data[offset] << 24) | (this._data[offset+1] << 16) | (this._data[offset+2] << 8) | this._data[offset+3]) >>> 0;
+                return ((this[offset] << 24) | (this[offset+1] << 16) | (this[offset+2] << 8) | this[offset+3]) >>> 0;
             };
             Buffer.prototype.readUInt32LE = function(offset) {
                 offset = offset || 0;
-                return (this._data[offset] | (this._data[offset+1] << 8) | (this._data[offset+2] << 16) | (this._data[offset+3] << 24)) >>> 0;
+                return (this[offset] | (this[offset+1] << 8) | (this[offset+2] << 16) | (this[offset+3] << 24)) >>> 0;
             };
 
-            Buffer.prototype.writeUInt8 = function(value, offset) { this._data[offset || 0] = value & 0xFF; return (offset || 0) + 1; };
+            Buffer.prototype.writeUInt8 = function(value, offset) { this[offset || 0] = value & 0xFF; return (offset || 0) + 1; };
             Buffer.prototype.writeUInt16BE = function(value, offset) {
-                offset = offset || 0; this._data[offset] = (value >> 8) & 0xFF; this._data[offset+1] = value & 0xFF; return offset + 2;
+                offset = offset || 0; this[offset] = (value >> 8) & 0xFF; this[offset+1] = value & 0xFF; return offset + 2;
             };
             Buffer.prototype.writeUInt16LE = function(value, offset) {
-                offset = offset || 0; this._data[offset] = value & 0xFF; this._data[offset+1] = (value >> 8) & 0xFF; return offset + 2;
+                offset = offset || 0; this[offset] = value & 0xFF; this[offset+1] = (value >> 8) & 0xFF; return offset + 2;
             };
 
             Buffer.prototype.writeUInt32BE = function(value, offset) {
                 offset = offset || 0;
-                this._data[offset]     = (value >>> 24) & 0xFF;
-                this._data[offset + 1] = (value >>> 16) & 0xFF;
-                this._data[offset + 2] = (value >>> 8)  & 0xFF;
-                this._data[offset + 3] = value & 0xFF;
+                this[offset]     = (value >>> 24) & 0xFF;
+                this[offset + 1] = (value >>> 16) & 0xFF;
+                this[offset + 2] = (value >>> 8)  & 0xFF;
+                this[offset + 3] = value & 0xFF;
                 return offset + 4;
             };
             Buffer.prototype.writeUInt32LE = function(value, offset) {
                 offset = offset || 0;
-                this._data[offset]     = value & 0xFF;
-                this._data[offset + 1] = (value >>> 8)  & 0xFF;
-                this._data[offset + 2] = (value >>> 16) & 0xFF;
-                this._data[offset + 3] = (value >>> 24) & 0xFF;
+                this[offset]     = value & 0xFF;
+                this[offset + 1] = (value >>> 8)  & 0xFF;
+                this[offset + 2] = (value >>> 16) & 0xFF;
+                this[offset + 3] = (value >>> 24) & 0xFF;
                 return offset + 4;
             };
 
             // Signed integer read methods
             Buffer.prototype.readInt8 = function(offset) {
                 offset = offset || 0;
-                var val = this._data[offset];
+                var val = this[offset];
                 return val >= 0x80 ? val - 0x100 : val;
             };
             Buffer.prototype.readInt16BE = function(offset) {
                 offset = offset || 0;
-                var val = (this._data[offset] << 8) | this._data[offset+1];
+                var val = (this[offset] << 8) | this[offset+1];
                 return val >= 0x8000 ? val - 0x10000 : val;
             };
             Buffer.prototype.readInt16LE = function(offset) {
                 offset = offset || 0;
-                var val = this._data[offset] | (this._data[offset+1] << 8);
+                var val = this[offset] | (this[offset+1] << 8);
                 return val >= 0x8000 ? val - 0x10000 : val;
             };
             Buffer.prototype.readInt32BE = function(offset) {
                 offset = offset || 0;
-                return (this._data[offset] << 24) | (this._data[offset+1] << 16) | (this._data[offset+2] << 8) | this._data[offset+3];
+                return (this[offset] << 24) | (this[offset+1] << 16) | (this[offset+2] << 8) | this[offset+3];
             };
             Buffer.prototype.readInt32LE = function(offset) {
                 offset = offset || 0;
-                return this._data[offset] | (this._data[offset+1] << 8) | (this._data[offset+2] << 16) | (this._data[offset+3] << 24);
+                return this[offset] | (this[offset+1] << 8) | (this[offset+2] << 16) | (this[offset+3] << 24);
             };
 
             // Signed integer write methods
             Buffer.prototype.writeInt8 = function(value, offset) {
                 offset = offset || 0;
-                this._data[offset] = value < 0 ? value + 0x100 : value;
+                this[offset] = value < 0 ? value + 0x100 : value;
                 return offset + 1;
             };
             Buffer.prototype.writeInt16BE = function(value, offset) {
                 offset = offset || 0;
                 if (value < 0) value = value + 0x10000;
-                this._data[offset] = (value >> 8) & 0xFF;
-                this._data[offset+1] = value & 0xFF;
+                this[offset] = (value >> 8) & 0xFF;
+                this[offset+1] = value & 0xFF;
                 return offset + 2;
             };
             Buffer.prototype.writeInt16LE = function(value, offset) {
                 offset = offset || 0;
                 if (value < 0) value = value + 0x10000;
-                this._data[offset] = value & 0xFF;
-                this._data[offset+1] = (value >> 8) & 0xFF;
+                this[offset] = value & 0xFF;
+                this[offset+1] = (value >> 8) & 0xFF;
                 return offset + 2;
             };
             Buffer.prototype.writeInt32BE = function(value, offset) {
                 offset = offset || 0;
-                this._data[offset]     = (value >>> 24) & 0xFF;
-                this._data[offset + 1] = (value >>> 16) & 0xFF;
-                this._data[offset + 2] = (value >>> 8)  & 0xFF;
-                this._data[offset + 3] = value & 0xFF;
+                this[offset]     = (value >>> 24) & 0xFF;
+                this[offset + 1] = (value >>> 16) & 0xFF;
+                this[offset + 2] = (value >>> 8)  & 0xFF;
+                this[offset + 3] = value & 0xFF;
                 return offset + 4;
             };
             Buffer.prototype.writeInt32LE = function(value, offset) {
                 offset = offset || 0;
-                this._data[offset]     = value & 0xFF;
-                this._data[offset + 1] = (value >>> 8)  & 0xFF;
-                this._data[offset + 2] = (value >>> 16) & 0xFF;
-                this._data[offset + 3] = (value >>> 24) & 0xFF;
+                this[offset]     = value & 0xFF;
+                this[offset + 1] = (value >>> 8)  & 0xFF;
+                this[offset + 2] = (value >>> 16) & 0xFF;
+                this[offset + 3] = (value >>> 24) & 0xFF;
                 return offset + 4;
             };
 
@@ -471,28 +478,28 @@ public struct BufferModule: NodeModule {
                 offset = offset || 0;
                 var buf = new ArrayBuffer(4);
                 var view = new DataView(buf);
-                for (var i = 0; i < 4; i++) view.setUint8(i, this._data[offset + i]);
+                for (var i = 0; i < 4; i++) view.setUint8(i, this[offset + i]);
                 return view.getFloat32(0, false);
             };
             Buffer.prototype.readFloatLE = function(offset) {
                 offset = offset || 0;
                 var buf = new ArrayBuffer(4);
                 var view = new DataView(buf);
-                for (var i = 0; i < 4; i++) view.setUint8(i, this._data[offset + i]);
+                for (var i = 0; i < 4; i++) view.setUint8(i, this[offset + i]);
                 return view.getFloat32(0, true);
             };
             Buffer.prototype.readDoubleBE = function(offset) {
                 offset = offset || 0;
                 var buf = new ArrayBuffer(8);
                 var view = new DataView(buf);
-                for (var i = 0; i < 8; i++) view.setUint8(i, this._data[offset + i]);
+                for (var i = 0; i < 8; i++) view.setUint8(i, this[offset + i]);
                 return view.getFloat64(0, false);
             };
             Buffer.prototype.readDoubleLE = function(offset) {
                 offset = offset || 0;
                 var buf = new ArrayBuffer(8);
                 var view = new DataView(buf);
-                for (var i = 0; i < 8; i++) view.setUint8(i, this._data[offset + i]);
+                for (var i = 0; i < 8; i++) view.setUint8(i, this[offset + i]);
                 return view.getFloat64(0, true);
             };
             Buffer.prototype.writeFloatBE = function(value, offset) {
@@ -500,7 +507,7 @@ public struct BufferModule: NodeModule {
                 var buf = new ArrayBuffer(4);
                 var view = new DataView(buf);
                 view.setFloat32(0, value, false);
-                for (var i = 0; i < 4; i++) this._data[offset + i] = view.getUint8(i);
+                for (var i = 0; i < 4; i++) this[offset + i] = view.getUint8(i);
                 return offset + 4;
             };
             Buffer.prototype.writeFloatLE = function(value, offset) {
@@ -508,7 +515,7 @@ public struct BufferModule: NodeModule {
                 var buf = new ArrayBuffer(4);
                 var view = new DataView(buf);
                 view.setFloat32(0, value, true);
-                for (var i = 0; i < 4; i++) this._data[offset + i] = view.getUint8(i);
+                for (var i = 0; i < 4; i++) this[offset + i] = view.getUint8(i);
                 return offset + 4;
             };
             Buffer.prototype.writeDoubleBE = function(value, offset) {
@@ -516,7 +523,7 @@ public struct BufferModule: NodeModule {
                 var buf = new ArrayBuffer(8);
                 var view = new DataView(buf);
                 view.setFloat64(0, value, false);
-                for (var i = 0; i < 8; i++) this._data[offset + i] = view.getUint8(i);
+                for (var i = 0; i < 8; i++) this[offset + i] = view.getUint8(i);
                 return offset + 8;
             };
             Buffer.prototype.writeDoubleLE = function(value, offset) {
@@ -524,14 +531,8 @@ public struct BufferModule: NodeModule {
                 var buf = new ArrayBuffer(8);
                 var view = new DataView(buf);
                 view.setFloat64(0, value, true);
-                for (var i = 0; i < 8; i++) this._data[offset + i] = view.getUint8(i);
+                for (var i = 0; i < 8; i++) this[offset + i] = view.getUint8(i);
                 return offset + 8;
-            };
-
-            // Patch ArrayBuffer.isView to recognize Buffer instances
-            var _origIsView = ArrayBuffer.isView;
-            ArrayBuffer.isView = function(obj) {
-                return _origIsView(obj) || (obj instanceof Buffer);
             };
 
             global.Buffer = Buffer;

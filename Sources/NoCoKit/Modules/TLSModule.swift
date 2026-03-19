@@ -208,7 +208,7 @@ public struct TLSModule: NodeModule {
                 }
                 var arr = [];
                 for (var i = 0; i < buf.length; i++) {
-                    arr.push(buf._data ? buf._data[i] : buf[i]);
+                    arr.push(buf[i]);
                 }
                 return __tlsWrite(this._socketId, arr, callback || null);
             };

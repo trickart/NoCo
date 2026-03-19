@@ -88,11 +88,9 @@ public struct HTTP2Module: NodeModule {
             if dataVal.isString, let str = dataVal.toString() {
                 state.responseBody.append(contentsOf: str.utf8)
             } else {
-                let bufData = dataVal.forProperty("_data")!
-                let source = bufData.isUndefined ? dataVal : bufData
-                let len = Int(source.forProperty("length")?.toInt32() ?? 0)
+                let len = Int(dataVal.forProperty("length")?.toInt32() ?? 0)
                 for i in 0..<len {
-                    state.responseBody.append(UInt8(source.atIndex(i).toInt32() & 0xFF))
+                    state.responseBody.append(UInt8(dataVal.atIndex(i).toInt32() & 0xFF))
                 }
             }
         }
@@ -105,11 +103,9 @@ public struct HTTP2Module: NodeModule {
                 if dataVal.isString, let str = dataVal.toString() {
                     state.responseBody.append(contentsOf: str.utf8)
                 } else {
-                    let bufData = dataVal.forProperty("_data")!
-                    let source = bufData.isUndefined ? dataVal : bufData
-                    let len = Int(source.forProperty("length")?.toInt32() ?? 0)
+                    let len = Int(dataVal.forProperty("length")?.toInt32() ?? 0)
                     for i in 0..<len {
-                        state.responseBody.append(UInt8(source.atIndex(i).toInt32() & 0xFF))
+                        state.responseBody.append(UInt8(dataVal.atIndex(i).toInt32() & 0xFF))
                     }
                 }
             }

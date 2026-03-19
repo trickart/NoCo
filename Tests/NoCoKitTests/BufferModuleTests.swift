@@ -288,3 +288,37 @@ import JavaScriptCore
     let r5 = runtime.evaluate("ArrayBuffer.isView(null)")
     #expect(r5?.toBool() == false)
 }
+
+// MARK: - Buffer as Uint8Array subclass
+
+@Test func bufferInstanceOfUint8Array() async throws {
+    let runtime = NodeRuntime()
+    let r1 = runtime.evaluate("Buffer.from('hello') instanceof Uint8Array")
+    #expect(r1?.toBool() == true)
+
+    let r2 = runtime.evaluate("Buffer.from('hello') instanceof Buffer")
+    #expect(r2?.toBool() == true)
+
+    let r3 = runtime.evaluate("Buffer.from('hello').buffer instanceof ArrayBuffer")
+    #expect(r3?.toBool() == true)
+}
+
+@Test func bufferByteOffsetAndByteLength() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var b = Buffer.from([1, 2, 3, 4, 5]);
+        b.byteLength + ':' + (typeof b.byteOffset === 'number');
+    """)
+    #expect(result?.toString() == "5:true")
+}
+
+@Test func bufferArrayBufferIsViewNoPatch() async throws {
+    let runtime = NodeRuntime()
+    // ArrayBuffer.isView should work natively without any patch
+    let r1 = runtime.evaluate("ArrayBuffer.isView(Buffer.from('test'))")
+    #expect(r1?.toBool() == true)
+
+    // Verify the original ArrayBuffer.isView is not patched
+    let r2 = runtime.evaluate("ArrayBuffer.isView.toString().indexOf('_origIsView') === -1")
+    #expect(r2?.toBool() == true)
+}
