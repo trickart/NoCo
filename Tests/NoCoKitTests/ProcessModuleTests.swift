@@ -106,6 +106,71 @@ import JavaScriptCore
     #expect(messages.contains("hello stdout"))
 }
 
+@Test func processStdoutGetMaxListeners() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var s = process.stdout;
+        typeof s.getMaxListeners === 'function'
+            && typeof s.setMaxListeners === 'function'
+            && s.getMaxListeners() === 10;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func processStdoutSetMaxListeners() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        process.stdout.setMaxListeners(20);
+        process.stdout.getMaxListeners() === 20;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func processStdoutOffRemovesListener() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var count = 0;
+        function handler() { count++; }
+        process.stdout.on('drain', handler);
+        process.stdout.off('drain', handler);
+        process.stdout.emit('drain');
+        count === 0;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func processStdoutListenerCount() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        process.stdout.on('drain', function() {});
+        process.stdout.on('drain', function() {});
+        process.stdout.listenerCount('drain') === 2;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func processStderrGetMaxListeners() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        typeof process.stderr.getMaxListeners === 'function'
+            && process.stderr.getMaxListeners() === 10;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func processStderrOffRemovesListener() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var count = 0;
+        function handler() { count++; }
+        process.stderr.on('drain', handler);
+        process.stderr.off('drain', handler);
+        process.stderr.emit('drain');
+        count === 0;
+    """)
+    #expect(result?.toBool() == true)
+}
+
 @Test func processNextTickWithArgs() async throws {
     let runtime = NodeRuntime()
     var messages: [String] = []
