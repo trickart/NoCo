@@ -618,6 +618,61 @@ func forkStdioPipeStdoutReceived() async throws {
 }
 
 @Test(.timeLimit(.minutes(1)))
+func forkStdoutEventEmitterMethods() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_send.js").path
+    let result = runtime.evaluate("""
+        var cp = require('child_process');
+        var child = cp.fork('\(fixturePath)', { stdio: 'pipe', execPath: '\(execPath)' });
+        var s = child.stdout;
+        var results = [];
+        results.push(typeof s.off === 'function');
+        results.push(typeof s.removeAllListeners === 'function');
+        results.push(typeof s.getMaxListeners === 'function');
+        results.push(typeof s.setMaxListeners === 'function');
+        results.push(typeof s.listenerCount === 'function');
+        results.push(typeof s.listeners === 'function');
+        results.push(typeof s.unpipe === 'function');
+        results.push(s.getMaxListeners() === 10);
+        s.setMaxListeners(20);
+        results.push(s.getMaxListeners() === 20);
+        s.on('data', function() {});
+        s.on('data', function() {});
+        results.push(s.listenerCount('data') === 2);
+        child.on('message', function() { child.disconnect(); });
+        results.every(function(r) { return r === true; });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    #expect(result?.toBool() == true)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func forkStderrEventEmitterMethods() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_send.js").path
+    let result = runtime.evaluate("""
+        var cp = require('child_process');
+        var child = cp.fork('\(fixturePath)', { stdio: 'pipe', execPath: '\(execPath)' });
+        var s = child.stderr;
+        var results = [];
+        results.push(typeof s.off === 'function');
+        results.push(typeof s.getMaxListeners === 'function');
+        results.push(typeof s.unpipe === 'function');
+        results.push(s.getMaxListeners() === 10);
+        child.on('message', function() { child.disconnect(); });
+        results.every(function(r) { return r === true; });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    #expect(result?.toBool() == true)
+}
+
+@Test(.timeLimit(.minutes(1)))
 func forkSendUndefinedFromChild() async throws {
     let runtime = NodeRuntime()
     let execPath = nocoExecPath()

@@ -862,11 +862,28 @@ public struct ChildProcessModule: NodeModule {
                         s._listeners[event] = fns.filter(function(f) { return f !== fn; });
                         return s;
                     };
+                    s.off = s.removeListener;
+                    s.removeAllListeners = function(event) {
+                        if (event) s._listeners[event] = [];
+                        else s._listeners = {};
+                        return s;
+                    };
+                    s._maxListeners = 10;
+                    s.getMaxListeners = function() { return s._maxListeners; };
+                    s.setMaxListeners = function(n) { s._maxListeners = n; return s; };
+                    s.listenerCount = function(event) { return (s._listeners[event] || []).length; };
+                    s.listeners = function(event) { return (s._listeners[event] || []).slice(); };
+                    s._pipes = [];
                     s.pipe = function(dest) {
+                        s._pipes.push(dest);
                         s.on('data', function(chunk) { dest.write(chunk); });
                         s.on('end', function() { if (typeof dest.end === 'function') dest.end(); });
                         if (typeof dest.emit === 'function') dest.emit('pipe', s);
                         return dest;
+                    };
+                    s.unpipe = function(dest) {
+                        s._pipes = s._pipes.filter(function(p) { return p !== dest; });
+                        return s;
                     };
                     s.setEncoding = function(enc) { s._encoding = enc; return s; };
                 })
@@ -901,12 +918,29 @@ public struct ChildProcessModule: NodeModule {
                         s._listeners[event] = fns.filter(function(f) { return f !== fn; });
                         return s;
                     };
+                    s.off = s.removeListener;
+                    s.removeAllListeners = function(event) {
+                        if (event) s._listeners[event] = [];
+                        else s._listeners = {};
+                        return s;
+                    };
+                    s._maxListeners = 10;
+                    s.getMaxListeners = function() { return s._maxListeners; };
+                    s.setMaxListeners = function(n) { s._maxListeners = n; return s; };
+                    s.listenerCount = function(event) { return (s._listeners[event] || []).length; };
+                    s.listeners = function(event) { return (s._listeners[event] || []).slice(); };
                     s.setEncoding = function(enc) { s._encoding = enc; return s; };
+                    s._pipes = [];
                     s.pipe = function(dest) {
+                        s._pipes.push(dest);
                         s.on('data', function(chunk) { dest.write(chunk); });
                         s.on('end', function() { if (typeof dest.end === 'function') dest.end(); });
                         if (typeof dest.emit === 'function') dest.emit('pipe', s);
                         return dest;
+                    };
+                    s.unpipe = function(dest) {
+                        s._pipes = s._pipes.filter(function(p) { return p !== dest; });
+                        return s;
                     };
                 })
             """)!.call(withArguments: [stderr])
