@@ -30,6 +30,197 @@ public enum ESMTransformer {
         return result
     }
 
+    /// Detect whether the source contains a top-level `await` (outside function/class/arrow scopes).
+    /// Control-flow braces (if/for/while/switch/try/catch) do NOT create a new scope for TLA purposes.
+    public static func containsTopLevelAwait(_ source: String) -> Bool {
+        let excluded = buildExcludedRanges(in: source)
+        let chars = Array(source.utf16)
+        let len = chars.count
+        var i = 0
+        var scopeDepth = 0
+
+        // Helper: check if position is in excluded range
+        func inExcluded(_ pos: Int) -> Bool {
+            for r in excluded {
+                if r.contains(pos) { return true }
+                if r.start > pos { break }
+            }
+            return false
+        }
+
+        // Helper: skip whitespace/newlines
+        func skipWhitespace() {
+            while i < len {
+                let ch = chars[i]
+                if ch == 0x20 || ch == 0x09 || ch == 0x0A || ch == 0x0D {
+                    i += 1
+                } else { break }
+            }
+        }
+
+        // Helper: check if chars[pos..] matches a keyword (UTF-16)
+        func matchKeyword(_ keyword: [UInt16], at pos: Int) -> Bool {
+            guard pos + keyword.count <= len else { return false }
+            for j in 0..<keyword.count {
+                if chars[pos + j] != keyword[j] { return false }
+            }
+            // Must not be followed by identifier char
+            let afterPos = pos + keyword.count
+            if afterPos < len && isIdentChar(chars[afterPos]) { return false }
+            // Must not be preceded by identifier char
+            if pos > 0 && isIdentChar(chars[pos - 1]) { return false }
+            return true
+        }
+
+        // UTF-16 codes for keywords
+        let kw_function: [UInt16] = Array("function".utf16)
+        let kw_class: [UInt16] = Array("class".utf16)
+        let kw_async: [UInt16] = Array("async".utf16)
+        let kw_await: [UInt16] = Array("await".utf16)
+
+        while i < len {
+            // Skip excluded ranges (comments, strings)
+            if inExcluded(i) {
+                // Advance past the excluded range
+                for r in excluded {
+                    if r.contains(i) { i = r.end; break }
+                }
+                continue
+            }
+
+            let ch = chars[i]
+
+            // Check for "await" at scope depth 0
+            if scopeDepth == 0 && matchKeyword(kw_await, at: i) {
+                return true
+            }
+
+            // Check for "async" possibly followed by "function" or arrow
+            if matchKeyword(kw_async, at: i) {
+                let savedI = i
+                i += kw_async.count
+                skipWhitespace()
+                // Skip excluded ranges after whitespace
+                while i < len && inExcluded(i) {
+                    for r in excluded { if r.contains(i) { i = r.end; break } }
+                    skipWhitespace()
+                }
+                if matchKeyword(kw_function, at: i) {
+                    // async function — skip past name/params to opening {
+                    i += kw_function.count
+                    skipWhitespace()
+                    // Skip function name if present
+                    if i < len && (isIdentChar(chars[i])) {
+                        while i < len && isIdentChar(chars[i]) { i += 1 }
+                        skipWhitespace()
+                    }
+                    // Skip params (...)
+                    if i < len && chars[i] == 0x28 { // (
+                        var depth = 1
+                        i += 1
+                        while i < len && depth > 0 {
+                            if inExcluded(i) { for r in excluded { if r.contains(i) { i = r.end; break } }; continue }
+                            if chars[i] == 0x28 { depth += 1 }
+                            else if chars[i] == 0x29 { depth -= 1 }
+                            i += 1
+                        }
+                        skipWhitespace()
+                    }
+                    // Expect {
+                    if i < len && chars[i] == 0x7B {
+                        scopeDepth += 1
+                        i += 1
+                    }
+                    continue
+                }
+                // Could be async arrow: async (params) => { ... } or async x => { ... }
+                // We'll handle this by restoring and letting the arrow detection handle it
+                i = savedI + 1
+                continue
+            }
+
+            // Check for "function" keyword (non-async)
+            if matchKeyword(kw_function, at: i) {
+                i += kw_function.count
+                skipWhitespace()
+                // Skip optional * for generator
+                if i < len && chars[i] == 0x2A { i += 1; skipWhitespace() }
+                // Skip function name if present
+                if i < len && isIdentChar(chars[i]) {
+                    while i < len && isIdentChar(chars[i]) { i += 1 }
+                    skipWhitespace()
+                }
+                // Skip params (...)
+                if i < len && chars[i] == 0x28 {
+                    var depth = 1
+                    i += 1
+                    while i < len && depth > 0 {
+                        if inExcluded(i) { for r in excluded { if r.contains(i) { i = r.end; break } }; continue }
+                        if chars[i] == 0x28 { depth += 1 }
+                        else if chars[i] == 0x29 { depth -= 1 }
+                        i += 1
+                    }
+                    skipWhitespace()
+                }
+                // Expect {
+                if i < len && chars[i] == 0x7B {
+                    scopeDepth += 1
+                    i += 1
+                }
+                continue
+            }
+
+            // Check for "class" keyword
+            if matchKeyword(kw_class, at: i) {
+                i += kw_class.count
+                skipWhitespace()
+                // Skip class name
+                if i < len && isIdentChar(chars[i]) {
+                    while i < len && isIdentChar(chars[i]) { i += 1 }
+                    skipWhitespace()
+                }
+                // Skip extends clause
+                let kw_extends: [UInt16] = Array("extends".utf16)
+                if matchKeyword(kw_extends, at: i) {
+                    i += kw_extends.count
+                    // Skip to opening {
+                    while i < len && chars[i] != 0x7B {
+                        if inExcluded(i) { for r in excluded { if r.contains(i) { i = r.end; break } }; continue }
+                        i += 1
+                    }
+                }
+                // Expect {
+                if i < len && chars[i] == 0x7B {
+                    scopeDepth += 1
+                    i += 1
+                }
+                continue
+            }
+
+            // Arrow function: => { opens a scope
+            if ch == 0x3D && i + 1 < len && chars[i + 1] == 0x3E { // =>
+                i += 2
+                skipWhitespace()
+                if i < len && chars[i] == 0x7B {
+                    scopeDepth += 1
+                    i += 1
+                }
+                continue
+            }
+
+            // Track braces for scope depth (only decrement for closing)
+            if ch == 0x7D && scopeDepth > 0 { // }
+                scopeDepth -= 1
+                i += 1
+                continue
+            }
+
+            i += 1
+        }
+
+        return false
+    }
+
     /// Transform only dynamic `import()` expressions. Used for CJS files.
     public static func transformDynamicImport(_ source: String) -> String {
         let excluded = buildExcludedRanges(in: source)

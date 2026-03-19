@@ -243,3 +243,25 @@ private func fixtureDir() -> String {
 
     #expect(messages.contains("val:99"))
 }
+
+// MARK: - Top-Level Await
+
+@Test func topLevelAwaitDynamicImport() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let path = fixtureDir() + "/tla-basic.mjs"
+    runtime.moduleLoader.loadFile(at: path)
+
+    #expect(messages.contains(where: { $0 == "tla:hello" }))
+}
+
+@Test func topLevelAwaitValue() async throws {
+    let runtime = NodeRuntime()
+    let path = fixtureDir() + "/tla-value.mjs"
+    let exports = runtime.moduleLoader.loadFile(at: path)
+
+    let value = exports.forProperty("value")?.toInt32()
+    #expect(value == 42)
+}
