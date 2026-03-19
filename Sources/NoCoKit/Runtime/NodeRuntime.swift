@@ -42,6 +42,7 @@ public final class NodeRuntime: @unchecked Sendable {
             fputs(message + "\n", stderr)
         case .log, .info, .debug:
             print(message)
+            fflush(stdout)
         }
     }
 
@@ -54,6 +55,7 @@ public final class NodeRuntime: @unchecked Sendable {
     /// Does NOT append newline. Replace to capture stdout output in tests.
     public var stdoutHandler: (String) -> Void = { str in
         print(str, terminator: "")
+        fflush(stdout)
     }
 
     /// Raw stderr write handler. Called by process.stderr.write().

@@ -596,6 +596,28 @@ func forkStdioPipeReceivesData() async throws {
 }
 
 @Test(.timeLimit(.minutes(1)))
+func forkStdioPipeStdoutReceived() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_stdout.js").path
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var stdoutData = '';
+        var child = cp.fork('\(fixturePath)', { stdio: 'pipe', execPath: '\(execPath)' });
+        child.stdout.setEncoding('utf-8');
+        child.stdout.on('data', function(chunk) { stdoutData += chunk; });
+        child.on('message', function(msg) {
+            if (msg && msg.done) child.disconnect();
+        });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("stdoutData.trim()")
+    #expect(result?.toString() == "hello from child stdout")
+}
+
+@Test(.timeLimit(.minutes(1)))
 func forkSendUndefinedFromChild() async throws {
     let runtime = NodeRuntime()
     let execPath = nocoExecPath()
