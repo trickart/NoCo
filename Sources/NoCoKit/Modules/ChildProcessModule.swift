@@ -1069,8 +1069,9 @@ public struct ChildProcessModule: NodeModule {
     ) {
         let send: @convention(block) (JSValue) -> Void = { message in
             let ctx = JSContext.current()!
-            let jsonStr = ctx.evaluateScript("JSON.stringify")!.call(withArguments: [message])!.toString()!
-            ipcChannel.write(jsonStr)
+            let jsonResult = ctx.evaluateScript("JSON.stringify")!.call(withArguments: [message])!
+            guard !jsonResult.isUndefined else { return }
+            ipcChannel.write(jsonResult.toString())
         }
         childProcess.setValue(unsafeBitCast(send, to: AnyObject.self), forProperty: "_ipcSend")
 

@@ -554,6 +554,56 @@ func forkSilentOption() async throws {
 }
 
 @Test(.timeLimit(.minutes(1)))
+func forkSendUndefinedFromChild() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_send_undefined.js").path
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var received = null;
+        var child = cp.fork('\(fixturePath)', { execPath: '\(execPath)' });
+        child.on('message', function(msg) {
+            if (msg && msg.ok) {
+                received = msg;
+                child.disconnect();
+            }
+        });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("JSON.stringify(received)")
+    #expect(result?.toString() == "{\"ok\":true}")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func forkSendUndefinedFromParent() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_echo.js").path
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var received = null;
+        var child = cp.fork('\(fixturePath)', { execPath: '\(execPath)' });
+        // undefined を送っても親がクラッシュしないことを確認
+        child.send(undefined);
+        // 次に有効なメッセージを送って echo で返ってくることを確認
+        child.send({ test: 'ok' });
+        child.on('message', function(msg) {
+            if (msg && msg.test) {
+                received = msg;
+                child.disconnect();
+            }
+        });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("JSON.stringify(received)")
+    #expect(result?.toString() == "{\"test\":\"ok\"}")
+}
+
+@Test(.timeLimit(.minutes(1)))
 func forkOffRemovesListener() async throws {
     let runtime = NodeRuntime()
     let execPath = nocoExecPath()
