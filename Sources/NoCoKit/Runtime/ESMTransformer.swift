@@ -543,7 +543,7 @@ public enum ESMTransformer {
         // import x from 'y'
         result = applyPattern(
             #"(?:^|\n|;)\s*import\s+([\w$]+)\s+from\s*['"]([^'"]+)['"]"#,
-            to: result, excluded: &excluded
+            to: result, excluded: &excluded,
         ) { groups in
             let name = groups[1]
             let specifier = groups[2]
@@ -1027,19 +1027,26 @@ public enum ESMTransformer {
             result += replacement
             lastEnd = utf16Offset + matchRange.length
 
-            // Calculate delta and shift excluded ranges
+            // Calculate delta and update excluded ranges
             let originalUTF16Length = matchRange.length - skipCount
             let replacementUTF16Length = replacement.utf16.count
             let delta = replacementUTF16Length - originalUTF16Length
-            if delta != 0 {
-                let replacePos = replaceOffset + cumulativeDelta
-                for i in 0..<excluded.count {
-                    if excluded[i].start >= replacePos + originalUTF16Length {
-                        excluded[i] = ExcludedRange(start: excluded[i].start + delta, end: excluded[i].end + delta)
-                    }
+            let replacePos = replaceOffset + cumulativeDelta
+            let replaceEnd = replacePos + originalUTF16Length
+            // Remove excluded ranges that fall within the replaced match,
+            // and shift ranges that come after the match
+            excluded = excluded.compactMap { range in
+                if range.start >= replacePos && range.end <= replaceEnd {
+                    // Entirely within replaced region — remove
+                    return nil
                 }
-                cumulativeDelta += delta
+                if range.start >= replaceEnd {
+                    // After replaced region — shift by delta
+                    return ExcludedRange(start: range.start + delta, end: range.end + delta)
+                }
+                return range
             }
+            cumulativeDelta += delta
         }
         // Append remaining text
         let remainStart = source.utf16.index(source.utf16.startIndex, offsetBy: lastEnd)
