@@ -38,7 +38,13 @@ public enum ESMTransformer {
         let chars = Array(source.utf16)
         let len = chars.count
         var i = 0
-        var scopeDepth = 0
+
+        // Track brace depth with a stack: each entry indicates whether
+        // the brace opened a function/class/arrow scope (true) or a
+        // control-flow/object brace (false). `await` is only top-level
+        // when no function-scope brace is on the stack.
+        var functionScopeDepth = 0
+        var braceStack: [Bool] = [] // true = function/class/arrow scope
 
         // Helper: check if position is in excluded range (binary search)
         func inExcluded(_ pos: Int) -> Bool {
@@ -58,6 +64,12 @@ public enum ESMTransformer {
             return false
         }
 
+        func skipExcluded() {
+            while i < len && inExcluded(i) {
+                for r in excluded { if r.contains(i) { i = r.end; break } }
+            }
+        }
+
         // Helper: skip whitespace/newlines
         func skipWhitespace() {
             while i < len {
@@ -74,153 +86,141 @@ public enum ESMTransformer {
             for j in 0..<keyword.count {
                 if chars[pos + j] != keyword[j] { return false }
             }
-            // Must not be followed by identifier char
             let afterPos = pos + keyword.count
             if afterPos < len && isIdentChar(chars[afterPos]) { return false }
-            // Must not be preceded by identifier char
             if pos > 0 && isIdentChar(chars[pos - 1]) { return false }
             return true
         }
 
-        // UTF-16 codes for keywords
+        func pushBrace(isFunctionScope: Bool) {
+            braceStack.append(isFunctionScope)
+            if isFunctionScope { functionScopeDepth += 1 }
+        }
+
+        func popBrace() {
+            if let isFunction = braceStack.popLast(), isFunction {
+                functionScopeDepth -= 1
+            }
+        }
+
+        /// Skip function params (...) and open brace, pushing a function scope
+        func skipFunctionParamsAndOpenBrace() {
+            skipWhitespace()
+            skipExcluded()
+            // Skip optional * for generator
+            if i < len && chars[i] == 0x2A { i += 1; skipWhitespace() }
+            // Skip function name if present
+            if i < len && isIdentChar(chars[i]) {
+                while i < len && isIdentChar(chars[i]) { i += 1 }
+                skipWhitespace()
+            }
+            // Skip params (...)
+            if i < len && chars[i] == 0x28 {
+                var depth = 1
+                i += 1
+                while i < len && depth > 0 {
+                    if inExcluded(i) { skipExcluded(); continue }
+                    if chars[i] == 0x28 { depth += 1 }
+                    else if chars[i] == 0x29 { depth -= 1 }
+                    i += 1
+                }
+                skipWhitespace()
+            }
+            // Expect {
+            if i < len && chars[i] == 0x7B {
+                pushBrace(isFunctionScope: true)
+                i += 1
+            }
+        }
+
         let kw_function: [UInt16] = Array("function".utf16)
         let kw_class: [UInt16] = Array("class".utf16)
         let kw_async: [UInt16] = Array("async".utf16)
         let kw_await: [UInt16] = Array("await".utf16)
 
         while i < len {
-            // Skip excluded ranges (comments, strings)
-            if inExcluded(i) {
-                // Advance past the excluded range
-                for r in excluded {
-                    if r.contains(i) { i = r.end; break }
-                }
-                continue
-            }
+            if inExcluded(i) { skipExcluded(); continue }
 
             let ch = chars[i]
 
-            // Check for "await" at scope depth 0
-            if scopeDepth == 0 && matchKeyword(kw_await, at: i) {
+            // Check for "await" outside any function/class/arrow scope
+            if functionScopeDepth == 0 && matchKeyword(kw_await, at: i) {
                 return true
             }
 
-            // Check for "async" possibly followed by "function" or arrow
+            // "async" possibly followed by "function"
             if matchKeyword(kw_async, at: i) {
                 let savedI = i
                 i += kw_async.count
                 skipWhitespace()
-                // Skip excluded ranges after whitespace
-                while i < len && inExcluded(i) {
-                    for r in excluded { if r.contains(i) { i = r.end; break } }
-                    skipWhitespace()
-                }
+                skipExcluded()
                 if matchKeyword(kw_function, at: i) {
-                    // async function — skip past name/params to opening {
                     i += kw_function.count
-                    skipWhitespace()
-                    // Skip function name if present
-                    if i < len && (isIdentChar(chars[i])) {
-                        while i < len && isIdentChar(chars[i]) { i += 1 }
-                        skipWhitespace()
-                    }
-                    // Skip params (...)
-                    if i < len && chars[i] == 0x28 { // (
-                        var depth = 1
-                        i += 1
-                        while i < len && depth > 0 {
-                            if inExcluded(i) { for r in excluded { if r.contains(i) { i = r.end; break } }; continue }
-                            if chars[i] == 0x28 { depth += 1 }
-                            else if chars[i] == 0x29 { depth -= 1 }
-                            i += 1
-                        }
-                        skipWhitespace()
-                    }
-                    // Expect {
-                    if i < len && chars[i] == 0x7B {
-                        scopeDepth += 1
-                        i += 1
-                    }
+                    skipFunctionParamsAndOpenBrace()
                     continue
                 }
-                // Could be async arrow: async (params) => { ... } or async x => { ... }
-                // We'll handle this by restoring and letting the arrow detection handle it
                 i = savedI + 1
                 continue
             }
 
-            // Check for "function" keyword (non-async)
+            // "function" keyword
             if matchKeyword(kw_function, at: i) {
                 i += kw_function.count
-                skipWhitespace()
-                // Skip optional * for generator
-                if i < len && chars[i] == 0x2A { i += 1; skipWhitespace() }
-                // Skip function name if present
-                if i < len && isIdentChar(chars[i]) {
-                    while i < len && isIdentChar(chars[i]) { i += 1 }
-                    skipWhitespace()
-                }
-                // Skip params (...)
-                if i < len && chars[i] == 0x28 {
-                    var depth = 1
-                    i += 1
-                    while i < len && depth > 0 {
-                        if inExcluded(i) { for r in excluded { if r.contains(i) { i = r.end; break } }; continue }
-                        if chars[i] == 0x28 { depth += 1 }
-                        else if chars[i] == 0x29 { depth -= 1 }
-                        i += 1
-                    }
-                    skipWhitespace()
-                }
-                // Expect {
-                if i < len && chars[i] == 0x7B {
-                    scopeDepth += 1
-                    i += 1
-                }
+                skipFunctionParamsAndOpenBrace()
                 continue
             }
 
-            // Check for "class" keyword
+            // "class" keyword — skip entire class body using brace depth
             if matchKeyword(kw_class, at: i) {
                 i += kw_class.count
                 skipWhitespace()
-                // Skip class name
                 if i < len && isIdentChar(chars[i]) {
                     while i < len && isIdentChar(chars[i]) { i += 1 }
                     skipWhitespace()
                 }
-                // Skip extends clause
                 let kw_extends: [UInt16] = Array("extends".utf16)
                 if matchKeyword(kw_extends, at: i) {
                     i += kw_extends.count
-                    // Skip to opening {
                     while i < len && chars[i] != 0x7B {
-                        if inExcluded(i) { for r in excluded { if r.contains(i) { i = r.end; break } }; continue }
+                        if inExcluded(i) { skipExcluded(); continue }
                         i += 1
                     }
                 }
-                // Expect {
                 if i < len && chars[i] == 0x7B {
-                    scopeDepth += 1
+                    var depth = 1
                     i += 1
+                    while i < len && depth > 0 {
+                        if inExcluded(i) { skipExcluded(); continue }
+                        if chars[i] == 0x7B { depth += 1 }
+                        else if chars[i] == 0x7D { depth -= 1 }
+                        if depth > 0 { i += 1 }
+                    }
+                    if i < len { i += 1 }
                 }
                 continue
             }
 
-            // Arrow function: => { opens a scope
-            if ch == 0x3D && i + 1 < len && chars[i + 1] == 0x3E { // =>
+            // Arrow function: => { opens a function scope
+            if ch == 0x3D && i + 1 < len && chars[i + 1] == 0x3E {
                 i += 2
                 skipWhitespace()
                 if i < len && chars[i] == 0x7B {
-                    scopeDepth += 1
+                    pushBrace(isFunctionScope: true)
                     i += 1
                 }
                 continue
             }
 
-            // Track braces for scope depth (only decrement for closing)
-            if ch == 0x7D && scopeDepth > 0 { // }
-                scopeDepth -= 1
+            // Opening brace (control flow, object literal, etc.)
+            if ch == 0x7B {
+                pushBrace(isFunctionScope: false)
+                i += 1
+                continue
+            }
+
+            // Closing brace
+            if ch == 0x7D {
+                popBrace()
                 i += 1
                 continue
             }
