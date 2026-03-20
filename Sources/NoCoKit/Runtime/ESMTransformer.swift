@@ -10,18 +10,19 @@ public enum ESMTransformer {
     /// Used for files detected as ESM.
     public static func transform(_ source: String) -> String {
         var result = source
+        var exc = buildExcludedRanges(in: result)
 
         // 1. Transform imports
-        result = transformImports(result, excluded: buildExcludedRanges(in: result))
+        result = transformImports(result, excluded: &exc)
 
-        // 2. Transform exports (re-build excluded ranges after import transforms)
-        result = transformExports(result, excluded: buildExcludedRanges(in: result))
+        // 2. Transform exports
+        result = transformExports(result, excluded: &exc)
 
         // 3. Add import.meta support
-        result = transformImportMeta(result, excluded: buildExcludedRanges(in: result))
+        result = transformImportMeta(result, excluded: exc)
 
         // 4. Transform dynamic import() — applies to all files
-        result = transformDynamicImportInSource(result, excluded: buildExcludedRanges(in: result), dirnameVar: "__noco_dirname__")
+        result = transformDynamicImportInSource(result, excluded: exc, dirnameVar: "__noco_dirname__")
 
         // 5. Prepend import_meta definition and __esModule marker (single line to preserve line numbers)
         let header = "Object.defineProperty(module.exports, '__esModule', {value: true}); var import_meta = Object.freeze({ url: 'file://' + __noco_filename__, dirname: __noco_dirname__, filename: __noco_filename__, resolve: function(specifier) { return 'file://' + require('path').resolve(__noco_dirname__, specifier); } });"
@@ -39,11 +40,20 @@ public enum ESMTransformer {
         var i = 0
         var scopeDepth = 0
 
-        // Helper: check if position is in excluded range
+        // Helper: check if position is in excluded range (binary search)
         func inExcluded(_ pos: Int) -> Bool {
-            for r in excluded {
-                if r.contains(pos) { return true }
-                if r.start > pos { break }
+            var lo = 0
+            var hi = excluded.count - 1
+            while lo <= hi {
+                let mid = (lo + hi) / 2
+                let r = excluded[mid]
+                if pos < r.start {
+                    hi = mid - 1
+                } else if pos >= r.end {
+                    lo = mid + 1
+                } else {
+                    return true
+                }
             }
             return false
         }
@@ -476,72 +486,76 @@ public enum ESMTransformer {
     }
 
     private static func isInExcluded(_ offset: Int, _ ranges: [ExcludedRange]) -> Bool {
-        for r in ranges {
-            if r.contains(offset) { return true }
-            if r.start > offset { break }
+        var lo = 0
+        var hi = ranges.count - 1
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            let r = ranges[mid]
+            if offset < r.start {
+                hi = mid - 1
+            } else if offset >= r.end {
+                lo = mid + 1
+            } else {
+                return true
+            }
         }
         return false
     }
 
     // MARK: - Import Transformation
 
-    private static func transformImports(_ source: String, excluded: [ExcludedRange]) -> String {
+    private static func transformImports(_ source: String, excluded: inout [ExcludedRange]) -> String {
         var result = source
-        var exc = excluded
 
         // import x, { a, b } from 'y'  (default + named)
-        result = applyRegex(
-            /(?:^|\n|;)\s*import\s+([\w$]+)\s*,\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/,
-            to: result, excluded: exc
-        ) { match in
-            let defaultName = String(match.output.1)
-            let named = String(match.output.2).trimmingCharacters(in: .whitespacesAndNewlines)
-            let specifier = String(match.output.3)
+        result = applyPattern(
+            #"(?:^|\n|;)\s*import\s+([\w$]+)\s*,\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]"#,
+            to: result, excluded: &excluded
+        ) { groups in
+            let defaultName = groups[1]
+            let named = groups[2].trimmingCharacters(in: .whitespacesAndNewlines)
+            let specifier = groups[3]
             let destructured = transformNamedImports(named)
             return "var __m = __esm_import('\(specifier)', __noco_dirname__); var \(defaultName) = __m.default; var { \(destructured) } = __m;"
         }
-        exc = buildExcludedRanges(in: result)
 
         // import * as ns from 'y'
-        result = applyRegex(
-            /(?:^|\n|;)\s*import\s*\*\s*as\s+([\w$]+)\s+from\s*['"]([^'"]+)['"]/,
-            to: result, excluded: exc
-        ) { match in
-            let ns = String(match.output.1)
-            let specifier = String(match.output.2)
+        result = applyPattern(
+            #"(?:^|\n|;)\s*import\s*\*\s*as\s+([\w$]+)\s+from\s*['"]([^'"]+)['"]"#,
+            to: result, excluded: &excluded
+        ) { groups in
+            let ns = groups[1]
+            let specifier = groups[2]
             return "var \(ns) = __esm_import('\(specifier)', __noco_dirname__);"
         }
-        exc = buildExcludedRanges(in: result)
 
         // import { a, b } from 'y'
-        result = applyRegex(
-            /(?:^|\n|;)\s*import\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/,
-            to: result, excluded: exc
-        ) { match in
-            let named = String(match.output.1)
-            let specifier = String(match.output.2)
+        result = applyPattern(
+            #"(?:^|\n|;)\s*import\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]"#,
+            to: result, excluded: &excluded
+        ) { groups in
+            let named = groups[1]
+            let specifier = groups[2]
             let destructured = transformNamedImports(named)
             return "var { \(destructured) } = __esm_import('\(specifier)', __noco_dirname__);"
         }
-        exc = buildExcludedRanges(in: result)
 
         // import x from 'y'
-        result = applyRegex(
-            /(?:^|\n|;)\s*import\s+([\w$]+)\s+from\s*['"]([^'"]+)['"]/,
-            to: result, excluded: exc
-        ) { match in
-            let name = String(match.output.1)
-            let specifier = String(match.output.2)
+        result = applyPattern(
+            #"(?:^|\n|;)\s*import\s+([\w$]+)\s+from\s*['"]([^'"]+)['"]"#,
+            to: result, excluded: &excluded
+        ) { groups in
+            let name = groups[1]
+            let specifier = groups[2]
             return "var __m = __esm_import('\(specifier)', __noco_dirname__); var \(name) = __m.default;"
         }
-        exc = buildExcludedRanges(in: result)
 
         // import 'y'  (side-effect only)
-        result = applyRegex(
-            /(?:^|\n|;)\s*import\s*['"]([^'"]+)['"]/,
-            to: result, excluded: exc
-        ) { match in
-            let specifier = String(match.output.1)
+        result = applyPattern(
+            #"(?:^|\n|;)\s*import\s*['"]([^'"]+)['"]"#,
+            to: result, excluded: &excluded
+        ) { groups in
+            let specifier = groups[1]
             return "__esm_import('\(specifier)', __noco_dirname__);"
         }
 
@@ -561,50 +575,46 @@ public enum ESMTransformer {
 
     // MARK: - Export Transformation
 
-    private static func transformExports(_ source: String, excluded: [ExcludedRange]) -> String {
+    private static func transformExports(_ source: String, excluded: inout [ExcludedRange]) -> String {
         var result = source
-        var exc = excluded
 
         // export default function name(...) {
-        result = applyRegex(
-            /(?:^|\n|;)\s*export\s+default\s+((?:async\s+)?function\s*\*?\s*([\w$]+)\s*\([^)]*\)\s*\{)/,
-            to: result, excluded: exc
-        ) { match in
-            let funcDecl = String(match.output.1)
-            let name = String(match.output.2)
+        result = applyPattern(
+            #"(?:^|\n|;)\s*export\s+default\s+((?:async\s+)?function\s*\*?\s*([\w$]+)\s*\([^)]*\)\s*\{)"#,
+            to: result, excluded: &excluded
+        ) { groups in
+            let funcDecl = groups[1]
+            let name = groups[2]
             return "__esm_export_default(module, \(name));\n\(funcDecl)"
         }
-        exc = buildExcludedRanges(in: result)
 
         // export default class Name {
-        result = applyRegex(
-            /(?:^|\n|;)\s*export\s+default\s+(class\s+([\w$]+)\s*(?:extends\s+[^{]+)?\{)/,
-            to: result, excluded: exc
-        ) { match in
-            let classDecl = String(match.output.1)
-            let name = String(match.output.2)
+        result = applyPattern(
+            #"(?:^|\n|;)\s*export\s+default\s+(class\s+([\w$]+)\s*(?:extends\s+[^{]+)?\{)"#,
+            to: result, excluded: &excluded
+        ) { groups in
+            let classDecl = groups[1]
+            let name = groups[2]
             return "__esm_export(module, 'default', function() { return \(name); });\n\(classDecl)"
         }
-        exc = buildExcludedRanges(in: result)
 
         // export default expr (must come after function/class)
-        result = applyRegex(
-            /(?:^|\n|;)\s*export\s+default\s+(?!function\b|class\b)(.+)/,
-            to: result, excluded: exc
-        ) { match in
-            var expr = String(match.output.1).trimmingCharacters(in: .whitespacesAndNewlines)
+        result = applyPattern(
+            #"(?:^|\n|;)\s*export\s+default\s+(?!function\b|class\b)(.+)"#,
+            to: result, excluded: &excluded
+        ) { groups in
+            var expr = groups[1].trimmingCharacters(in: .whitespacesAndNewlines)
             if expr.hasSuffix(";") { expr = String(expr.dropLast()) }
             return "__esm_export_default(module, \(expr));"
         }
-        exc = buildExcludedRanges(in: result)
 
         // export { a, b } from 'y'  (re-export named)
-        result = applyRegex(
-            /(?:^|\n|;)\s*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/,
-            to: result, excluded: exc
-        ) { match in
-            let named = String(match.output.1)
-            let specifier = String(match.output.2)
+        result = applyPattern(
+            #"(?:^|\n|;)\s*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]"#,
+            to: result, excluded: &excluded
+        ) { groups in
+            let named = groups[1]
+            let specifier = groups[2]
             let parts = named.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             var exportLines: [String] = []
             for part in parts {
@@ -617,50 +627,47 @@ public enum ESMTransformer {
             }
             return "(function() { var __re = __esm_import('\(specifier)', __noco_dirname__); \(exportLines.joined(separator: " ")) })();"
         }
-        exc = buildExcludedRanges(in: result)
 
         // export * from 'y'
-        result = applyRegex(
-            /(?:^|\n|;)\s*export\s*\*\s*from\s*['"]([^'"]+)['"]/,
-            to: result, excluded: exc
-        ) { match in
-            let specifier = String(match.output.1)
+        result = applyPattern(
+            #"(?:^|\n|;)\s*export\s*\*\s*from\s*['"]([^'"]+)['"]"#,
+            to: result, excluded: &excluded
+        ) { groups in
+            let specifier = groups[1]
             return "__esm_export_star(module, __esm_import('\(specifier)', __noco_dirname__));"
         }
-        exc = buildExcludedRanges(in: result)
 
         // export function name(...) {
-        result = applyRegex(
-            /(?:^|\n|;)\s*export\s+((?:async\s+)?function\s*\*?\s*([\w$]+)\s*\([^)]*\)\s*\{)/,
-            to: result, excluded: exc
-        ) { match in
-            let funcDecl = String(match.output.1)
-            let name = String(match.output.2)
+        result = applyPattern(
+            #"(?:^|\n|;)\s*export\s+((?:async\s+)?function\s*\*?\s*([\w$]+)\s*\([^)]*\)\s*\{)"#,
+            to: result, excluded: &excluded
+        ) { groups in
+            let funcDecl = groups[1]
+            let name = groups[2]
             return "__esm_export(module, '\(name)', function() { return \(name); });\n\(funcDecl)"
         }
-        exc = buildExcludedRanges(in: result)
 
         // export class Name {
-        result = applyRegex(
-            /(?:^|\n|;)\s*export\s+(class\s+([\w$]+)\s*(?:extends\s+[^{]+)?\{)/,
-            to: result, excluded: exc
-        ) { match in
-            let classDecl = String(match.output.1)
-            let name = String(match.output.2)
+        result = applyPattern(
+            #"(?:^|\n|;)\s*export\s+(class\s+([\w$]+)\s*(?:extends\s+[^{]+)?\{)"#,
+            to: result, excluded: &excluded
+        ) { groups in
+            let classDecl = groups[1]
+            let name = groups[2]
             return "__esm_export(module, '\(name)', function() { return \(name); });\n\(classDecl)"
         }
-        exc = buildExcludedRanges(in: result)
 
         // export const/let/var
-        result = transformExportVarDeclarations(result, excluded: exc)
-        exc = buildExcludedRanges(in: result)
+        result = transformExportVarDeclarations(result, excluded: excluded)
+        // Rebuild excluded ranges after var declarations (uses different processing)
+        excluded = buildExcludedRanges(in: result)
 
         // export { a, b }  (local re-export, no 'from')
-        result = applyRegex(
-            /(?:^|\n|;)\s*export\s*\{([^}]*)\}\s*(?:;|\n|$)/,
-            to: result, excluded: exc
-        ) { match in
-            let named = String(match.output.1)
+        result = applyPattern(
+            #"(?:^|\n|;)\s*export\s*\{([^}]*)\}\s*(?:;|\n|$)"#,
+            to: result, excluded: &excluded
+        ) { groups in
+            let named = groups[1]
             let parts = named.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             return parts.map { part in
                 let tokens = part.split(separator: " ").map(String.init)
@@ -678,29 +685,35 @@ public enum ESMTransformer {
     /// multiple export statements appear on the same line separated by semicolons.
     /// Uses bracket-depth tracking to find statement boundaries instead of greedy `.+`.
     private static func transformExportVarDeclarations(_ source: String, excluded: [ExcludedRange]) -> String {
-        let headerPattern = /(?:^|\n|;)\s*export\s+(?:const|let|var)\s+/
-        let matches = source.matches(of: headerPattern)
-        guard !matches.isEmpty else { return source }
+        guard let headerRegex = try? NSRegularExpression(pattern: #"(?:^|\n|;)\s*export\s+(?:const|let|var)\s+"#) else { return source }
+        let nsSource = source as NSString
+        let nsMatches = headerRegex.matches(in: source, range: NSRange(location: 0, length: nsSource.length))
+        guard !nsMatches.isEmpty else { return source }
 
         var result = source
         // Process in reverse to preserve offsets
-        for match in matches.reversed() {
-            let utf16Offset = source.utf16.distance(from: source.startIndex, to: match.range.lowerBound)
+        for nsMatch in nsMatches.reversed() {
+            let matchRange = nsMatch.range
+            let utf16Offset = matchRange.location
             if isInExcluded(utf16Offset, excluded) { continue }
 
+            let matchStr = nsSource.substring(with: matchRange)
             // Skip the leading separator (newline or semicolon)
-            let matchStr = String(source[match.range])
-            var replaceStart = match.range.lowerBound
+            var replaceUTF16Start = utf16Offset
             if let first = matchStr.first, first == "\n" || first == ";" {
-                replaceStart = source.index(after: replaceStart)
+                replaceUTF16Start += 1
             }
             // Skip leading whitespace after separator
-            while replaceStart < source.endIndex && (source[replaceStart] == " " || source[replaceStart] == "\t") {
-                replaceStart = source.index(after: replaceStart)
+            while replaceUTF16Start < nsSource.length {
+                let ch = nsSource.character(at: replaceUTF16Start)
+                if ch == 0x20 || ch == 0x09 { replaceUTF16Start += 1 } else { break }
             }
 
+            let replaceStart = source.utf16.index(source.utf16.startIndex, offsetBy: replaceUTF16Start)
+
             // Find the "export " prefix end — we need to skip past "export " to get the declaration
-            let afterExport = match.range.upperBound  // points to right after "const/let/var "
+            let afterExportUTF16 = utf16Offset + matchRange.length
+            let afterExport = source.utf16.index(source.utf16.startIndex, offsetBy: afterExportUTF16)
 
             // Find the end of this statement by tracking bracket depth
             var depth = 0
@@ -873,20 +886,24 @@ public enum ESMTransformer {
     private static func transformImportMeta(_ source: String, excluded: [ExcludedRange]) -> String {
         guard source.contains("import.meta") else { return source }
 
-        let regex = /import\.meta/
-        let matches = source.matches(of: regex)
-        guard !matches.isEmpty else { return source }
+        guard let nsRegex = try? NSRegularExpression(pattern: #"import\.meta"#) else { return source }
+        let nsSource = source as NSString
+        let nsMatches = nsRegex.matches(in: source, range: NSRange(location: 0, length: nsSource.length))
+        guard !nsMatches.isEmpty else { return source }
 
         var result = ""
-        var lastEnd = source.startIndex
-        for match in matches {
-            let utf16Offset = source.utf16.distance(from: source.startIndex, to: match.range.lowerBound)
+        var lastEnd = 0
+        for nsMatch in nsMatches {
+            let utf16Offset = nsMatch.range.location
             if isInExcluded(utf16Offset, excluded) { continue }
-            result += source[lastEnd..<match.range.lowerBound]
+            let beforeStart = source.utf16.index(source.utf16.startIndex, offsetBy: lastEnd)
+            let beforeEnd = source.utf16.index(source.utf16.startIndex, offsetBy: utf16Offset)
+            result += source[beforeStart..<beforeEnd]
             result += "import_meta"
-            lastEnd = match.range.upperBound
+            lastEnd = utf16Offset + nsMatch.range.length
         }
-        result += source[lastEnd...]
+        let remainStart = source.utf16.index(source.utf16.startIndex, offsetBy: lastEnd)
+        result += source[remainStart...]
         return result
     }
 
@@ -895,24 +912,28 @@ public enum ESMTransformer {
     private static func transformDynamicImportInSource(_ source: String, excluded: [ExcludedRange], dirnameVar: String = "__dirname") -> String {
         guard source.contains("import(") else { return source }
 
-        // Use a regex that captures an optional preceding character to simulate lookbehind.
         // Group 1 captures the char before "import(" if present; we skip if it's [.\w].
-        let regex = /(^|[^.\w$])import\s*\(/
-        let matches = source.matches(of: regex)
-        guard !matches.isEmpty else { return source }
+        guard let nsRegex = try? NSRegularExpression(pattern: #"(^|[^.\w$])import\s*\("#) else { return source }
+        let nsSource = source as NSString
+        let nsMatches = nsRegex.matches(in: source, range: NSRange(location: 0, length: nsSource.length))
+        guard !nsMatches.isEmpty else { return source }
 
         var result = ""
-        var lastEnd = source.startIndex
-        for match in matches {
-            let utf16Offset = source.utf16.distance(from: source.startIndex, to: match.range.lowerBound)
+        var lastEnd = 0
+        for nsMatch in nsMatches {
+            let utf16Offset = nsMatch.range.location
             if isInExcluded(utf16Offset, excluded) { continue }
             // The prefix char (group 1) must be preserved, only replace from after it
-            let prefixEnd = match.output.1.endIndex
-            result += source[lastEnd..<prefixEnd]
+            let prefixRange = nsMatch.range(at: 1)
+            let prefixEnd = prefixRange.location + prefixRange.length
+            let beforeStart = source.utf16.index(source.utf16.startIndex, offsetBy: lastEnd)
+            let beforeEnd = source.utf16.index(source.utf16.startIndex, offsetBy: prefixEnd)
+            result += source[beforeStart..<beforeEnd]
             result += "__importDynamic("
-            lastEnd = match.range.upperBound
+            lastEnd = utf16Offset + nsMatch.range.length
         }
-        result += source[lastEnd...]
+        let remainStart = source.utf16.index(source.utf16.startIndex, offsetBy: lastEnd)
+        result += source[remainStart...]
 
         if result.contains("__importDynamic(") {
             result = addDirnameToImportDynamic(result, dirnameVar: dirnameVar)
@@ -955,43 +976,74 @@ public enum ESMTransformer {
 
     // MARK: - Helpers
 
-    /// Apply a regex transformation, skipping matches inside excluded ranges.
-    /// Processes matches from bottom to top to preserve offsets.
-    private static func applyRegex<Output>(
-        _ regex: Regex<Output>,
+    /// Apply a pattern transformation using NSRegularExpression for performance on large strings.
+    /// Uses forward concatenation and updates excluded ranges in-place.
+    private static func applyPattern(
+        _ pattern: String,
         to source: String,
-        excluded: [ExcludedRange],
-        transformer: (Regex<Output>.Match) -> String?
+        excluded: inout [ExcludedRange],
+        transformer: ([String]) -> String?
     ) -> String {
-        let matches = source.matches(of: regex)
-        guard !matches.isEmpty else { return source }
+        guard let nsRegex = try? NSRegularExpression(pattern: pattern) else { return source }
+        let nsSource = source as NSString
+        let nsMatches = nsRegex.matches(in: source, range: NSRange(location: 0, length: nsSource.length))
+        guard !nsMatches.isEmpty else { return source }
 
-        let records: [(match: Regex<Output>.Match, utf16Offset: Int, utf16Length: Int)] = matches.map { match in
-            let offset = source.utf16.distance(from: source.startIndex, to: match.range.lowerBound)
-            let length = source.utf16.distance(from: match.range.lowerBound, to: match.range.upperBound)
-            return (match, offset, length)
-        }
+        var result = ""
+        var lastEnd = 0  // UTF-16 offset
+        var cumulativeDelta = 0
+        for nsMatch in nsMatches {
+            let matchRange = nsMatch.range
+            let utf16Offset = matchRange.location
+            let adjustedOffset = utf16Offset + cumulativeDelta
+            if isInExcluded(adjustedOffset, excluded) { continue }
 
-        var result = source
-        for record in records.reversed() {
-            if isInExcluded(record.utf16Offset, excluded) { continue }
-
-            if let replacement = transformer(record.match) {
-                var replaceOffset = record.utf16Offset
-                var replaceLength = record.utf16Length
-
-                let matchStr = String(source[record.match.range])
-                if let first = matchStr.first, (first == "\n" || first == ";") {
-                    replaceOffset += 1
-                    replaceLength -= 1
+            // Extract capture groups
+            var groups: [String] = []
+            for g in 0..<nsMatch.numberOfRanges {
+                let r = nsMatch.range(at: g)
+                if r.location == NSNotFound {
+                    groups.append("")
+                } else {
+                    groups.append(nsSource.substring(with: r))
                 }
+            }
 
-                let startIdx = result.utf16.index(result.utf16.startIndex, offsetBy: replaceOffset)
-                let endIdx = result.utf16.index(startIdx, offsetBy: replaceLength)
-                result.replaceSubrange(startIdx..<endIdx, with: replacement)
+            guard let replacement = transformer(groups) else { continue }
+
+            // Skip the leading \n or ; separator
+            var replaceOffset = utf16Offset
+            var skipCount = 0
+            let matchStr = groups[0]
+            if let first = matchStr.first, first == "\n" || first == ";" {
+                replaceOffset += 1
+                skipCount = 1
+            }
+
+            // Append text before this match, then the replacement
+            let beforeStart = source.utf16.index(source.utf16.startIndex, offsetBy: lastEnd)
+            let beforeEnd = source.utf16.index(source.utf16.startIndex, offsetBy: replaceOffset)
+            result += source[beforeStart..<beforeEnd]
+            result += replacement
+            lastEnd = utf16Offset + matchRange.length
+
+            // Calculate delta and shift excluded ranges
+            let originalUTF16Length = matchRange.length - skipCount
+            let replacementUTF16Length = replacement.utf16.count
+            let delta = replacementUTF16Length - originalUTF16Length
+            if delta != 0 {
+                let replacePos = replaceOffset + cumulativeDelta
+                for i in 0..<excluded.count {
+                    if excluded[i].start >= replacePos + originalUTF16Length {
+                        excluded[i] = ExcludedRange(start: excluded[i].start + delta, end: excluded[i].end + delta)
+                    }
+                }
+                cumulativeDelta += delta
             }
         }
-
+        // Append remaining text
+        let remainStart = source.utf16.index(source.utf16.startIndex, offsetBy: lastEnd)
+        result += source[remainStart...]
         return result
     }
 }
