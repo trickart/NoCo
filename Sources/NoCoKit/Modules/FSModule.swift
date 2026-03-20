@@ -329,6 +329,30 @@ public struct FSModule: NodeModule {
         }
         fs.setValue(unsafeBitCast(rmdirSync, to: AnyObject.self), forProperty: "rmdirSync")
 
+        // fs.rmSync(path, options) — recursive removal with force option
+        let rmSync: @convention(block) (String, JSValue) -> Void = { path, options in
+            guard let resolved = validateWrite(path) else { return }
+            let force = options.isObject ? (options.forProperty("force")?.toBool() ?? false) : false
+            var isDir: ObjCBool = false
+            if !fm.fileExists(atPath: resolved, isDirectory: &isDir) {
+                if !force {
+                    context.exception = context.createSystemError(
+                        "ENOENT: no such file or directory, rm '\(path)'",
+                        code: "ENOENT", syscall: "rm", path: path
+                    )
+                }
+                return
+            }
+            do {
+                try fm.removeItem(atPath: resolved)
+            } catch {
+                context.exception = context.createSystemError(
+                    error.localizedDescription, code: "ERR_FS_RM", syscall: "rm", path: path
+                )
+            }
+        }
+        fs.setValue(unsafeBitCast(rmSync, to: AnyObject.self), forProperty: "rmSync")
+
         // fs.renameSync(oldPath, newPath)
         let renameSync: @convention(block) (String, String) -> Void = { oldPath, newPath in
             guard let oldResolved = validateWrite(oldPath),

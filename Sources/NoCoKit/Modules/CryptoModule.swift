@@ -98,6 +98,56 @@ public struct CryptoModule: NodeModule {
         }
         crypto.setValue(unsafeBitCast(createHash, to: AnyObject.self), forProperty: "createHash")
 
+        // crypto.hash(algorithm, data, outputEncoding) — one-shot hash (Node.js 21+)
+        let hashOneShot: @convention(block) (String, JSValue, JSValue) -> JSValue = { algorithm, data, encoding in
+            let ctx = JSContext.current()!
+            let algo = algorithm.lowercased()
+
+            var inputData = Data()
+            if data.isString {
+                inputData = data.toString()!.data(using: .utf8)!
+            } else {
+                let length = Int(data.forProperty("length")?.toInt32() ?? 0)
+                for i in 0..<length {
+                    inputData.append(UInt8(data.atIndex(i).toInt32()))
+                }
+            }
+
+            let digestData: Data
+            switch algo {
+            case "sha256", "sha-256":
+                digestData = Data(SHA256.hash(data: inputData))
+            case "sha384", "sha-384":
+                digestData = Data(SHA384.hash(data: inputData))
+            case "sha512", "sha-512":
+                digestData = Data(SHA512.hash(data: inputData))
+            case "md5":
+                digestData = Data(Insecure.MD5.hash(data: inputData))
+            case "sha1", "sha-1":
+                digestData = Data(Insecure.SHA1.hash(data: inputData))
+            default:
+                ctx.exception = ctx.createError(
+                    "Unsupported hash algorithm: \(algo)", code: "ERR_CRYPTO_HASH_UNKNOWN")
+                return JSValue(undefinedIn: ctx)
+            }
+
+            let enc = encoding.isUndefined ? "hex" : encoding.toString()!
+            if enc == "hex" {
+                let hex = digestData.map { String(format: "%02x", $0) }.joined()
+                return JSValue(object: hex, in: ctx)
+            } else if enc == "base64" {
+                return JSValue(object: digestData.base64EncodedString(), in: ctx)
+            } else if enc == "buffer" {
+                let bufferCtor = ctx.objectForKeyedSubscript("Buffer")!
+                let fromFn = bufferCtor.objectForKeyedSubscript("from")!
+                let arr = [UInt8](digestData).map { Int($0) }
+                return fromFn.call(withArguments: [arr])
+            }
+            let hex = digestData.map { String(format: "%02x", $0) }.joined()
+            return JSValue(object: hex, in: ctx)
+        }
+        crypto.setValue(unsafeBitCast(hashOneShot, to: AnyObject.self), forProperty: "hash")
+
         // crypto.createHmac(algorithm, key)
         let createHmac: @convention(block) (String, JSValue) -> JSValue = { algorithm, key in
             let ctx = JSContext.current()!
