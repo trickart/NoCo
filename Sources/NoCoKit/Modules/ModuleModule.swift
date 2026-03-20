@@ -1,12 +1,21 @@
 import JavaScriptCore
 
-/// Implements the Node.js `module` built-in module (minimal stub for compatibility).
+/// Implements the Node.js `module` built-in module.
 public struct ModuleModule: NodeModule {
     public static let moduleName = "module"
 
     @discardableResult
     public static func install(in context: JSContext, runtime: NodeRuntime) -> JSValue {
-        let script = """
+        // Swift helper for TypeScript type stripping
+        let stripTSBlock: @convention(block) (String) -> String = { code in
+            return TypeScriptStripper.strip(code)
+        }
+        context.setObject(
+            unsafeBitCast(stripTSBlock, to: AnyObject.self),
+            forKeyedSubscript: "__NoCo_stripTypeScriptTypes" as NSString
+        )
+
+        let script = #"""
         (function() {
             var mod = {};
 
@@ -43,9 +52,8 @@ public struct ModuleModule: NodeModule {
             };
 
             mod.Module.prototype._compile = function(content, filename) {
-                // Minimal stub: evaluate the content
                 var fn = new Function('exports', 'require', 'module', '__filename', '__dirname', content);
-                fn(this.exports, require, this, this.filename, this.filename.replace(/\\/[^/]*$/, ''));
+                fn(this.exports, require, this, this.filename, this.filename.replace(/\/[^/]*$/, ''));
             };
 
             mod.builtinModules = [
@@ -118,9 +126,150 @@ public struct ModuleModule: NodeModule {
             // Module._cache
             mod.Module._cache = mod._cache;
 
+            // --- wrap / wrapper ---
+            mod.wrapper = ['(function (exports, require, module, __filename, __dirname) { ', '\n});'];
+            mod.wrap = function(code) { return mod.wrapper[0] + code + mod.wrapper[1]; };
+            mod.Module.wrap = mod.wrap;
+            mod.Module.wrapper = mod.wrapper;
+
+            // --- _findPath ---
+            mod.Module._findPath = function(request, paths, isMain) {
+                var fs = require('fs');
+                var path = require('path');
+                var exts = ['.js', '.json', '.node', '.mjs', '.cjs'];
+
+                function tryFile(p) {
+                    try {
+                        var stat = fs.statSync(p);
+                        if (stat.isFile()) return p;
+                    } catch(e) {}
+                    return false;
+                }
+
+                function tryExtensions(p) {
+                    for (var e = 0; e < exts.length; e++) {
+                        var f = tryFile(p + exts[e]);
+                        if (f) return f;
+                    }
+                    return false;
+                }
+
+                function tryDirectory(dir) {
+                    var pkgPath = path.join(dir, 'package.json');
+                    try {
+                        if (fs.existsSync(pkgPath)) {
+                            var pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+                            if (pkg.main) {
+                                var mainPath = path.resolve(dir, pkg.main);
+                                var f = tryFile(mainPath) || tryExtensions(mainPath);
+                                if (f) return f;
+                            }
+                        }
+                    } catch(e) {}
+                    return tryExtensions(path.join(dir, 'index'));
+                }
+
+                function resolve(basePath) {
+                    var f = tryFile(basePath);
+                    if (f) return f;
+                    f = tryExtensions(basePath);
+                    if (f) return f;
+                    try {
+                        var stat = fs.statSync(basePath);
+                        if (stat.isDirectory()) return tryDirectory(basePath);
+                    } catch(e) {}
+                    return false;
+                }
+
+                if (path.isAbsolute(request) || request.startsWith('./') || request.startsWith('../')) {
+                    return resolve(request);
+                }
+
+                if (!paths) return false;
+                for (var i = 0; i < paths.length; i++) {
+                    var basePath = path.join(paths[i], request);
+                    var r = resolve(basePath);
+                    if (r) return r;
+                }
+                return false;
+            };
+            mod._findPath = mod.Module._findPath;
+
+            // --- _resolveLookupPaths ---
+            mod.Module._resolveLookupPaths = function(request, parent) {
+                if (mod.isBuiltin(request)) return null;
+                if (request.startsWith('./') || request.startsWith('../') || request.startsWith('/')) {
+                    var parentDir = parent && parent.filename ? require('path').dirname(parent.filename) : process.cwd();
+                    return [parentDir];
+                }
+                var from = parent && parent.filename ? require('path').dirname(parent.filename) : process.cwd();
+                return mod.Module._nodeModulePaths(from);
+            };
+            mod._resolveLookupPaths = mod.Module._resolveLookupPaths;
+
+            // --- globalPaths ---
+            mod.Module.globalPaths = (function() {
+                var paths = [];
+                var home = process.env.HOME || process.env.USERPROFILE || '';
+                if (home) {
+                    paths.push(require('path').join(home, '.node_modules'));
+                    paths.push(require('path').join(home, '.node_libraries'));
+                }
+                var nodePath = process.env.NODE_PATH;
+                if (nodePath) {
+                    nodePath.split(':').forEach(function(p) { if (p) paths.push(p); });
+                }
+                return paths;
+            })();
+            mod.globalPaths = mod.Module.globalPaths;
+
+            // --- findPackageJSON ---
+            mod.Module.findPackageJSON = function(startPath) {
+                var fs = require('fs');
+                var path = require('path');
+                var dir = startPath;
+                try { if (fs.statSync(dir).isFile()) dir = path.dirname(dir); } catch(e) { dir = path.dirname(dir); }
+                while (true) {
+                    var pkgPath = path.join(dir, 'package.json');
+                    if (fs.existsSync(pkgPath)) return pkgPath;
+                    var parent = path.dirname(dir);
+                    if (parent === dir) break;
+                    dir = parent;
+                }
+                return undefined;
+            };
+            mod.findPackageJSON = mod.Module.findPackageJSON;
+
+            // --- stripTypeScriptTypes ---
+            mod.Module.stripTypeScriptTypes = function(code) {
+                return __NoCo_stripTypeScriptTypes(code);
+            };
+            mod.stripTypeScriptTypes = mod.Module.stripTypeScriptTypes;
+
+            // --- constants ---
+            mod.constants = { USE_MAIN_CONTEXT_DEFAULT_LOADER: 0 };
+            mod.Module.constants = mod.constants;
+
+            // --- V8 compile cache stubs (JSC has no equivalent) ---
+            mod.Module.enableCompileCache = function() { return { status: 2, directory: '' }; };
+            mod.Module.getCompileCacheDir = function() { return undefined; };
+            mod.Module.flushCompileCache = function() {};
+
+            // --- V8 SourceMap stubs (JSC has no equivalent) ---
+            mod.Module.findSourceMap = function(filename) { return undefined; };
+            mod.Module.SourceMap = function SourceMap(payload) { this.payload = payload; };
+
+            // --- syncBuiltinESMExports (no-op) ---
+            mod.Module.syncBuiltinESMExports = function() {};
+            mod.syncBuiltinESMExports = mod.Module.syncBuiltinESMExports;
+
+            // --- _initPaths / _preloadModules (no-op) ---
+            mod.Module._initPaths = function() {};
+            mod.Module._preloadModules = function(requests) {};
+
             return mod;
         })();
-        """
+        """#
 
         return context.evaluateScript(script)!
     }

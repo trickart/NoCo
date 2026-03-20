@@ -309,3 +309,14 @@ import JavaScriptCore
     """)
     #expect(result?.toBool() == true)
 }
+
+// MARK: - vm.constants
+
+@Test func vmConstants() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var vm = require('vm');
+        vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER;
+    """)
+    #expect(result?.toInt32() == 0)
+}
