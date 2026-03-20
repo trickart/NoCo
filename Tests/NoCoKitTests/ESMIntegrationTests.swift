@@ -298,3 +298,16 @@ private func fixtureDir() -> String {
     let value = exports.forProperty("value")?.toInt32()
     #expect(value == 99)
 }
+
+// MARK: - Many Named Imports (excluded ranges regression)
+
+@Test func manyNamedImportsThenDefault() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let path = fixtureDir() + "/many-imports-then-default.mjs"
+    runtime.moduleLoader.loadFile(at: path)
+
+    #expect(messages.contains("many-imports:v1:v16:function"))
+}

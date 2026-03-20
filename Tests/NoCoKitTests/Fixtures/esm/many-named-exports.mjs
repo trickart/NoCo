@@ -1,0 +1,16 @@
+export const a1 = 'v1';
+export const a2 = 'v2';
+export const a3 = 'v3';
+export const a4 = 'v4';
+export const a5 = 'v5';
+export const a6 = 'v6';
+export const a7 = 'v7';
+export const a8 = 'v8';
+export const a9 = 'v9';
+export const a10 = 'v10';
+export const a11 = 'v11';
+export const a12 = 'v12';
+export const a13 = 'v13';
+export const a14 = 'v14';
+export const a15 = 'v15';
+export const a16 = 'v16';
