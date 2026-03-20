@@ -45,6 +45,68 @@ import Testing
     #expect(result.contains("named"))
 }
 
+// MARK: - Multiple Import Transformations (excluded ranges regression)
+
+@Test func transformManyNamedImportsThenDefault() async throws {
+    // Regression: 16+ named imports caused the excluded ranges to incorrectly
+    // cover subsequent import statements, leaving them untransformed.
+    let source = """
+    import { a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16 } from 'bigmod';
+    import path from 'node:path';
+    console.log('ok');
+    """
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("__esm_import('bigmod', __noco_dirname__)"))
+    #expect(result.contains("__esm_import('node:path', __noco_dirname__)"))
+    #expect(result.contains("path = __m.default"))
+    #expect(!result.contains("import path from"))
+}
+
+@Test func transformManyNamedImportsThenNamespace() async throws {
+    let source = """
+    import { a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p } from 'mod1';
+    import * as fs from 'node:fs';
+    """
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("__esm_import('mod1', __noco_dirname__)"))
+    #expect(result.contains("var fs = __esm_import('node:fs', __noco_dirname__)"))
+    #expect(!result.contains("import * as fs"))
+}
+
+@Test func transformManyNamedImportsThenSideEffect() async throws {
+    let source = """
+    import { a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q } from 'mod1';
+    import './setup.js';
+    """
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("__esm_import('mod1', __noco_dirname__)"))
+    #expect(result.contains("__esm_import('./setup.js', __noco_dirname__)"))
+    #expect(!result.contains("import './setup.js'"))
+}
+
+@Test func transformMultipleNamedImports() async throws {
+    // Two named import lines — both should be transformed
+    let source = """
+    import { a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p } from 'mod1';
+    import { x, y, z } from 'mod2';
+    """
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("__esm_import('mod1', __noco_dirname__)"))
+    #expect(result.contains("__esm_import('mod2', __noco_dirname__)"))
+    #expect(!result.contains("import {"))
+}
+
+@Test func transformNamedThenMixed() async throws {
+    let source = """
+    import { a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p } from 'mod1';
+    import def, { named } from 'mod2';
+    """
+    let result = ESMTransformer.transform(source)
+    #expect(result.contains("__esm_import('mod1', __noco_dirname__)"))
+    #expect(result.contains("__esm_import('mod2', __noco_dirname__)"))
+    #expect(result.contains("def = __m.default"))
+}
+
 // MARK: - Export Transformations
 
 @Test func transformExportConst() async throws {
