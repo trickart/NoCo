@@ -729,7 +729,7 @@ public final class ModuleLoader {
             // Wrap common fs methods as promise-returning versions
             var methods = ['readFile', 'writeFile', 'appendFile', 'readdir',
                            'stat', 'unlink', 'mkdir', 'rmdir', 'rename',
-                           'copyFile', 'access', 'chmod', 'chown'];
+                           'copyFile', 'access', 'chmod', 'chown', 'rm'];
             methods.forEach(function(name) {
                 var syncName = name + 'Sync';
                 promises[name] = function() {
