@@ -501,6 +501,9 @@ public struct VmModule: NodeModule {
             // --- Module (base for constants) ---
             vm.Module = function Module() {};
 
+            // --- constants ---
+            vm.constants = { USE_MAIN_CONTEXT_DEFAULT_LOADER: 0 };
+
             return vm;
         })();
         """
