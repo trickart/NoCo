@@ -274,8 +274,10 @@ public final class ModuleLoader {
         // ESM 静的インポートの事前ロード: モジュール実行前に TLA 依存を解決
         // evaluateScript("void 0") による microtask drain は JS コールバック内では動作しないため、
         // 純粋な Swift コンテキストでインポート先を事前にロード・drain しておく
+        // TLA 事前ロード: ESM 静的インポート先のうち TLA を持つモジュールを事前に解決
+        // depth 1（Swift コンテキスト）でのみ実行。depth > 1 では JS コールバック内のため drain 不可
         let isESM = ESMDetector.shared.isESM(path: path)
-        if isESM {
+        if isESM && loadFileDepth == 1 {
             preloadStaticImports(source: jsSource, basedir: dirname, context: context)
         }
 
@@ -429,16 +431,60 @@ public final class ModuleLoader {
                     context.exception = err
                 }
             } else {
-                // ネストされた呼び出し: drain はスキップし、Promise をチェインして module.exports を返す
-                let thenBlock: @convention(block) (JSValue) -> JSValue = { _ in
-                    return module.forProperty("exports") ?? exports
+                // ネストされた呼び出し: drain を試行（JS コールバック内では動作しない場合がある）
+                var settled = false
+                var rejected = false
+                var rejectionError: JSValue?
+
+                let thenBlock2: @convention(block) (JSValue) -> Void = { _ in
+                    settled = true
                 }
-                let exportsPromise = promise.invokeMethod("then", withArguments: [
-                    unsafeBitCast(thenBlock, to: AnyObject.self),
-                ])!
-                loadingModules.removeValue(forKey: path)
-                moduleCache[path] = exportsPromise
-                return exportsPromise
+                let catchBlock2: @convention(block) (JSValue) -> Void = { err in
+                    settled = true
+                    rejected = true
+                    rejectionError = err
+                }
+
+                promise.invokeMethod("then", withArguments: [
+                    unsafeBitCast(thenBlock2, to: AnyObject.self),
+                ])
+                promise.invokeMethod("catch", withArguments: [
+                    unsafeBitCast(catchBlock2, to: AnyObject.self),
+                ])
+
+                for _ in 0..<20 {
+                    context.evaluateScript("void 0")
+                    if settled { break }
+                }
+
+                if rejected, let err = rejectionError {
+                    context.exception = err
+                }
+
+                // drain 失敗時: module.exports に内容があれば使用 (false positive TLA)
+                // 空なら Promise を返す (真の TLA — 事前ロードで解決される前提)
+                if !settled {
+                    let currentExports = module.forProperty("exports")
+                    let hasContent: Bool
+                    if let exp = currentExports, exp.isObject {
+                        let keys = context.evaluateScript("Object.keys")!.call(withArguments: [exp])!
+                        hasContent = keys.forProperty("length")!.toInt32() > 1
+                    } else {
+                        hasContent = false
+                    }
+
+                    if !hasContent {
+                        let exportsThenBlock: @convention(block) (JSValue) -> JSValue = { _ in
+                            return module.forProperty("exports") ?? exports
+                        }
+                        let exportsPromise = promise.invokeMethod("then", withArguments: [
+                            unsafeBitCast(exportsThenBlock, to: AnyObject.self),
+                        ])!
+                        loadingModules.removeValue(forKey: path)
+                        moduleCache[path] = exportsPromise
+                        return exportsPromise
+                    }
+                }
             }
         }
 
