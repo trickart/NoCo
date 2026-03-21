@@ -426,3 +426,42 @@ private func fixturesPath() -> String {
     let result = runtime.moduleLoader.loadFile(at: tmpDir + "/main.js")
     #expect(result.toString() == "resolved")
 }
+
+// MARK: - evaluateCode (eval mode)
+
+@Test func evaluateCodeDirname() async throws {
+    let runtime = NodeRuntime()
+    var messages: [(NodeRuntime.ConsoleLevel, String)] = []
+    runtime.consoleHandler = { level, msg in messages.append((level, msg)) }
+
+    runtime.moduleLoader.evaluateCode("console.log(__dirname)")
+    let cwd = FileManager.default.currentDirectoryPath
+    #expect(messages.contains(where: { $0.1 == cwd }))
+}
+
+@Test func evaluateCodeFilename() async throws {
+    let runtime = NodeRuntime()
+    var messages: [(NodeRuntime.ConsoleLevel, String)] = []
+    runtime.consoleHandler = { level, msg in messages.append((level, msg)) }
+
+    runtime.moduleLoader.evaluateCode("console.log(__filename)")
+    #expect(messages.contains(where: { $0.1 == "[eval]" }))
+}
+
+@Test func evaluateCodeModuleAndExports() async throws {
+    let runtime = NodeRuntime()
+    var messages: [(NodeRuntime.ConsoleLevel, String)] = []
+    runtime.consoleHandler = { level, msg in messages.append((level, msg)) }
+
+    runtime.moduleLoader.evaluateCode("console.log(typeof module + ',' + typeof exports)")
+    #expect(messages.contains(where: { $0.1 == "object,object" }))
+}
+
+@Test func evaluateCodeRequireBuiltin() async throws {
+    let runtime = NodeRuntime()
+    var messages: [(NodeRuntime.ConsoleLevel, String)] = []
+    runtime.consoleHandler = { level, msg in messages.append((level, msg)) }
+
+    runtime.moduleLoader.evaluateCode("const path = require('path'); console.log(path.join('a','b'))")
+    #expect(messages.contains(where: { $0.1 == "a/b" }))
+}
