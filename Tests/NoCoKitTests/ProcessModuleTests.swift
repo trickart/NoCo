@@ -65,13 +65,16 @@ import JavaScriptCore
     runtime.consoleHandler = { level, msg in messages.append((level, msg)) }
 
     runtime.evaluate("""
+        var exitFired = false;
+        process.on('exit', function(code) { exitFired = true; });
         setTimeout(function() { console.log('should not fire'); }, 5000);
         process.exit(0);
     """)
     runtime.runEventLoop(timeout: 0.2)
 
-    // process.exit should have stopped the event loop
-    #expect(messages.contains(where: { $0.1.contains("process.exit") }))
+    // process.exit should emit 'exit' event and stop the event loop
+    let exitFired = runtime.evaluate("exitFired")
+    #expect(exitFired?.toBool() == true)
     #expect(!messages.contains(where: { $0.1 == "should not fire" }))
 }
 

@@ -528,8 +528,10 @@ public struct ChildProcessModule: NodeModule {
         }
         childProcess.setValue(unsafeBitCast(kill, to: AnyObject.self), forProperty: "kill")
 
-        // connected / killed
+        // connected / killed / exitCode / signalCode
         childProcess.setValue(false, forProperty: "killed")
+        childProcess.setValue(JSValue(nullIn: context), forProperty: "exitCode")
+        childProcess.setValue(JSValue(nullIn: context), forProperty: "signalCode")
 
         // Launch
         do {
@@ -603,7 +605,9 @@ public struct ChildProcessModule: NodeModule {
                 let signal: String? = process.terminationReason == .uncaughtSignal ? "SIGTERM" : nil
                 runtime.eventLoop.enqueueCallback {
                     childProcess.setValue(true, forProperty: "killed")
+                    childProcess.setValue(code, forProperty: "exitCode")
                     if let sig = signal {
+                        childProcess.setValue(sig, forProperty: "signalCode")
                         childProcess.invokeMethod("emit", withArguments: ["exit", code, sig])
                         childProcess.invokeMethod("emit", withArguments: ["close", code, sig])
                     } else {
@@ -822,6 +826,8 @@ public struct ChildProcessModule: NodeModule {
 
         childProcess.setValue(true, forProperty: "connected")
         childProcess.setValue(false, forProperty: "killed")
+        childProcess.setValue(JSValue(nullIn: context), forProperty: "exitCode")
+        childProcess.setValue(JSValue(nullIn: context), forProperty: "signalCode")
 
         // Install buffered send/disconnect — messages are queued until IPC is connected
         context.evaluateScript("""
@@ -1088,7 +1094,9 @@ public struct ChildProcessModule: NodeModule {
                 let signal: String? = process.terminationReason == .uncaughtSignal ? "SIGTERM" : nil
                 runtime.eventLoop.enqueueCallback {
                     childProcess.setValue(true, forProperty: "killed")
+                    childProcess.setValue(code, forProperty: "exitCode")
                     if let sig = signal {
+                        childProcess.setValue(sig, forProperty: "signalCode")
                         childProcess.invokeMethod("emit", withArguments: ["exit", code, sig])
                         childProcess.invokeMethod("emit", withArguments: ["close", code, sig])
                     } else {
@@ -1152,7 +1160,18 @@ public struct ChildProcessModule: NodeModule {
         childProcess.setValue(true, forProperty: "_ipcConnected")
         context.evaluateScript("""
             (function(cp) {
-                cp.send = function(msg) { cp._ipcSend(msg); };
+                cp.send = function(msg, options, callback) {
+                    if (typeof options === 'function') { callback = options; options = undefined; }
+                    if (!cp.connected) {
+                        var err = new Error('channel closed');
+                        err.code = 'ERR_IPC_CHANNEL_CLOSED';
+                        if (callback) { callback(err); return false; }
+                        throw err;
+                    }
+                    cp._ipcSend(msg);
+                    if (callback) callback(null);
+                    return true;
+                };
                 cp.disconnect = function() { cp._ipcDisconnect(); };
                 var q = cp._ipcQueue;
                 cp._ipcQueue = [];
