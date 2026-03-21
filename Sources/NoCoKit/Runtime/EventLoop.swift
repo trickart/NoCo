@@ -176,7 +176,9 @@ public final class EventLoop: @unchecked Sendable {
         let rl = CFRunLoopGetCurrent()
         var sourceContext = CFRunLoopSourceContext()
         sourceContext.version = 0
-        // perform callback は不要（signal + wakeup でループを起こすだけ）
+        sourceContext.perform = { _ in
+            // No-op: signal + wakeup でループを起こすだけ
+        }
         let source = CFRunLoopSourceCreate(nil, 0, &sourceContext)!
         CFRunLoopAddSource(rl, source, .defaultMode)
         runLoopState.withLock { state in

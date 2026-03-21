@@ -94,10 +94,11 @@ public struct ProcessModule: NodeModule {
         }
         process.setValue(unsafeBitCast(chdir, to: AnyObject.self), forProperty: "chdir")
 
-        // process.exit(code)
+        // process.exit(code) — Node.js 互換: exit イベントを emit してプロセスを終了
         let exit: @convention(block) (JSValue) -> Void = { code in
             let exitCode = code.isUndefined ? 0 : Int32(code.toInt32())
-            runtime.consoleHandler(.info, "process.exit(\(exitCode)) called")
+            let p = runtime.context.objectForKeyedSubscript("process")!
+            p.invokeMethod("emit", withArguments: ["exit", Int(exitCode)])
             runtime.eventLoop.stop()
         }
         process.setValue(unsafeBitCast(exit, to: AnyObject.self), forProperty: "exit")

@@ -142,14 +142,16 @@ import JavaScriptCore
 
     // Use process.nextTick to call exit before the timer fires
     runtime.evaluate("""
+        var exitFired = false;
+        process.on('exit', function() { exitFired = true; });
         setTimeout(function() { console.log('should not run'); }, 500);
         process.nextTick(function() { process.exit(0); });
     """)
     runtime.runEventLoop(timeout: 0.3)
 
-    // process.exit() stops the event loop, so the timer should not fire
-    let hasExitMsg = messages.contains(where: { $0.contains("process.exit") })
-    #expect(hasExitMsg)
+    // process.exit() emits 'exit' event and stops the event loop, so the timer should not fire
+    let exitFired = runtime.evaluate("exitFired")
+    #expect(exitFired?.toBool() == true)
     #expect(!messages.contains("should not run"))
 }
 
