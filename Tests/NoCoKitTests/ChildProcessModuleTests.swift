@@ -781,4 +781,62 @@ func execOffRemovesListener() async throws {
     let count = runtime.evaluate("callCount")
     #expect(count?.toInt32() == 0)
 }
+
+// MARK: - Advanced serialization (circular references)
+
+@Test(.timeLimit(.minutes(1)))
+func forkAdvancedSerializationReceive() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_circular.js").path
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var received = null;
+        var child = cp.fork('\(fixturePath)', { execPath: '\(execPath)', serialization: 'advanced' });
+        child.on('message', function(msg) {
+            received = msg;
+            child.disconnect();
+        });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    // Verify the circular reference was preserved
+    let name = runtime.evaluate("received && received.name")
+    #expect(name?.toString() == "test")
+    let taskId = runtime.evaluate("received && received.tasks[0].id")
+    #expect(taskId?.toInt32() == 1)
+    let isCircular = runtime.evaluate("received && received.tasks[0].parent === received")
+    #expect(isCircular?.toBool() == true)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func forkAdvancedSerializationEcho() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_circular_echo.js").path
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var received = null;
+        var child = cp.fork('\(fixturePath)', { execPath: '\(execPath)', serialization: 'advanced' });
+        child.on('message', function(msg) {
+            received = msg;
+            child.disconnect();
+        });
+        // Send a circular object from parent to child
+        var obj = { name: 'echo_test', items: [] };
+        var item = { value: 42, root: obj };
+        obj.items.push(item);
+        child.send(obj);
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let name = runtime.evaluate("received && received.name")
+    #expect(name?.toString() == "echo_test")
+    let value = runtime.evaluate("received && received.items[0].value")
+    #expect(value?.toInt32() == 42)
+    let isCircular = runtime.evaluate("received && received.items[0].root === received")
+    #expect(isCircular?.toBool() == true)
+}
 #endif

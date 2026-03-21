@@ -1367,7 +1367,9 @@ public struct WebAPIModule {
             // ============================================================
             if (typeof g.structuredClone === 'undefined') {
                 g.structuredClone = function(value) {
-                    return JSON.parse(JSON.stringify(value));
+                    return globalThis.__noco_ipc.deserialize(
+                        globalThis.__noco_ipc.serialize(value)
+                    );
                 };
             }
 

@@ -12,7 +12,7 @@ public struct V8Module: NodeModule {
             var v8 = {};
 
             v8.serialize = function(value) {
-                var json = JSON.stringify(value);
+                var json = globalThis.__noco_ipc.serialize(value);
                 if (typeof Buffer !== 'undefined') {
                     return Buffer.from(json, 'utf8');
                 }
@@ -26,7 +26,7 @@ public struct V8Module: NodeModule {
                 } else {
                     str = new TextDecoder().decode(buffer);
                 }
-                return JSON.parse(str);
+                return globalThis.__noco_ipc.deserialize(str);
             };
 
             v8.setFlagsFromString = function(flags) {
