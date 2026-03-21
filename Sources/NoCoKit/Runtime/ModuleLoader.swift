@@ -346,60 +346,33 @@ public final class ModuleLoader {
                     context.exception = err
                 }
             } else {
-                // ネストされた呼び出し: drain を試行（JS コールバック内では動作しない場合がある）
-                var settled = false
-                var rejected = false
-                var rejectionError: JSValue?
-
-                let thenBlock2: @convention(block) (JSValue) -> Void = { _ in
-                    settled = true
-                }
-                let catchBlock2: @convention(block) (JSValue) -> Void = { err in
-                    settled = true
-                    rejected = true
-                    rejectionError = err
-                }
-
-                promise.invokeMethod("then", withArguments: [
-                    unsafeBitCast(thenBlock2, to: AnyObject.self),
-                ])
-                promise.invokeMethod("catch", withArguments: [
-                    unsafeBitCast(catchBlock2, to: AnyObject.self),
-                ])
-
-                for _ in 0..<20 {
-                    context.evaluateScript("void 0")
-                    if settled { break }
+                // ネストされた呼び出し: evaluateScript("void 0") による drain は
+                // 外部の pending microtask を消費してしまうため使用しない。
+                // module.exports の内容で TLA false positive を判定し、
+                // 真の TLA は Promise をそのまま返す（__esm_import の thenable チェックが処理）。
+                let currentExports = module.forProperty("exports")
+                let hasContent: Bool
+                if let exp = currentExports, exp.isObject {
+                    let keys = context.objectForKeyedSubscript("Object" as NSString)!
+                        .invokeMethod("keys", withArguments: [exp])!
+                    hasContent = keys.forProperty("length")!.toInt32() > 1
+                } else {
+                    hasContent = false
                 }
 
-                if rejected, let err = rejectionError {
-                    context.exception = err
-                }
-
-                // drain 失敗時: module.exports に内容があれば使用 (false positive TLA)
-                // 空なら Promise を返す (真の TLA — 事前ロードで解決される前提)
-                if !settled {
-                    let currentExports = module.forProperty("exports")
-                    let hasContent: Bool
-                    if let exp = currentExports, exp.isObject {
-                        let keys = context.evaluateScript("Object.keys")!.call(withArguments: [exp])!
-                        hasContent = keys.forProperty("length")!.toInt32() > 1
-                    } else {
-                        hasContent = false
+                if !hasContent {
+                    // 真の TLA: Promise を返す（caller が chain する）
+                    let exportsThenBlock: @convention(block) (JSValue) -> JSValue = { _ in
+                        return module.forProperty("exports") ?? exports
                     }
-
-                    if !hasContent {
-                        let exportsThenBlock: @convention(block) (JSValue) -> JSValue = { _ in
-                            return module.forProperty("exports") ?? exports
-                        }
-                        let exportsPromise = promise.invokeMethod("then", withArguments: [
-                            unsafeBitCast(exportsThenBlock, to: AnyObject.self),
-                        ])!
-                        loadingModules.removeValue(forKey: path)
-                        moduleCache[path] = exportsPromise
-                        return exportsPromise
-                    }
+                    let exportsPromise = promise.invokeMethod("then", withArguments: [
+                        unsafeBitCast(exportsThenBlock, to: AnyObject.self),
+                    ])!
+                    loadingModules.removeValue(forKey: path)
+                    moduleCache[path] = exportsPromise
+                    return exportsPromise
                 }
+                // module.exports に内容があるなら TLA false positive — exports を使用
             }
         }
 

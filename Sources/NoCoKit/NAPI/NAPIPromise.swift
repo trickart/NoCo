@@ -26,19 +26,32 @@ final class NAPIDeferredData {
 @_cdecl("napi_create_promise")
 public func _napi_create_promise(_ env: napi_env!, _ deferred: UnsafeMutablePointer<napi_deferred?>!,
                            _ promise: UnsafeMutablePointer<napi_value?>!) -> napi_status {
-    let e = NAPIEnvironment.from(env)
 
-    // Create promise and capture resolve/reject
-    let result = e.context.evaluateScript("""
-        (function() {
-            var _resolve, _reject;
-            var p = new Promise(function(resolve, reject) {
-                _resolve = resolve;
-                _reject = reject;
-            });
-            return { promise: p, resolve: _resolve, reject: _reject };
-        })()
-    """)!
+    let e = NAPIEnvironment.from(env)
+    let ctx = e.context
+
+    // キャッシュされたファクトリ関数を使用して evaluateScript による microtask drain を回避
+    // (evaluateScript は JSC の microtask checkpoint をトリガーし、async/await チェーンを壊す)
+    let factory: JSValue
+    if let cached = ctx.objectForKeyedSubscript("__noco_createPromise" as NSString),
+       !cached.isUndefined {
+        factory = cached
+    } else {
+        let fn = ctx.evaluateScript("""
+            (function() {
+                var _resolve, _reject;
+                var p = new Promise(function(resolve, reject) {
+                    _resolve = resolve;
+                    _reject = reject;
+                });
+                return { promise: p, resolve: _resolve, reject: _reject };
+            })
+        """)!
+        ctx.setObject(fn, forKeyedSubscript: "__noco_createPromise" as NSString)
+        factory = fn
+    }
+
+    let result = factory.call(withArguments: [])!
 
     let promiseVal = result.forProperty("promise")!
     let resolveVal = result.forProperty("resolve")!
