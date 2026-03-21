@@ -687,6 +687,31 @@ public final class NodeRuntime: @unchecked Sendable {
         // Install ESM runtime functions (__esm_import, __esm_export, etc.)
         ESMRuntime.install(in: context, runtime: self)
 
+        // WebAssembly.compile/instantiate の非同期 Promise は JSC の DeferredWorkTimer に依存し、
+        // NoCo の DispatchSemaphore ベースイベントループでは解決されない。
+        // 同期 API (new Module/Instance) は完全動作するため、非同期 API を同期ラッパーでオーバーライド。
+        context.evaluateScript("""
+            (function() {
+                if (typeof WebAssembly === 'undefined') return;
+                var OrigModule = WebAssembly.Module;
+                var OrigInstance = WebAssembly.Instance;
+                WebAssembly.compile = function(bytes) {
+                    try { return Promise.resolve(new OrigModule(bytes)); }
+                    catch(e) { return Promise.reject(e); }
+                };
+                WebAssembly.instantiate = function(bytesOrModule, imports) {
+                    try {
+                        if (bytesOrModule instanceof OrigModule) {
+                            return Promise.resolve(new OrigInstance(bytesOrModule, imports));
+                        }
+                        var mod = new OrigModule(bytesOrModule);
+                        var inst = new OrigInstance(mod, imports);
+                        return Promise.resolve({ module: mod, instance: inst });
+                    } catch(e) { return Promise.reject(e); }
+                };
+            })();
+            """)
+
         // WebAPIModule depends on Blob (for File extends Blob), so install after Blob
         WebAPIModule.install(in: context, runtime: self)
 

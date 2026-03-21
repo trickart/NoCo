@@ -53,9 +53,11 @@ vitest が **`RUN v4.1.0`** バナーを表示し、`createVitest()` → vite `c
 
 ### Worker fork
 - `child_process.fork()` 自体は動作（基本的な IPC メッセージ送受信も OK）
-- vitest は `serialization: "advanced"`（V8 structured clone）を指定 — NoCo は JSON シリアライゼーションのみ対応
-- worker スクリプト (`dist/workers/forks.js`) の依存に `node:v8` 等の未実装モジュールが含まれるため停止
-- 現在のブロッカー: worker 内での vitest モジュール初期化
+- vitest は `serialization: "advanced"`（V8 structured clone）を指定 — NoCo は JSON シリアライゼーションのみ対応（実用上は JSON で動作）
+- worker スクリプト (`dist/workers/forks.js`) のモジュール読み込み・IPC 通信は正常動作
+- ~~`es-module-lexer` の WASM 初期化で永久ハング~~ → WebAssembly.compile/instantiate の同期ラッパーで解決
+- worker の `setupBaseEnvironment` → `setupNodeLoaderHooks` まで到達
+- 現在のブロッカー: worker 内での環境セットアップエラー（`[object Object]`）— 60秒タイムアウトから1.91秒に短縮
 
 ### `--pool=threads` の場合
 - `worker_threads` モジュールが基本スタブのため、forks にフォールバック
