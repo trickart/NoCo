@@ -743,6 +743,17 @@ public struct ChildProcessModule: NodeModule {
             }
         }
         env["NODE_CHANNEL_PATH"] = socketPath
+
+        // serialization: "advanced" enables structured clone (circular reference support)
+        let useAdvancedSerialization: Bool
+        if let opts = options, let serVal = opts.forProperty("serialization"), serVal.isString,
+           serVal.toString() == "advanced" {
+            useAdvancedSerialization = true
+            env["NODE_CHANNEL_SERIALIZATION_MODE"] = "advanced"
+        } else {
+            useAdvancedSerialization = false
+        }
+
         proc.environment = env
 
         // Options: cwd
@@ -985,15 +996,22 @@ public struct ChildProcessModule: NodeModule {
                     // Install send/disconnect now that IPC is connected
                     self.installIPCMethods(
                         on: childProcess, ipcChannel: ipcChannel,
-                        runtime: runtime, context: runtime.context
+                        runtime: runtime, context: runtime.context,
+                        useAdvancedSerialization: useAdvancedSerialization
                     )
 
                     // Start reading IPC messages
                     ipcChannel.startReading(
                         onMessage: { jsonString in
                             let ctx = runtime.context
-                            let parsed = ctx.evaluateScript("JSON.parse")!
-                                .call(withArguments: [jsonString])!
+                            let parsed: JSValue
+                            if useAdvancedSerialization {
+                                parsed = ctx.evaluateScript("globalThis.__noco_ipc.deserialize")!
+                                    .call(withArguments: [jsonString])!
+                            } else {
+                                parsed = ctx.evaluateScript("JSON.parse")!
+                                    .call(withArguments: [jsonString])!
+                            }
                             childProcess.invokeMethod("emit", withArguments: ["message", parsed])
                         },
                         onDisconnect: {
@@ -1101,13 +1119,23 @@ public struct ChildProcessModule: NodeModule {
     /// Install send() and disconnect() on a child process, flushing any queued messages.
     private static func installIPCMethods(
         on childProcess: JSValue, ipcChannel: IPCChannel,
-        runtime: NodeRuntime, context: JSContext
+        runtime: NodeRuntime, context: JSContext,
+        useAdvancedSerialization: Bool = false
     ) {
         let send: @convention(block) (JSValue) -> Void = { message in
             let ctx = JSContext.current()!
-            let jsonResult = ctx.evaluateScript("JSON.stringify")!.call(withArguments: [message])!
-            guard !jsonResult.isUndefined else { return }
-            ipcChannel.write(jsonResult.toString())
+            let result: String
+            if useAdvancedSerialization {
+                let serialized = ctx.evaluateScript("globalThis.__noco_ipc.serialize")!
+                    .call(withArguments: [message])!
+                guard !serialized.isUndefined else { return }
+                result = serialized.toString()
+            } else {
+                let jsonResult = ctx.evaluateScript("JSON.stringify")!.call(withArguments: [message])!
+                guard !jsonResult.isUndefined else { return }
+                result = jsonResult.toString()
+            }
+            ipcChannel.write(result)
         }
         childProcess.setValue(unsafeBitCast(send, to: AnyObject.self), forProperty: "_ipcSend")
 

@@ -687,6 +687,64 @@ public final class NodeRuntime: @unchecked Sendable {
         // Install ESM runtime functions (__esm_import, __esm_export, etc.)
         ESMRuntime.install(in: context, runtime: self)
 
+        // Install IPC structured clone helpers (used by child_process advanced serialization)
+        context.evaluateScript("""
+        Object.defineProperty(globalThis, '__noco_ipc', {
+            value: (function() {
+                function serialize(value) {
+                    var nextId = 0;
+                    var seen = new WeakMap();
+                    function walk(val) {
+                        if (val === null || typeof val !== 'object') return val;
+                        if (typeof val === 'function') return undefined;
+                        if (seen.has(val)) return { '$circRef': seen.get(val) };
+                        var id = nextId++;
+                        seen.set(val, id);
+                        if (Array.isArray(val)) {
+                            var items = [];
+                            for (var i = 0; i < val.length; i++) items[i] = walk(val[i]);
+                            return { '$id': id, '$array': items };
+                        }
+                        var obj = { '$id': id };
+                        var keys = Object.keys(val);
+                        for (var i = 0; i < keys.length; i++) {
+                            obj[keys[i]] = walk(val[keys[i]]);
+                        }
+                        return obj;
+                    }
+                    return JSON.stringify(walk(value));
+                }
+                function deserialize(jsonStr) {
+                    var raw = JSON.parse(jsonStr);
+                    var registry = {};
+                    function restore(val) {
+                        if (val === null || typeof val !== 'object') return val;
+                        if (val['$circRef'] !== undefined) return registry[val['$circRef']];
+                        var id = val['$id'];
+                        if (val['$array'] !== undefined) {
+                            var result = [];
+                            if (id !== undefined) registry[id] = result;
+                            var items = val['$array'];
+                            for (var i = 0; i < items.length; i++) result[i] = restore(items[i]);
+                            return result;
+                        }
+                        var result = {};
+                        if (id !== undefined) registry[id] = result;
+                        var keys = Object.keys(val);
+                        for (var i = 0; i < keys.length; i++) {
+                            if (keys[i] === '$id') continue;
+                            result[keys[i]] = restore(val[keys[i]]);
+                        }
+                        return result;
+                    }
+                    return restore(raw);
+                }
+                return { serialize: serialize, deserialize: deserialize };
+            })(),
+            writable: false, enumerable: false, configurable: false
+        });
+        """)
+
         // WebAPIModule depends on Blob (for File extends Blob), so install after Blob
         WebAPIModule.install(in: context, runtime: self)
 
@@ -707,16 +765,26 @@ public final class NodeRuntime: @unchecked Sendable {
         guard let fd = IPCChannel.connectTo(path: socketPath) else { return }
         let ipcChannel = IPCChannel(fileDescriptor: fd, eventLoop: eventLoop)
         let process = context.objectForKeyedSubscript("process")!
+        let useAdvanced = ProcessInfo.processInfo.environment["NODE_CHANNEL_SERIALIZATION_MODE"] == "advanced"
 
         process.setValue(true, forProperty: "connected")
 
         // process.send(message)
         let send: @convention(block) (JSValue) -> Void = { [weak self] message in
             guard let self else { return }
-            let jsonResult = self.context.evaluateScript("JSON.stringify")!
-                .call(withArguments: [message])!
-            guard !jsonResult.isUndefined else { return }
-            ipcChannel.write(jsonResult.toString())
+            let result: String
+            if useAdvanced {
+                let serialized = self.context.evaluateScript("globalThis.__noco_ipc.serialize")!
+                    .call(withArguments: [message])!
+                guard !serialized.isUndefined else { return }
+                result = serialized.toString()
+            } else {
+                let jsonResult = self.context.evaluateScript("JSON.stringify")!
+                    .call(withArguments: [message])!
+                guard !jsonResult.isUndefined else { return }
+                result = jsonResult.toString()
+            }
+            ipcChannel.write(result)
         }
         process.setValue(unsafeBitCast(send, to: AnyObject.self), forProperty: "send")
 
@@ -739,8 +807,14 @@ public final class NodeRuntime: @unchecked Sendable {
             onMessage: { [weak self] jsonString in
                 guard let self else { return }
                 let ctx = self.context
-                let parsed = ctx.evaluateScript("JSON.parse")!
-                    .call(withArguments: [jsonString])!
+                let parsed: JSValue
+                if useAdvanced {
+                    parsed = ctx.evaluateScript("globalThis.__noco_ipc.deserialize")!
+                        .call(withArguments: [jsonString])!
+                } else {
+                    parsed = ctx.evaluateScript("JSON.parse")!
+                        .call(withArguments: [jsonString])!
+                }
                 let p = ctx.objectForKeyedSubscript("process")!
                 p.invokeMethod("emit", withArguments: ["message", parsed])
             },
