@@ -129,6 +129,12 @@ public enum ESMRuntime {
             """)
 
         // __importDynamic(specifier, basedir) — dynamic import()
+        // Promise.resolve/reject のファクトリを事前に取得しておく
+        // (evaluateScript は microtask drain をトリガーするため、__importDynamic 内で呼ぶと
+        //  pending microtask が不意にドレインされ、async/await チェーンが壊れる)
+        let promiseResolveFactory = context.evaluateScript("(function(v) { return Promise.resolve(v); })")!
+        let promiseRejectFactory = context.evaluateScript("(function(e) { return Promise.reject(e); })")!
+
         let dynamicImportBlock: @convention(block) (String, String) -> JSValue = {
             [weak runtime] specifier, basedir in
             guard let runtime = runtime else {
@@ -143,12 +149,10 @@ public enum ESMRuntime {
                 // Convert exception to rejected promise
                 let err = ctx.exception!
                 ctx.exception = nil
-                let promise = ctx.evaluateScript("(function(e) { return Promise.reject(e); })")!
-                return promise.call(withArguments: [err])!
+                return promiseRejectFactory.call(withArguments: [err])!
             }
 
-            let promise = ctx.evaluateScript("(function(v) { return Promise.resolve(v); })")!
-            return promise.call(withArguments: [result])!
+            return promiseResolveFactory.call(withArguments: [result])!
         }
 
         context.setObject(
@@ -174,24 +178,34 @@ public enum ESMRuntime {
         }
 
         // Create namespace: copy all own enumerable properties + add default
-        let wrapScript = context.evaluateScript("""
-            (function(mod) {
-                var ns = Object.create(null);
-                if (mod && (typeof mod === 'object' || typeof mod === 'function')) {
-                    var keys = Object.keys(mod);
-                    for (var i = 0; i < keys.length; i++) {
-                        (function(k) {
-                            Object.defineProperty(ns, k, {
-                                enumerable: true,
-                                get: function() { return mod[k]; }
-                            });
-                        })(keys[i]);
+        // wrapFn をコンテキストのプロパティにキャッシュして evaluateScript の繰り返し呼び出しを回避
+        // (evaluateScript は microtask drain をトリガーし、async/await チェーンを壊す可能性がある)
+        let wrapFn: JSValue
+        if let cached = context.objectForKeyedSubscript("__noco_wrapNamespace" as NSString),
+           !cached.isUndefined {
+            wrapFn = cached
+        } else {
+            let fn = context.evaluateScript("""
+                (function(mod) {
+                    var ns = Object.create(null);
+                    if (mod && (typeof mod === 'object' || typeof mod === 'function')) {
+                        var keys = Object.keys(mod);
+                        for (var i = 0; i < keys.length; i++) {
+                            (function(k) {
+                                Object.defineProperty(ns, k, {
+                                    enumerable: true,
+                                    get: function() { return mod[k]; }
+                                });
+                            })(keys[i]);
+                        }
                     }
-                }
-                ns.default = mod;
-                return ns;
-            })
-            """)!
-        return wrapScript.call(withArguments: [value])!
+                    ns.default = mod;
+                    return ns;
+                })
+                """)!
+            context.setObject(fn, forKeyedSubscript: "__noco_wrapNamespace" as NSString)
+            wrapFn = fn
+        }
+        return wrapFn.call(withArguments: [value])!
     }
 }

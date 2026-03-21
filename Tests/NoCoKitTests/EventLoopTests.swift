@@ -241,3 +241,120 @@ import Synchronization
     #expect(messages.contains("nextTick"))
     #expect(messages.contains("timeout"))
 }
+
+// MARK: - Promise chain keeps loop alive
+
+@Test func promiseChainKeepsLoopAlive() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        setTimeout(function() {
+            new Promise(function(resolve) { resolve('a'); })
+                .then(function(v) {
+                    console.log(v);
+                    return new Promise(function(resolve) {
+                        setTimeout(function() { resolve('b'); }, 10);
+                    });
+                })
+                .then(function(v) {
+                    console.log(v);
+                    setTimeout(function() { console.log('c'); }, 10);
+                });
+        }, 10);
+    """)
+    runtime.runEventLoop(timeout: 5)
+
+    #expect(messages == ["a", "b", "c"])
+}
+
+@Test func abandonedPromiseDoesNotBlockLoop() async throws {
+    let runtime = NodeRuntime()
+
+    runtime.evaluate("""
+        new Promise(function() {});
+    """)
+    let start = Date()
+    runtime.runEventLoop(timeout: 5)
+    let elapsed = Date().timeIntervalSince(start)
+
+    // Should exit quickly (no pending work), not wait for timeout
+    #expect(elapsed < 1.0)
+}
+
+// MARK: - Timer ref/unref
+
+@Test func unrefTimerAllowsLoopToExit() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var t = setInterval(function() { console.log('tick'); }, 10);
+        t.unref();
+    """)
+    let start = Date()
+    runtime.runEventLoop(timeout: 5)
+    let elapsed = Date().timeIntervalSince(start)
+
+    // Loop should exit quickly because the only timer is unreffed
+    #expect(elapsed < 1.0)
+}
+
+@Test func refAfterUnrefKeepsLoopAlive() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var count = 0;
+        var t = setInterval(function() {
+            count++;
+            console.log('tick-' + count);
+            if (count >= 3) {
+                clearInterval(t);
+            }
+        }, 10);
+        t.unref();
+        t.ref();
+    """)
+    runtime.runEventLoop(timeout: 5)
+
+    #expect(messages.contains("tick-1"))
+    #expect(messages.contains("tick-2"))
+    #expect(messages.contains("tick-3"))
+}
+
+// MARK: - setImmediate
+
+@Test func setImmediateRunsAfterTimers() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        setTimeout(function() { console.log('timeout'); }, 0);
+        setImmediate(function() { console.log('immediate'); });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("timeout"))
+    #expect(messages.contains("immediate"))
+}
+
+@Test func clearImmediateWorks() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var id = setImmediate(function() { console.log('should-not-run'); });
+        clearImmediate(id);
+        setImmediate(function() { console.log('should-run'); });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(!messages.contains("should-not-run"))
+    #expect(messages.contains("should-run"))
+}

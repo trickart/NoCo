@@ -41,6 +41,7 @@ public func _napi_create_async_work(_ env: napi_env!,
                               _ complete: napi_async_complete_callback!,
                               _ data: UnsafeMutableRawPointer?,
                               _ result: UnsafeMutablePointer<napi_async_work?>!) -> napi_status {
+
     let e = NAPIEnvironment.from(env)
     let work = NAPIAsyncWorkData(env: e, execute: execute, complete: complete, data: data)
     asyncWorkRegistry[ObjectIdentifier(work)] = work
@@ -50,6 +51,7 @@ public func _napi_create_async_work(_ env: napi_env!,
 
 @_cdecl("napi_queue_async_work")
 public func _napi_queue_async_work(_ env: napi_env!, _ work: napi_async_work!) -> napi_status {
+
     let e = NAPIEnvironment.from(env)
     let workData = NAPIAsyncWorkData.from(work)
 
@@ -64,6 +66,9 @@ public func _napi_queue_async_work(_ env: napi_env!, _ work: napi_async_work!) -
     nonisolated(unsafe) let dPtr = dataPtr
     nonisolated(unsafe) let wd = workData
 
+    // バックグラウンド作業中にイベントループが終了しないようハンドルを保持
+    e.runtime?.eventLoop.retainHandle()
+
     DispatchQueue.global(qos: .userInitiated).async {
         let envPtr = OpaquePointer(bitPattern: envInt)
         execFn(envPtr, dPtr)
@@ -73,6 +78,8 @@ public func _napi_queue_async_work(_ env: napi_env!, _ work: napi_async_work!) -
             runtime.eventLoop.enqueueCallback {
                 let status: napi_status = isCancelled ? napi_cancelled : napi_ok
                 compFn(envPtr, status, dPtr)
+                // 完了コールバック実行後にハンドルを解放
+                runtime.eventLoop.releaseHandle()
             }
         }
     }

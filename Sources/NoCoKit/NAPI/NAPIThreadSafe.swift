@@ -62,6 +62,11 @@ public func _napi_create_threadsafe_function(_ env: napi_env!,
     tsf.state.withLock { $0.refCount = initialThreadCount }
     tsfRegistry[ObjectIdentifier(tsf)] = tsf
     result.pointee = tsf.toOpaque()
+
+    // TSF が存在する間はイベントループを保持（バックグラウンドスレッドからの
+    // コールバックを処理するため）
+    e.runtime?.eventLoop.retainHandle()
+
     return e.clearLastError()
 }
 
@@ -145,6 +150,8 @@ public func _napi_release_threadsafe_function(_ func_: napi_threadsafe_function!
     }
     if shouldRemove {
         tsfRegistry.removeValue(forKey: ObjectIdentifier(tsf))
+        // TSF 解放時にイベントループハンドルも解放
+        tsf.env.runtime?.eventLoop.releaseHandle()
     }
     return napi_ok
 }

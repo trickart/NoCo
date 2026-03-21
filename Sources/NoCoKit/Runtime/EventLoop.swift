@@ -31,7 +31,16 @@ public final class EventLoop: @unchecked Sendable {
         let delay: Double
         let repeats: Bool
         let fireTime: Date
+        var isRef: Bool = true
     }
+
+    struct ImmediateEntry {
+        let id: Int
+        let callback: JSValue
+    }
+
+    private var immediateQueue: [ImmediateEntry] = []
+    private var nextImmediateId: Int = 1
 
     init(queue: DispatchQueue) {
         self.queue = queue
@@ -59,6 +68,25 @@ public final class EventLoop: @unchecked Sendable {
     /// Clear a timer by ID.
     func clearTimer(id: Int) {
         timers.removeValue(forKey: id)
+    }
+
+    /// Set timer ref/unref state.
+    func setTimerRef(id: Int, ref: Bool) {
+        timers[id]?.isRef = ref
+    }
+
+    /// Schedule an immediate callback. Returns the immediate ID.
+    func scheduleImmediate(callback: JSValue) -> Int {
+        let id = nextImmediateId
+        nextImmediateId += 1
+        immediateQueue.append(ImmediateEntry(id: id, callback: callback))
+        wakeup.signal()
+        return id
+    }
+
+    /// Clear an immediate by ID.
+    func clearImmediate(id: Int) {
+        immediateQueue.removeAll { $0.id == id }
     }
 
     /// Queue a nextTick callback.
@@ -114,7 +142,8 @@ public final class EventLoop: @unchecked Sendable {
     /// Check if there's pending work.
     var hasPendingWork: Bool {
         let (hasCallbacks, handles) = ioState.withLock { ($0.pendingCallbacks.isEmpty == false, $0.activeHandles) }
-        return !timers.isEmpty || !nextTickQueue.isEmpty || hasCallbacks || handles > 0
+        let hasRefTimers = timers.values.contains { $0.isRef }
+        return hasRefTimers || !nextTickQueue.isEmpty || hasCallbacks || handles > 0 || !immediateQueue.isEmpty
     }
 
     /// Run the event loop until no pending work or timeout.
@@ -127,7 +156,7 @@ public final class EventLoop: @unchecked Sendable {
         drainMicrotasks?()
         drainNextTick()
 
-        while ioState.withLock({ $0.running }) && hasPendingWork && Date() < deadline {
+        while ioState.withLock({ $0.running }) && Date() < deadline {
             drainNextTick()
             drainCallbacks()
 
@@ -141,7 +170,8 @@ public final class EventLoop: @unchecked Sendable {
                         let delaySeconds = max(entry.delay, 1) / 1000.0
                         timers[id] = TimerEntry(
                             id: id, callback: entry.callback, delay: entry.delay,
-                            repeats: true, fireTime: now.addingTimeInterval(delaySeconds)
+                            repeats: true, fireTime: now.addingTimeInterval(delaySeconds),
+                            isRef: entry.isRef
                         )
                     } else {
                         timers.removeValue(forKey: id)
@@ -154,8 +184,27 @@ public final class EventLoop: @unchecked Sendable {
                 drainMicrotasks?()
             }
 
+            // Immediate phase (check phase): run after timers, before idle wait
+            if !immediateQueue.isEmpty {
+                let immediates = immediateQueue
+                immediateQueue.removeAll()
+                for entry in immediates {
+                    entry.callback.call(withArguments: [])
+                    onUncaughtException?()
+                }
+                drainMicrotasks?()
+            }
+
+            // 終了判定: 全フェーズ処理後に最終ドレイン
+            if !hasPendingWork {
+                drainMicrotasks?()
+                drainNextTick()
+                drainCallbacks()
+                if !hasPendingWork { break }
+            }
+
             let callbacksEmpty = ioState.withLock { $0.pendingCallbacks.isEmpty }
-            if !firedAny && nextTickQueue.isEmpty && callbacksEmpty {
+            if !firedAny && nextTickQueue.isEmpty && callbacksEmpty && immediateQueue.isEmpty {
                 // Wait until signaled, next timer fires, or run deadline expires
                 let remaining = max(deadline.timeIntervalSinceNow, 0)
                 let nextFire = timers.values.map(\.fireTime).min()
@@ -181,6 +230,7 @@ public final class EventLoop: @unchecked Sendable {
     func reset() {
         timers.removeAll()
         nextTickQueue.removeAll()
+        immediateQueue.removeAll()
         ioState.withLock { s in
             s.pendingCallbacks.removeAll()
             s.activeHandles = 0
