@@ -502,11 +502,12 @@ func forkDisconnect() async throws {
         child.on('disconnect', function() {
             disconnected = true;
         });
-        // Wait for IPC to be established, then disconnect
-        child.on('message', function() {});
-        setTimeout(function() {
+        // IPC 確立を ping/echo で確認してから disconnect
+        // (setTimeout ベースだと IPC 接続完了前に fire する可能性がある)
+        child.on('message', function() {
             child.disconnect();
-        }, 500);
+        });
+        child.send({ ping: true });
     """)
     await runEventLoopInBackground(runtime, timeout: 10)
     let result = runtime.evaluate("disconnected")
