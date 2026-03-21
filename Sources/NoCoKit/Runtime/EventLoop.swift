@@ -3,12 +3,12 @@ import JavaScriptCore
 import Synchronization
 
 /// Manages the event loop: timers, nextTick queue, and microtask processing.
+/// Idle wait に CFRunLoop を使用し、JSC の DeferredWorkTimer（WebAssembly async 等）を処理可能にする。
 public final class EventLoop: @unchecked Sendable {
     private let queue: DispatchQueue
     private var timers: [Int: TimerEntry] = [:]
     private var nextTimerId: Int = 1
     private var nextTickQueue: [JSValue] = []
-    private let wakeup = DispatchSemaphore(value: 0)
 
     /// Thread-safe I/O state protected by Mutex.
     /// Accessed from both jsQueue and external queues (NIO, NWConnection, etc.).
@@ -18,6 +18,14 @@ public final class EventLoop: @unchecked Sendable {
         var running: Bool = false
     }
     private let ioState = Mutex(IOState())
+
+    /// CFRunLoop wakeup state. Protected by Mutex for thread-safe signal from external queues.
+    /// CFRunLoop/CFRunLoopSource are thread-safe (Core Foundation objects) but not marked Sendable.
+    private struct RunLoopState: @unchecked Sendable {
+        var runLoop: CFRunLoop?
+        var source: CFRunLoopSource?
+    }
+    private let runLoopState = Mutex(RunLoopState())
 
     /// Called after each callback execution to check/clear uncaught JS exceptions.
     var onUncaughtException: (() -> Void)?
@@ -80,7 +88,7 @@ public final class EventLoop: @unchecked Sendable {
         let id = nextImmediateId
         nextImmediateId += 1
         immediateQueue.append(ImmediateEntry(id: id, callback: callback))
-        wakeup.signal()
+        wakeRunLoop()
         return id
     }
 
@@ -110,7 +118,7 @@ public final class EventLoop: @unchecked Sendable {
     /// Thread-safe: can be called from any queue.
     func enqueueCallback(_ block: @escaping @Sendable () -> Void) {
         ioState.withLock { $0.pendingCallbacks.append(block) }
-        wakeup.signal()
+        wakeRunLoop()
     }
 
     /// Drain the pending callbacks queue.
@@ -146,10 +154,43 @@ public final class EventLoop: @unchecked Sendable {
         return hasRefTimers || !nextTickQueue.isEmpty || hasCallbacks || handles > 0 || !immediateQueue.isEmpty
     }
 
+    // MARK: - RunLoop wakeup
+
+    /// Wake up the RunLoop from any thread. Thread-safe.
+    private func wakeRunLoop() {
+        runLoopState.withLock { state in
+            if let source = state.source, let rl = state.runLoop {
+                CFRunLoopSourceSignal(source)
+                CFRunLoopWakeUp(rl)
+            }
+        }
+    }
+
     /// Run the event loop until no pending work or timeout.
     func run(timeout: TimeInterval = 30) {
         ioState.withLock { $0.running = true }
         let deadline = timeout.isInfinite ? Date.distantFuture : Date().addingTimeInterval(timeout)
+
+        // CFRunLoop セットアップ: 現在のスレッドの RunLoop を使用
+        // JSC の DeferredWorkTimer (WebAssembly async 等) はこの RunLoop で fire する
+        let rl = CFRunLoopGetCurrent()
+        var sourceContext = CFRunLoopSourceContext()
+        sourceContext.version = 0
+        // perform callback は不要（signal + wakeup でループを起こすだけ）
+        let source = CFRunLoopSourceCreate(nil, 0, &sourceContext)!
+        CFRunLoopAddSource(rl, source, .defaultMode)
+        runLoopState.withLock { state in
+            state.runLoop = rl
+            state.source = source
+        }
+
+        defer {
+            CFRunLoopRemoveSource(rl, source, .defaultMode)
+            runLoopState.withLock { state in
+                state.runLoop = nil
+                state.source = nil
+            }
+        }
 
         // ループ前に microtask をドレインして fire-and-forget な Promise chain を処理
         // これにより chain 内で登録された timer/handle が hasPendingWork に反映される
@@ -205,7 +246,7 @@ public final class EventLoop: @unchecked Sendable {
 
             let callbacksEmpty = ioState.withLock { $0.pendingCallbacks.isEmpty }
             if !firedAny && nextTickQueue.isEmpty && callbacksEmpty && immediateQueue.isEmpty {
-                // Wait until signaled, next timer fires, or run deadline expires
+                // Idle wait: CFRunLoop を回して JSC の DeferredWorkTimer 等を処理
                 let remaining = max(deadline.timeIntervalSinceNow, 0)
                 let nextFire = timers.values.map(\.fireTime).min()
                 let waitInterval: TimeInterval
@@ -214,7 +255,7 @@ public final class EventLoop: @unchecked Sendable {
                 } else {
                     waitInterval = min(0.1, remaining)
                 }
-                _ = wakeup.wait(timeout: .now() + waitInterval)
+                CFRunLoopRunInMode(.defaultMode, waitInterval, true)
             }
         }
         ioState.withLock { $0.running = false }
@@ -223,7 +264,7 @@ public final class EventLoop: @unchecked Sendable {
     /// Stop the event loop.
     func stop() {
         ioState.withLock { $0.running = false }
-        wakeup.signal()
+        wakeRunLoop()
     }
 
     /// Cancel all timers and clear queues.
