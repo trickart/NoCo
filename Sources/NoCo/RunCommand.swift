@@ -34,7 +34,8 @@ struct RunCommand: ParsableCommand {
             var argv = [execPath, "[eval]"]
             argv.append(contentsOf: userArgs)
             let runtime = NodeRuntime(argv: argv)
-            runtime.evaluate(code)
+            runtime.moduleLoader.evaluateCode(code)
+            runtime.checkException()
             runtime.runEventLoop(timeout: .infinity)
         } else if let script = script {
             if isFilePath(script) {
