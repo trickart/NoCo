@@ -923,9 +923,37 @@ public enum ESMTransformer {
         for nsMatch in nsMatches {
             let utf16Offset = nsMatch.range.location
             if isInExcluded(utf16Offset, excluded) { continue }
-            // The prefix char (group 1) must be preserved, only replace from after it
+
+            // メソッド定義 "import(" を dynamic import と区別する:
+            // "async import(" は常にメソッド定義（async import('x') は JS 文法的に invalid）。
+            // "import" の直前（空白スキップ）が "async" ならスキップ。
             let prefixRange = nsMatch.range(at: 1)
             let prefixEnd = prefixRange.location + prefixRange.length
+            let importStart = prefixEnd // "import" の開始位置 (UTF-16)
+
+            var scanPos = importStart
+            while scanPos > 0 {
+                let idx = source.utf16.index(source.utf16.startIndex, offsetBy: scanPos - 1)
+                let ch = source[idx]
+                if ch == " " || ch == "\t" { scanPos -= 1 } else { break }
+            }
+            if scanPos >= 5 {
+                let asyncEnd = source.utf16.index(source.utf16.startIndex, offsetBy: scanPos)
+                let asyncStart = source.utf16.index(source.utf16.startIndex, offsetBy: scanPos - 5)
+                if String(source[asyncStart..<asyncEnd]) == "async" {
+                    // "async" の前が識別子文字でないことを確認（"xasync" 等を除外）
+                    if scanPos == 5 {
+                        continue
+                    }
+                    let beforeIdx = source.utf16.index(source.utf16.startIndex, offsetBy: scanPos - 6)
+                    let beforeCh = source[beforeIdx]
+                    if !beforeCh.isLetter && !beforeCh.isNumber && beforeCh != "_" && beforeCh != "$" {
+                        continue
+                    }
+                }
+            }
+
+            // The prefix char (group 1) must be preserved, only replace from after it
             let beforeStart = source.utf16.index(source.utf16.startIndex, offsetBy: lastEnd)
             let beforeEnd = source.utf16.index(source.utf16.startIndex, offsetBy: prefixEnd)
             result += source[beforeStart..<beforeEnd]
