@@ -124,203 +124,276 @@ public struct WorkerThreadsModule: NodeModule {
         _ workerThreads: JSValue, context: JSContext, runtime: NodeRuntime
     ) {
         let workerCtor: @convention(block) () -> JSValue = {
-            let jsArgs = JSContext.currentArguments() as? [JSValue] ?? []
-            let ctx = JSContext.current()!
-
-            guard let filenameVal = jsArgs.first, filenameVal.isString else {
-                ctx.exception = ctx.createError("Worker requires a filename or code string")
-                return JSValue(undefinedIn: ctx)
-            }
-            let filename = filenameVal.toString()!
-
-            let options = jsArgs.count > 1 && jsArgs[1].isObject ? jsArgs[1] : nil
-            let isEval = options?.forProperty("eval")?.toBool() ?? false
-
-            // Serialize workerData
-            var workerDataJSON: String? = nil
-            if let wd = options?.forProperty("workerData"), !wd.isUndefined && !wd.isNull {
-                let json = ctx.evaluateScript("JSON.stringify")!.call(withArguments: [wd])
-                workerDataJSON = json?.toString()
-                if workerDataJSON == "undefined" { workerDataJSON = nil }
-            }
-
-            // Resolve file path
-            let resolvedPath: String
-            if isEval {
-                resolvedPath = filename
-            } else {
-                let absPath: String
-                if (filename as NSString).isAbsolutePath {
-                    absPath = filename
-                } else {
-                    let cwd = FileManager.default.currentDirectoryPath
-                    absPath = (cwd as NSString).appendingPathComponent(filename)
-                }
-                resolvedPath = ((absPath as NSString).standardizingPath as NSString).resolvingSymlinksInPath
-            }
-
-            // Create Worker JS object with EventEmitter
-            let worker = JSValue(newObjectIn: ctx)!
-            mixinEventEmitter(worker, context: ctx)
-
-            let threadId = allocateThreadId()
-            worker.setValue(threadId, forProperty: "threadId")
-
-            // State tracking for terminate
-            let workerState = WorkerState()
-
-            // Create the worker runtime on a background thread
-            runtime.eventLoop.retainHandle()
-
-            let parentEventLoop = runtime.eventLoop
-
-            // Closure: deliver message from worker → parent (called on worker's queue)
-            let parentSendMessage: @Sendable (String) -> Void = { jsonStr in
-                parentEventLoop.enqueueCallback {
-                    let parsed = runtime.context.evaluateScript("JSON.parse")!
-                        .call(withArguments: [jsonStr])
-                    worker.invokeMethod("emit", withArguments: ["message", parsed as Any])
-                }
-            }
-
-            // Closure: terminate worker (called from parent)
-            let onTerminate: @Sendable () -> Void = {
-                let wRuntime = workerState.runtime
-                wRuntime?.eventLoop.stop()
-            }
-
-            // Store a way to send messages parent → worker (set after worker runtime is created)
-            let workerMailbox = WorkerMailbox()
-
-            // worker.postMessage(value)
-            let postMessage: @convention(block) (JSValue) -> Void = { value in
-                let ctx = JSContext.current()!
-                let json = ctx.evaluateScript("JSON.stringify")!.call(withArguments: [value])
-                guard let jsonStr = json?.toString(), jsonStr != "undefined" else { return }
-                workerMailbox.send(jsonStr)
-            }
-            worker.setValue(unsafeBitCast(postMessage, to: AnyObject.self), forProperty: "postMessage")
-
-            // worker.terminate() → Promise
-            let terminate: @convention(block) () -> JSValue = {
-                let ctx = JSContext.current()!
-                let promiseFns = ctx.evaluateScript("""
-                    (function() {
-                        var resolve, reject;
-                        var p = new Promise(function(res, rej) { resolve = res; reject = rej; });
-                        return { promise: p, resolve: resolve, reject: reject };
-                    })()
-                """)!
-                let promise = promiseFns.forProperty("promise")!
-
-                let alreadyExited = workerState.markTerminating()
-                if alreadyExited {
-                    let exitCode = workerState.exitCode
-                    promiseFns.forProperty("resolve")!.call(withArguments: [exitCode])
-                } else {
-                    workerState.setTerminateResolve { code in
-                        parentEventLoop.enqueueCallback {
-                            promiseFns.forProperty("resolve")!.call(withArguments: [code])
-                        }
-                    }
-                    onTerminate()
-                }
-
-                return promise
-            }
-            worker.setValue(unsafeBitCast(terminate, to: AnyObject.self), forProperty: "terminate")
-
-            // worker.ref() / worker.unref() — stubs
-            let ref: @convention(block) () -> Void = {}
-            worker.setValue(unsafeBitCast(ref, to: AnyObject.self), forProperty: "ref")
-            worker.setValue(unsafeBitCast(ref, to: AnyObject.self), forProperty: "unref")
-
-            // Launch worker on background thread
-            let capturedWorkerDataJSON = workerDataJSON
-            DispatchQueue.global(qos: .userInitiated).async {
-                let workerCtx = NodeRuntime.WorkerContext(
-                    threadId: threadId,
-                    workerDataJSON: capturedWorkerDataJSON,
-                    parentSendMessage: parentSendMessage,
-                    onTerminate: onTerminate
-                )
-
-                let workerRuntime = NodeRuntime(workerContext: workerCtx)
-                workerState.setRuntime(workerRuntime)
-
-                // Set up mailbox: parent → worker message delivery
-                workerMailbox.setTarget(workerRuntime.eventLoop) { jsonStr in
-                    let parsed = workerRuntime.context.evaluateScript("JSON.parse")!
-                        .call(withArguments: [jsonStr])
-                    // Get the parentPort from the worker's require cache
-                    let wt = workerRuntime.context.evaluateScript("require('worker_threads')")!
-                    let pp = wt.forProperty("parentPort")!
-                    pp.invokeMethod("emit", withArguments: ["message", parsed as Any])
-                }
-
-                // Emit 'online' on parent
-                parentEventLoop.enqueueCallback {
-                    worker.invokeMethod("emit", withArguments: ["online"])
-                }
-
-                // Suppress default error logging in worker — errors are forwarded to parent
-                workerRuntime.consoleHandler = { _, _ in }
-
-                // Execute the script using perform to check exceptions before they're cleared
-                var hadError = false
-                workerRuntime.perform { ctx in
-                    if isEval {
-                        ctx.evaluateScript(resolvedPath)
-                    } else {
-                        let script: String
-                        do {
-                            let filePath = ((resolvedPath as NSString).standardizingPath as NSString).resolvingSymlinksInPath
-                            script = try String(contentsOfFile: filePath, encoding: .utf8)
-                        } catch {
-                            hadError = true
-                            let errMsg = error.localizedDescription
-                            parentEventLoop.enqueueCallback {
-                                let err = runtime.context.createError(errMsg)
-                                worker.invokeMethod("emit", withArguments: ["error", err])
-                            }
-                            return
-                        }
-                        let strippedScript = ModuleLoader.stripShebang(script)
-                        ctx.evaluateScript(strippedScript, withSourceURL: URL(string: resolvedPath))
-                    }
-                    if let exception = ctx.exception {
-                        hadError = true
-                        let errMsg = exception.toString() ?? "Unknown error"
-                        let errStack = exception.forProperty("stack")?.toString() ?? ""
-                        ctx.exception = nil
-                        parentEventLoop.enqueueCallback {
-                            let err = runtime.context.createError(errMsg)
-                            err.setValue(errStack, forProperty: "stack")
-                            worker.invokeMethod("emit", withArguments: ["error", err])
-                        }
-                    }
-                }
-
-                // Run worker event loop (blocks until no more work or stop() is called)
-                if !hadError {
-                    workerRuntime.perform { _ in
-                        workerRuntime.eventLoop.run(timeout: .infinity)
-                    }
-                }
-
-                // Worker has finished
-                let exitCode = hadError ? 1 : 0
-                workerState.markExited(code: exitCode)
-
-                parentEventLoop.enqueueCallback {
-                    worker.invokeMethod("emit", withArguments: ["exit", exitCode])
-                    runtime.eventLoop.releaseHandle()
-                }
-            }
-
-            return worker
+            createWorker(runtime: runtime)
         }
         workerThreads.setValue(unsafeBitCast(workerCtor, to: AnyObject.self), forProperty: "Worker")
+    }
+
+    private static func createWorker(runtime: NodeRuntime) -> JSValue {
+        let jsArgs = JSContext.currentArguments() as? [JSValue] ?? []
+        let ctx = JSContext.current()!
+
+        guard let filenameVal = jsArgs.first, filenameVal.isString else {
+            ctx.exception = ctx.createError("Worker requires a filename or code string")
+            return JSValue(undefinedIn: ctx)
+        }
+        let filename = filenameVal.toString()!
+
+        let options = jsArgs.count > 1 && jsArgs[1].isObject ? jsArgs[1] : nil
+        let isEval = options?.forProperty("eval")?.toBool() ?? false
+        let stdoutOpt = options?.forProperty("stdout")?.toBool() ?? false
+        let stderrOpt = options?.forProperty("stderr")?.toBool() ?? false
+        // execArgv: accepted but no-op (JSC has no equivalent CLI options)
+
+        // Serialize env option
+        var envJSON: String? = nil
+        if let envVal = options?.forProperty("env"), !envVal.isUndefined && !envVal.isNull {
+            let json = ctx.evaluateScript("JSON.stringify")!.call(withArguments: [envVal])
+            envJSON = json?.toString()
+            if envJSON == "undefined" { envJSON = nil }
+        }
+
+        // Serialize workerData
+        var workerDataJSON: String? = nil
+        if let wd = options?.forProperty("workerData"), !wd.isUndefined && !wd.isNull {
+            let json = ctx.evaluateScript("JSON.stringify")!.call(withArguments: [wd])
+            workerDataJSON = json?.toString()
+            if workerDataJSON == "undefined" { workerDataJSON = nil }
+        }
+
+        // Resolve file path
+        let resolvedPath: String
+        if isEval {
+            resolvedPath = filename
+        } else {
+            let absPath: String
+            if (filename as NSString).isAbsolutePath {
+                absPath = filename
+            } else {
+                let cwd = FileManager.default.currentDirectoryPath
+                absPath = (cwd as NSString).appendingPathComponent(filename)
+            }
+            resolvedPath = ((absPath as NSString).standardizingPath as NSString).resolvingSymlinksInPath
+        }
+
+        // Create Worker JS object with EventEmitter
+        let worker = JSValue(newObjectIn: ctx)!
+        mixinEventEmitter(worker, context: ctx)
+
+        let threadId = allocateThreadId()
+        worker.setValue(threadId, forProperty: "threadId")
+
+        // stdout/stderr PassThrough streams on parent side
+        if stdoutOpt {
+            let stdoutStream = ctx.evaluateScript("new (require('stream').PassThrough)()")!
+            worker.setValue(stdoutStream, forProperty: "stdout")
+        } else {
+            worker.setValue(JSValue(nullIn: ctx), forProperty: "stdout")
+        }
+        if stderrOpt {
+            let stderrStream = ctx.evaluateScript("new (require('stream').PassThrough)()")!
+            worker.setValue(stderrStream, forProperty: "stderr")
+        } else {
+            worker.setValue(JSValue(nullIn: ctx), forProperty: "stderr")
+        }
+
+        // State tracking for terminate
+        let workerState = WorkerState()
+
+        // Create the worker runtime on a background thread
+        runtime.eventLoop.retainHandle()
+
+        let parentEventLoop = runtime.eventLoop
+
+        // Closure: deliver message from worker → parent (called on worker's queue)
+        let parentSendMessage: @Sendable (String) -> Void = { jsonStr in
+            parentEventLoop.enqueueCallback {
+                let parsed = runtime.context.evaluateScript("JSON.parse")!
+                    .call(withArguments: [jsonStr])
+                worker.invokeMethod("emit", withArguments: ["message", parsed as Any])
+            }
+        }
+
+        // Closure: terminate worker (called from parent)
+        let onTerminate: @Sendable () -> Void = {
+            let wRuntime = workerState.runtime
+            wRuntime?.eventLoop.stop()
+        }
+
+        // Store a way to send messages parent → worker (set after worker runtime is created)
+        let workerMailbox = WorkerMailbox()
+
+        // worker.postMessage(value)
+        let postMessage: @convention(block) (JSValue) -> Void = { value in
+            let ctx = JSContext.current()!
+            let json = ctx.evaluateScript("JSON.stringify")!.call(withArguments: [value])
+            guard let jsonStr = json?.toString(), jsonStr != "undefined" else { return }
+            workerMailbox.send(jsonStr)
+        }
+        worker.setValue(unsafeBitCast(postMessage, to: AnyObject.self), forProperty: "postMessage")
+
+        // worker.terminate() → Promise
+        let terminate: @convention(block) () -> JSValue = {
+            let ctx = JSContext.current()!
+            let promiseFns = ctx.evaluateScript("""
+                (function() {
+                    var resolve, reject;
+                    var p = new Promise(function(res, rej) { resolve = res; reject = rej; });
+                    return { promise: p, resolve: resolve, reject: reject };
+                })()
+            """)!
+            let promise = promiseFns.forProperty("promise")!
+
+            let alreadyExited = workerState.markTerminating()
+            if alreadyExited {
+                let exitCode = workerState.exitCode
+                promiseFns.forProperty("resolve")!.call(withArguments: [exitCode])
+            } else {
+                workerState.setTerminateResolve { code in
+                    parentEventLoop.enqueueCallback {
+                        promiseFns.forProperty("resolve")!.call(withArguments: [code])
+                    }
+                }
+                onTerminate()
+            }
+
+            return promise
+        }
+        worker.setValue(unsafeBitCast(terminate, to: AnyObject.self), forProperty: "terminate")
+
+        // worker.ref() / worker.unref() — stubs
+        let ref: @convention(block) () -> Void = {}
+        worker.setValue(unsafeBitCast(ref, to: AnyObject.self), forProperty: "ref")
+        worker.setValue(unsafeBitCast(ref, to: AnyObject.self), forProperty: "unref")
+
+        // Launch worker on background thread
+        let capturedWorkerDataJSON = workerDataJSON
+        let capturedEnvJSON = envJSON
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Create stdio forwarding closures (worker thread → parent PassThrough)
+            let parentStdoutWrite: (@Sendable (String) -> Void)?
+            if stdoutOpt {
+                parentStdoutWrite = { str in
+                    parentEventLoop.enqueueCallback {
+                        worker.forProperty("stdout")?.invokeMethod("write", withArguments: [str])
+                    }
+                }
+            } else {
+                parentStdoutWrite = nil
+            }
+            let parentStderrWrite: (@Sendable (String) -> Void)?
+            if stderrOpt {
+                parentStderrWrite = { str in
+                    parentEventLoop.enqueueCallback {
+                        worker.forProperty("stderr")?.invokeMethod("write", withArguments: [str])
+                    }
+                }
+            } else {
+                parentStderrWrite = nil
+            }
+
+            let workerCtx = NodeRuntime.WorkerContext(
+                threadId: threadId,
+                workerDataJSON: capturedWorkerDataJSON,
+                parentSendMessage: parentSendMessage,
+                onTerminate: onTerminate,
+                envJSON: capturedEnvJSON,
+                stdoutWrite: parentStdoutWrite,
+                stderrWrite: parentStderrWrite
+            )
+
+            let workerRuntime = NodeRuntime(workerContext: workerCtx)
+            workerState.setRuntime(workerRuntime)
+
+            // Set up mailbox: parent → worker message delivery
+            workerMailbox.setTarget(workerRuntime.eventLoop) { jsonStr in
+                let parsed = workerRuntime.context.evaluateScript("JSON.parse")!
+                    .call(withArguments: [jsonStr])
+                // Get the parentPort from the worker's require cache
+                let wt = workerRuntime.context.evaluateScript("require('worker_threads')")!
+                let pp = wt.forProperty("parentPort")!
+                pp.invokeMethod("emit", withArguments: ["message", parsed as Any])
+            }
+
+            // Emit 'online' on parent
+            parentEventLoop.enqueueCallback {
+                worker.invokeMethod("emit", withArguments: ["online"])
+            }
+
+            // Set up worker stdio forwarding
+            if let stdoutWrite = parentStdoutWrite {
+                workerRuntime.stdoutHandler = { str in stdoutWrite(str) }
+            }
+            if let stderrWrite = parentStderrWrite {
+                workerRuntime.stderrHandler = { str in stderrWrite(str) }
+            }
+            if parentStdoutWrite != nil || parentStderrWrite != nil {
+                workerRuntime.consoleHandler = { level, message in
+                    switch level {
+                    case .error, .warn:
+                        if let stderrWrite = parentStderrWrite {
+                            stderrWrite(message + "\n")
+                        } else if let stdoutWrite = parentStdoutWrite {
+                            stdoutWrite(message + "\n")
+                        }
+                    case .log, .info, .debug:
+                        if let stdoutWrite = parentStdoutWrite {
+                            stdoutWrite(message + "\n")
+                        }
+                    }
+                }
+            } else {
+                // No stdio streams — suppress output (errors forwarded via 'error' event)
+                workerRuntime.consoleHandler = { _, _ in }
+            }
+
+            // Execute the script using perform to check exceptions before they're cleared
+            var hadError = false
+            workerRuntime.perform { ctx in
+                if isEval {
+                    ctx.evaluateScript(resolvedPath)
+                } else {
+                    // Use require() to load the file so ESM detection/transform is applied
+                    ctx.evaluateScript("require(\(Self.jsStringLiteral(resolvedPath)))")
+                }
+                if let exception = ctx.exception {
+                    hadError = true
+                    let errMsg = exception.toString() ?? "Unknown error"
+                    let errStack = exception.forProperty("stack")?.toString() ?? ""
+                    ctx.exception = nil
+                    parentEventLoop.enqueueCallback {
+                        let err = runtime.context.createError(errMsg)
+                        err.setValue(errStack, forProperty: "stack")
+                        worker.invokeMethod("emit", withArguments: ["error", err])
+                    }
+                }
+            }
+
+            // Run worker event loop (blocks until no more work or stop() is called)
+            if !hadError {
+                workerRuntime.perform { _ in
+                    workerRuntime.eventLoop.run(timeout: .infinity)
+                }
+            }
+
+            // Worker has finished
+            let exitCode = hadError ? 1 : 0
+            workerState.markExited(code: exitCode)
+
+            parentEventLoop.enqueueCallback {
+                // End stdout/stderr streams before emitting exit
+                if let stdout = worker.forProperty("stdout"), !stdout.isNull && !stdout.isUndefined {
+                    stdout.invokeMethod("end", withArguments: [])
+                }
+                if let stderr = worker.forProperty("stderr"), !stderr.isNull && !stderr.isUndefined {
+                    stderr.invokeMethod("end", withArguments: [])
+                }
+                worker.invokeMethod("emit", withArguments: ["exit", exitCode])
+                runtime.eventLoop.releaseHandle()
+            }
+        }
+
+        return worker
     }
 
     // MARK: - MessageChannel / MessagePort
@@ -386,6 +459,16 @@ public struct WorkerThreadsModule: NodeModule {
     }
 
     // MARK: - EventEmitter mixin helper
+
+    /// Escape a Swift string into a JS string literal (with quotes).
+    private static func jsStringLiteral(_ s: String) -> String {
+        let escaped = s
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+        return "'\(escaped)'"
+    }
 
     private static func mixinEventEmitter(_ target: JSValue, context: JSContext) {
         context.evaluateScript("""

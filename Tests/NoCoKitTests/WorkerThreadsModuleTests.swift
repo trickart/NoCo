@@ -272,3 +272,139 @@ func messagePortClose() async throws {
     let result = runtime.evaluate("JSON.stringify(received)")
     #expect(result?.toString() == #"["before"]"#)
 }
+
+// MARK: - Worker env option
+
+@Test(.timeLimit(.minutes(1)))
+func workerEnvOption() async throws {
+    let runtime = NodeRuntime()
+    runtime.evaluate("""
+        var wt = require('worker_threads');
+        var received = null;
+        var w = new wt.Worker(
+            "var { parentPort } = require('worker_threads'); parentPort.postMessage(process.env.MY_VAR);",
+            { eval: true, env: { MY_VAR: 'hello_env' } }
+        );
+        w.on('message', function(msg) {
+            received = msg;
+            w.terminate();
+        });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("received")
+    #expect(result?.toString() == "hello_env")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func workerEnvReplaces() async throws {
+    let runtime = NodeRuntime()
+    runtime.evaluate("""
+        var wt = require('worker_threads');
+        var received = null;
+        var w = new wt.Worker(
+            "var { parentPort } = require('worker_threads'); parentPort.postMessage(typeof process.env.PATH);",
+            { eval: true, env: { ONLY_THIS: '1' } }
+        );
+        w.on('message', function(msg) {
+            received = msg;
+            w.terminate();
+        });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("received")
+    #expect(result?.toString() == "undefined")
+}
+
+// MARK: - Worker stdout/stderr streams
+
+@Test(.timeLimit(.minutes(1)))
+func workerStdoutStream() async throws {
+    let runtime = NodeRuntime()
+    runtime.evaluate("""
+        var wt = require('worker_threads');
+        var output = '';
+        var w = new wt.Worker(
+            "console.log('hello from worker');",
+            { eval: true, stdout: true }
+        );
+        w.stdout.on('data', function(chunk) {
+            output += chunk;
+        });
+        w.on('exit', function() {});
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("output")
+    #expect(result?.toString()?.contains("hello from worker") == true)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func workerStderrStream() async throws {
+    let runtime = NodeRuntime()
+    runtime.evaluate("""
+        var wt = require('worker_threads');
+        var output = '';
+        var w = new wt.Worker(
+            "console.error('error from worker');",
+            { eval: true, stderr: true }
+        );
+        w.stderr.on('data', function(chunk) {
+            output += chunk;
+        });
+        w.on('exit', function() {});
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("output")
+    #expect(result?.toString()?.contains("error from worker") == true)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func workerStdoutEnd() async throws {
+    let runtime = NodeRuntime()
+    runtime.evaluate("""
+        var wt = require('worker_threads');
+        var ended = false;
+        var w = new wt.Worker(
+            "/* just exit */",
+            { eval: true, stdout: true }
+        );
+        w.stdout.on('end', function() {
+            ended = true;
+        });
+        // Need to set up a reader so 'end' fires (flowing mode)
+        w.stdout.on('data', function() {});
+        w.on('exit', function() {});
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("ended")
+    #expect(result?.toBool() == true)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func workerExecArgvIgnored() async throws {
+    let runtime = NodeRuntime()
+    runtime.evaluate("""
+        var wt = require('worker_threads');
+        var exitCode = -1;
+        var w = new wt.Worker(
+            "/* exit */",
+            { eval: true, execArgv: ['--experimental-vm-modules'] }
+        );
+        w.on('exit', function(code) {
+            exitCode = code;
+        });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("exitCode")
+    #expect(result?.toInt32() == 0)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func workerStdoutNull() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var wt = require('worker_threads');
+        var w = new wt.Worker("/* exit */", { eval: true });
+        w.stdout === null;
+    """)
+    #expect(result?.toBool() == true)
+}

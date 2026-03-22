@@ -31,6 +31,30 @@ public final class NodeRuntime: @unchecked Sendable {
         public let parentSendMessage: @Sendable (String) -> Void
         /// Called from the parent to request the worker to stop.
         public let onTerminate: @Sendable () -> Void
+        /// JSON string of environment variables to override process.env. nil = inherit.
+        public let envJSON: String?
+        /// Called from worker to forward stdout output to parent's PassThrough stream.
+        public let stdoutWrite: (@Sendable (String) -> Void)?
+        /// Called from worker to forward stderr output to parent's PassThrough stream.
+        public let stderrWrite: (@Sendable (String) -> Void)?
+
+        public init(
+            threadId: Int,
+            workerDataJSON: String?,
+            parentSendMessage: @escaping @Sendable (String) -> Void,
+            onTerminate: @escaping @Sendable () -> Void,
+            envJSON: String? = nil,
+            stdoutWrite: (@Sendable (String) -> Void)? = nil,
+            stderrWrite: (@Sendable (String) -> Void)? = nil
+        ) {
+            self.threadId = threadId
+            self.workerDataJSON = workerDataJSON
+            self.parentSendMessage = parentSendMessage
+            self.onTerminate = onTerminate
+            self.envJSON = envJSON
+            self.stdoutWrite = stdoutWrite
+            self.stderrWrite = stderrWrite
+        }
     }
 
     /// Console output handler. Called for every console.log/warn/error/etc.
