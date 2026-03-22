@@ -368,6 +368,12 @@ public struct ProcessModule: NodeModule {
                     s._listeners[event] = fns.filter(function(f) { return f !== fn; });
                     return s;
                 };
+                s.off = s.removeListener;
+                s.removeAllListeners = function(event) {
+                    if (event) s._listeners[event] = [];
+                    else s._listeners = {};
+                    return s;
+                };
                 s.resume = function() { return s; };
                 s.pause = function() { return s; };
                 s.setEncoding = function() { return s; };
