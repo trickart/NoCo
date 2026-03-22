@@ -15,6 +15,7 @@ final class NAPIThreadSafeFunctionData {
     struct TSFState: Sendable {
         var refCount: Int
         var released: Bool = false
+        var isRef: Bool = true
     }
 
     init(env: NAPIEnvironment, callback: JSValue?, context: UnsafeMutableRawPointer?,
@@ -136,32 +137,58 @@ public func _napi_acquire_threadsafe_function(_ func_: napi_threadsafe_function!
 public func _napi_release_threadsafe_function(_ func_: napi_threadsafe_function!,
                                         _ mode: napi_threadsafe_function_release_mode) -> napi_status {
     let tsf = NAPIThreadSafeFunctionData.from(func_)
-    let shouldRemove = tsf.state.withLock { s -> Bool in
+    let (shouldRemove, wasRef) = tsf.state.withLock { s -> (Bool, Bool) in
         if mode == napi_tsfn_abort {
+            let wasRef = s.isRef
             s.released = true
-            return true
+            s.isRef = false
+            return (true, wasRef)
         }
         s.refCount -= 1
         if s.refCount <= 0 {
+            let wasRef = s.isRef
             s.released = true
-            return true
+            s.isRef = false
+            return (true, wasRef)
         }
-        return false
+        return (false, false)
     }
     if shouldRemove {
         tsfRegistry.removeValue(forKey: ObjectIdentifier(tsf))
-        // TSF 解放時にイベントループハンドルも解放
-        tsf.env.runtime?.eventLoop.releaseHandle()
+        // TSF が ref 状態だった場合のみイベントループハンドルを解放
+        if wasRef {
+            tsf.env.runtime?.eventLoop.releaseHandle()
+        }
     }
     return napi_ok
 }
 
 @_cdecl("napi_ref_threadsafe_function")
 public func _napi_ref_threadsafe_function(_ env: napi_env!, _ func_: napi_threadsafe_function!) -> napi_status {
-    return NAPIEnvironment.from(env).clearLastError()
+    let e = NAPIEnvironment.from(env)
+    let tsf = NAPIThreadSafeFunctionData.from(func_)
+    let shouldRetain = tsf.state.withLock { s -> Bool in
+        guard !s.released, !s.isRef else { return false }
+        s.isRef = true
+        return true
+    }
+    if shouldRetain {
+        e.runtime?.eventLoop.retainHandle()
+    }
+    return e.clearLastError()
 }
 
 @_cdecl("napi_unref_threadsafe_function")
 public func _napi_unref_threadsafe_function(_ env: napi_env!, _ func_: napi_threadsafe_function!) -> napi_status {
-    return NAPIEnvironment.from(env).clearLastError()
+    let e = NAPIEnvironment.from(env)
+    let tsf = NAPIThreadSafeFunctionData.from(func_)
+    let shouldRelease = tsf.state.withLock { s -> Bool in
+        guard !s.released, s.isRef else { return false }
+        s.isRef = false
+        return true
+    }
+    if shouldRelease {
+        e.runtime?.eventLoop.releaseHandle()
+    }
+    return e.clearLastError()
 }
