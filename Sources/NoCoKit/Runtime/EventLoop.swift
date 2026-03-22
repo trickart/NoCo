@@ -121,20 +121,24 @@ public final class EventLoop: @unchecked Sendable {
         wakeRunLoop()
     }
 
-    /// Drain the pending callbacks queue.
+    /// Drain ONE pending callback (matching Node.js semantics where each I/O
+    /// callback gets its own tick). Returns true if a callback was processed.
+    @discardableResult
+    func drainOneCallback() -> Bool {
+        let cb = ioState.withLock { s -> (() -> Void)? in
+            if s.pendingCallbacks.isEmpty { return nil }
+            return s.pendingCallbacks.removeFirst()
+        }
+        guard let cb else { return false }
+        cb()
+        onUncaughtException?()
+        drainMicrotasks?()
+        return true
+    }
+
+    /// Drain all pending callbacks.
     func drainCallbacks() {
-        let cbs = ioState.withLock { s in
-            let cbs = s.pendingCallbacks
-            s.pendingCallbacks.removeAll()
-            return cbs
-        }
-        for cb in cbs {
-            cb()
-            onUncaughtException?()
-        }
-        if !cbs.isEmpty {
-            drainMicrotasks?()
-        }
+        while drainOneCallback() {}
     }
 
     /// Increment active I/O handle count. Thread-safe.
@@ -201,7 +205,10 @@ public final class EventLoop: @unchecked Sendable {
 
         while ioState.withLock({ $0.running }) && Date() < deadline {
             drainNextTick()
-            drainCallbacks()
+            // Process one callback per tick (Node.js delivers one I/O callback per tick)
+            if drainOneCallback() {
+                drainNextTick()
+            }
 
             // Check for timers that should fire
             let now = Date()

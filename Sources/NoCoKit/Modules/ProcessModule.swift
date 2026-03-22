@@ -62,8 +62,21 @@ public struct ProcessModule: NodeModule {
 
         // process.env
         let env = JSValue(newObjectIn: context)!
-        for (key, value) in ProcessInfo.processInfo.environment {
-            env.setValue(value, forProperty: key)
+        if let envJSON = runtime.workerContext?.envJSON {
+            // Worker with explicit env option — complete replacement (not merge)
+            context.evaluateScript("""
+                (function(env, json) {
+                    var src = JSON.parse(json);
+                    var keys = Object.keys(src);
+                    for (var i = 0; i < keys.length; i++) {
+                        env[keys[i]] = String(src[keys[i]]);
+                    }
+                })
+            """)!.call(withArguments: [env, envJSON])
+        } else {
+            for (key, value) in ProcessInfo.processInfo.environment {
+                env.setValue(value, forProperty: key)
+            }
         }
         process.setValue(env, forProperty: "env")
 
@@ -241,6 +254,11 @@ public struct ProcessModule: NodeModule {
                     s._listeners[event].unshift(fn);
                     return s;
                 };
+                s.end = function() { return s; };
+                s.writable = true;
+                s._pipedFrom = [];
+                s.pipe = function(dest) { return dest; };
+                s.unpipe = function() { return s; };
             })
         """)!.call(withArguments: [stdout])
         process.setValue(stdout, forProperty: "stdout")
@@ -305,6 +323,11 @@ public struct ProcessModule: NodeModule {
                     s._listeners[event].unshift(fn);
                     return s;
                 };
+                s.end = function() { return s; };
+                s.writable = true;
+                s._pipedFrom = [];
+                s.pipe = function(dest) { return dest; };
+                s.unpipe = function() { return s; };
             })
         """)!.call(withArguments: [stderr])
         process.setValue(stderr, forProperty: "stderr")
