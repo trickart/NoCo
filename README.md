@@ -11,7 +11,7 @@ NoCo implements CommonJS and ESM (ES Modules) module resolution and a subset of 
 - **JavaScriptCore-powered** — Uses Apple's built-in JS engine; no V8 dependency
 - **CommonJS `require()`** — Full module resolution: built-in modules → cache → `node_modules` → filesystem
 - **ESM `import`/`export`** — `.mjs` files and `import`/`export` syntax supported via automatic transformation
-- **Node.js built-in modules** — `fs`, `path`, `crypto`, `http`, `https`, `http2`, `stream`, `net`, `url`, `zlib`, `child_process`, and more
+- **Node.js built-in modules** — `fs`, `path`, `crypto`, `http`, `https`, `http2`, `stream`, `net`, `url`, `zlib`, `child_process`, `dns`, `tls`, `vm`, `worker_threads`, and more
 - **Web Platform APIs** — `Headers`, `Request`, `Response`, `ReadableStream`, `AbortController` etc. for Fetch API compatibility
 - **HTTP/HTTPS/TCP servers** — `http.createServer()`, `https.createServer()`, `http2.createServer()`, and `net.createServer()` powered by [SwiftNIO](https://github.com/apple/swift-nio)
 - **Event loop** — `setTimeout`, `setInterval`, `process.nextTick`, and async I/O
@@ -202,6 +202,14 @@ runtime.runEventLoop(timeout: .infinity)
 | `module` | `createRequire`, `builtinModules`, `isBuiltin`, `Module` |
 | `async_hooks` | `AsyncLocalStorage` |
 | `timers` | `setTimeout`, `setInterval` |
+| `dns` | `lookup`, `resolve`, `reverse`, `promises` |
+| `perf_hooks` | `performance`, `PerformanceObserver` |
+| `test` | Node.js built-in test runner (`describe`, `it`, `test`) |
+| `timers/promises` | Promise-based `setTimeout`, `setInterval`, `setImmediate` |
+| `tls` | `connect`, `createServer`, TLS/SSL sockets via SwiftNIO |
+| `v8` | V8 compatibility stubs (for Jest/tooling support) |
+| `vm` | `runInNewContext`, `runInThisContext`, `createContext`, `Script` |
+| `worker_threads` | `Worker`, `parentPort`, `workerData`, `isMainThread` |
 
 ## Architecture
 
@@ -213,6 +221,7 @@ NoCo
     │   ├── NodeRuntime      JSContext wrapper with serial DispatchQueue for thread safety
     │   ├── ModuleLoader     CommonJS require() with circular dependency handling
     │   ├── ESM*             ESM detection, transformation, and runtime support
+    │   ├── TypeScriptStripper  Strips type annotations from .ts/.tsx files
     │   ├── EventLoop        Timers, nextTick queue, I/O handle tracking
     │   └── NodeModule       Protocol for built-in modules
     ├── Modules              All built-in module implementations

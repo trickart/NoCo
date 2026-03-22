@@ -26,6 +26,7 @@ NoCo is a Node.js-compatible runtime built on JavaScriptCore (Swift). CommonJS +
 - **ModuleLoader** — CommonJS `require()`. Resolution: builtin → cache → node_modules → filesystem. Supports `node:` prefix and wildcard exports. Circular requires handled via cache-before-execute.
 - **ESMDetector / ESMTransformer / ESMRuntime** — ESM (`import`/`export`) support. Detects ESM syntax and `.mjs` files, transforms to CommonJS for execution.
 - **EventLoop** — Timers, nextTick, I/O callbacks. `DispatchSemaphore` idle wait (no polling). `enqueueCallback()` for instant wakeup. `onUncaughtException` isolates failed callbacks.
+- **TypeScriptStripper** — Strips type annotations from `.ts`/`.tsx` files for execution
 - **NodeModule** — Protocol: `static var moduleName` + `static func install(in:runtime:) -> JSValue`
 
 ### Built-in Modules (`Sources/NoCoKit/Modules/`)
@@ -33,7 +34,7 @@ NoCo is a Node.js-compatible runtime built on JavaScriptCore (Swift). CommonJS +
 | Type | Modules |
 |------|---------|
 | Global | console, process, timers, Buffer, EventEmitter |
-| require() | path, fs, fs/promises, crypto, util, assert, events, string_decoder, stream, http, https, http2, net, url, querystring, os, zlib, async_hooks, child_process, constants, module, readline, tty |
+| require() | path, fs, fs/promises, crypto, util, assert, events, string_decoder, stream, http, https, http2, net, url, querystring, os, zlib, async_hooks, child_process, constants, module, readline, tty, dns, perf_hooks, test, timers/promises, tls, v8, vm, worker_threads |
 | Web API | fetch, URL, URLSearchParams, Headers, Request, Response, Blob, File, FormData, ReadableStream, WritableStream, TransformStream, CompressionStream/DecompressionStream, crypto.subtle (WebCrypto) |
 
 ### Key Patterns
