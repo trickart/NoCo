@@ -8,10 +8,22 @@ public final class ModuleLoader {
     private var moduleCache: [String: JSValue] = [:]
     private var loadingModules: [String: JSValue] = [:]
     private var loadFileDepth: Int = 0
+    private var resolveHooks: [JSValue] = []
+    private var loadHooks: [JSValue] = []
 
     init(runtime: NodeRuntime) {
         self.runtime = runtime
         installRequire()
+    }
+
+    /// module.registerHooks() から呼ばれる。resolve/load フックを登録する。
+    func registerModuleHooks(resolve: JSValue?, load: JSValue?) {
+        if let resolve = resolve, !resolve.isUndefined {
+            resolveHooks.append(resolve)
+        }
+        if let load = load, !load.isUndefined {
+            loadHooks.append(load)
+        }
     }
 
     private func installRequire() {
@@ -176,7 +188,17 @@ public final class ModuleLoader {
             return cached
         }
 
-        // 3. Resolve file path
+        // 3. Resolve via hooks or file path
+        let cwd = FileManager.default.currentDirectoryPath
+        if let hookResult = callResolveHooks(specifier: resolvedName, parentURL: "file://\(cwd)/", fromDir: cwd) {
+            switch hookResult {
+            case .filePath(let path):
+                return loadFile(at: path)
+            case .builtin(let name):
+                return self.require(name)
+            }
+        }
+
         let resolvedPath = resolveFilePath(resolvedName)
 
         guard let path = resolvedPath else {
@@ -223,11 +245,19 @@ public final class ModuleLoader {
             return JSValue(undefinedIn: runtime.context)
         }
 
-        guard let source = try? String(contentsOfFile: path, encoding: .utf8) else {
-            let error = runtime.context.createError(
-                "Cannot read module '\(path)'", code: "MODULE_NOT_FOUND")
-            runtime.context.exception = error
-            return JSValue(undefinedIn: runtime.context)
+        // load フック実行
+        let source: String
+        let fileURL = "file://\(path)"
+        if let hookResult = callLoadHooks(url: fileURL, path: path) {
+            source = hookResult.source
+        } else {
+            guard let fileSource = try? String(contentsOfFile: path, encoding: .utf8) else {
+                let error = runtime.context.createError(
+                    "Cannot read module '\(path)'", code: "MODULE_NOT_FOUND")
+                runtime.context.exception = error
+                return JSValue(undefinedIn: runtime.context)
+            }
+            source = fileSource
         }
 
         // Handle JSON files natively
@@ -302,7 +332,7 @@ public final class ModuleLoader {
             return JSValue(undefinedIn: context)
         }
 
-        let localRequireObj = makeLocalRequire(dirname: dirname, context: context)
+        let localRequireObj = makeLocalRequire(dirname: dirname, parentPath: path, context: context)
 
         let result = fn.call(withArguments: [
             exports,
@@ -392,9 +422,21 @@ public final class ModuleLoader {
 
     /// Create a local `require` function that resolves relative to the given directory.
     /// Returns the require object (as AnyObject) with `.resolve` and `.resolve.paths` attached.
-    private func makeLocalRequire(dirname: String, context: JSContext) -> AnyObject {
+    private func makeLocalRequire(dirname: String, parentPath: String, context: JSContext) -> AnyObject {
+        let parentURL = "file://\(parentPath)"
         let localRequire: @convention(block) (String) -> JSValue = { [weak self] name in
             guard let self = self else { return JSValue(undefinedIn: JSContext.current()) }
+
+            // resolve フック実行
+            if let hookResult = self.callResolveHooks(specifier: name, parentURL: parentURL, fromDir: dirname) {
+                switch hookResult {
+                case .filePath(let path):
+                    return self.loadFile(at: path)
+                case .builtin(let builtinName):
+                    return self.require(builtinName)
+                }
+            }
+
             if name.hasPrefix("#") {
                 if let resolved = self.resolvePrivateImport(name, from: dirname) {
                     return self.loadFile(at: resolved)
@@ -505,7 +547,7 @@ public final class ModuleLoader {
             return JSValue(undefinedIn: context)
         }
 
-        let localRequireObj = makeLocalRequire(dirname: dirname, context: context)
+        let localRequireObj = makeLocalRequire(dirname: dirname, parentPath: (dirname as NSString).appendingPathComponent(filename), context: context)
 
         return fn.call(withArguments: [
             exports,
@@ -538,6 +580,167 @@ public final class ModuleLoader {
             searchDir = parent
         }
         return nil
+    }
+
+    // MARK: - Module Hooks (registerHooks)
+
+    /// resolve フックチェーンを実行する。
+    /// フックが結果を返した場合はファイルパスを返す。フック未登録なら nil。
+    private func callResolveHooks(specifier: String, parentURL: String, fromDir: String) -> ResolveHookResult? {
+        guard !resolveHooks.isEmpty, let runtime = runtime else { return nil }
+        let context = runtime.context
+
+        // デフォルト解決（チェーン最深部）
+        let defaultResolveBlock: @convention(block) (String, JSValue) -> JSValue = { [weak self] spec, _ in
+            guard let self = self else { return JSValue(undefinedIn: JSContext.current()) }
+            let jsCtx = JSContext.current()!
+            let result = JSValue(newObjectIn: jsCtx)!
+
+            // file:// URL を通常パスに変換
+            let cleanSpec: String
+            if spec.hasPrefix("file://") {
+                cleanSpec = String(spec.dropFirst(7)).removingPercentEncoding ?? String(spec.dropFirst(7))
+            } else {
+                cleanSpec = spec
+            }
+
+            // builtin チェック
+            let bareName = cleanSpec.hasPrefix("node:") ? String(cleanSpec.dropFirst(5)) : cleanSpec
+            if let rt = self.runtime, rt.registeredModules[bareName] != nil ||
+                ["process", "console"].contains(bareName) {
+                result.setValue("node:\(bareName)", forProperty: "url")
+                result.setValue("builtin", forProperty: "format")
+                return result
+            }
+
+            // ファイル解決
+            var resolved: String?
+            if cleanSpec.hasPrefix(".") || cleanSpec.hasPrefix("/") {
+                resolved = self.resolveRelativePath(cleanSpec, from: fromDir)
+            } else {
+                resolved = self.resolveNodeModules(cleanSpec, from: fromDir)
+            }
+
+            if let resolved = resolved {
+                result.setValue("file://\(resolved)", forProperty: "url")
+            } else {
+                // 解決できなくてもエラーにしない — フックが別処理するかもしれない
+                result.setValue(cleanSpec, forProperty: "url")
+            }
+            return result
+        }
+        let defaultResolveObj = unsafeBitCast(defaultResolveBlock, to: AnyObject.self)
+
+        // フックチェーンを構築: hooks を逆順にラップ
+        // 最後に登録されたフックが最初に実行される
+        var nextResolve: AnyObject = defaultResolveObj
+        for i in 0..<(resolveHooks.count - 1) {
+            let hook = resolveHooks[i]
+            let currentNext = nextResolve
+            let chainBlock: @convention(block) (String, JSValue) -> JSValue = { spec, ctx in
+                return hook.call(withArguments: [spec, ctx, currentNext]) ?? JSValue(undefinedIn: JSContext.current())
+            }
+            nextResolve = unsafeBitCast(chainBlock, to: AnyObject.self)
+        }
+
+        // コンテキストオブジェクト
+        let hookContext = JSValue(newObjectIn: context)!
+        hookContext.setValue(parentURL, forProperty: "parentURL")
+        let conditions = JSValue(newArrayIn: context)!
+        conditions.setValue("node", at: 0)
+        conditions.setValue("require", at: 1)
+        hookContext.setValue(conditions, forProperty: "conditions")
+
+        // 最後のフック（= 最初に実行されるフック）を呼び出し
+        let lastHook = resolveHooks.last!
+        let result = lastHook.call(withArguments: [specifier, hookContext, nextResolve])
+
+        guard let result = result, !result.isUndefined else { return nil }
+
+        if let url = result.forProperty("url")?.toString() {
+            if url.hasPrefix("file://") {
+                let path = String(url.dropFirst(7)).removingPercentEncoding ?? String(url.dropFirst(7))
+                // クエリパラメータ除去 (Vitest が ?vitest=xxx を付加する)
+                let cleanPath = path.components(separatedBy: "?").first ?? path
+                return .filePath(cleanPath)
+            }
+            if url.hasPrefix("node:") {
+                let bareName = String(url.dropFirst(5))
+                return .builtin(bareName)
+            }
+        }
+
+        let shortCircuit = result.forProperty("shortCircuit")?.toBool() ?? false
+        if shortCircuit {
+            return nil
+        }
+
+        return nil
+    }
+
+    /// load フックチェーンを実行する。
+    /// フックが結果を返した場合は (source, format) を返す。フック未登録なら nil。
+    private func callLoadHooks(url: String, path: String) -> (source: String, format: String?)? {
+        guard !loadHooks.isEmpty, let runtime = runtime else { return nil }
+        let context = runtime.context
+
+        // デフォルトの読み込み
+        let defaultLoadBlock: @convention(block) (String, JSValue) -> JSValue = { urlStr, _ in
+            let jsCtx = JSContext.current()!
+            let filePath: String
+            if urlStr.hasPrefix("file://") {
+                filePath = String(urlStr.dropFirst(7)).removingPercentEncoding ?? String(urlStr.dropFirst(7))
+            } else {
+                filePath = urlStr
+            }
+            // クエリパラメータ除去
+            let cleanPath = filePath.components(separatedBy: "?").first ?? filePath
+
+            let result = JSValue(newObjectIn: jsCtx)!
+            if let source = try? String(contentsOfFile: cleanPath, encoding: .utf8) {
+                result.setValue(source, forProperty: "source")
+                let format = ESMDetector.shared.isESM(path: cleanPath) ? "module" : "commonjs"
+                result.setValue(format, forProperty: "format")
+            }
+            return result
+        }
+        let defaultLoadObj = unsafeBitCast(defaultLoadBlock, to: AnyObject.self)
+
+        // フックチェーンを構築
+        var nextLoad: AnyObject = defaultLoadObj
+        for i in 0..<(loadHooks.count - 1) {
+            let hook = loadHooks[i]
+            let currentNext = nextLoad
+            let chainBlock: @convention(block) (String, JSValue) -> JSValue = { url, ctx in
+                return hook.call(withArguments: [url, ctx, currentNext]) ?? JSValue(undefinedIn: JSContext.current())
+            }
+            nextLoad = unsafeBitCast(chainBlock, to: AnyObject.self)
+        }
+
+        let hookContext = JSValue(newObjectIn: context)!
+        let format = ESMDetector.shared.isESM(path: path) ? "module" : "commonjs"
+        hookContext.setValue(format, forProperty: "format")
+        let conditions = JSValue(newArrayIn: context)!
+        conditions.setValue("node", at: 0)
+        conditions.setValue("require", at: 1)
+        hookContext.setValue(conditions, forProperty: "conditions")
+
+        let lastHook = loadHooks.last!
+        let result = lastHook.call(withArguments: [url, hookContext, nextLoad])
+
+        guard let result = result, !result.isUndefined else { return nil }
+
+        if let source = result.forProperty("source")?.toString(), source != "undefined" {
+            let fmt = result.forProperty("format")?.toString()
+            return (source, fmt)
+        }
+
+        return nil
+    }
+
+    enum ResolveHookResult {
+        case filePath(String)
+        case builtin(String)
     }
 
     /// Resolve a file path from a module name.

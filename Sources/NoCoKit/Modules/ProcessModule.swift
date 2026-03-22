@@ -27,11 +27,11 @@ public struct ProcessModule: NodeModule {
         let process = JSValue(newObjectIn: context)!
 
         // process.version
-        process.setValue("v18.0.0", forProperty: "version")
+        process.setValue("v22.15.0", forProperty: "version")
 
         // process.versions
         let versions = JSValue(newObjectIn: context)!
-        versions.setValue("18.0.0", forProperty: "node")
+        versions.setValue("22.15.0", forProperty: "node")
         versions.setValue("10.2", forProperty: "v8")
         process.setValue(versions, forProperty: "versions")
 

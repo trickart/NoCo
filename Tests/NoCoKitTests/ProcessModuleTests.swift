@@ -11,7 +11,7 @@ import JavaScriptCore
     #expect(platform == "darwin")
 
     let version = runtime.evaluate("process.version")?.toString()
-    #expect(version == "v18.0.0")
+    #expect(version == "v22.15.0")
 }
 
 @Test func processCwd() async throws {
