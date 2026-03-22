@@ -15,6 +15,18 @@ public struct ModuleModule: NodeModule {
             forKeyedSubscript: "__NoCo_stripTypeScriptTypes" as NSString
         )
 
+        // Swift helper for module.registerHooks()
+        let registerHooksBlock: @convention(block) (JSValue, JSValue) -> Void = { resolve, load in
+            runtime.moduleLoader.registerModuleHooks(
+                resolve: resolve.isNull ? nil : resolve,
+                load: load.isNull ? nil : load
+            )
+        }
+        context.setObject(
+            unsafeBitCast(registerHooksBlock, to: AnyObject.self),
+            forKeyedSubscript: "__NoCo_registerModuleHooks" as NSString
+        )
+
         let script = #"""
         (function() {
             var mod = {};
@@ -266,6 +278,25 @@ public struct ModuleModule: NodeModule {
             // --- _initPaths / _preloadModules (no-op) ---
             mod.Module._initPaths = function() {};
             mod.Module._preloadModules = function(requests) {};
+
+            // --- registerHooks (Node.js 22.15+) ---
+            mod.registerHooks = function(hooks) {
+                if (hooks) {
+                    __NoCo_registerModuleHooks(
+                        typeof hooks.resolve === 'function' ? hooks.resolve : null,
+                        typeof hooks.load === 'function' ? hooks.load : null
+                    );
+                }
+            };
+            mod.Module.registerHooks = mod.registerHooks;
+
+            // --- register (Node.js 18.19+ no-op stub) ---
+            mod.register = function(specifier, options) {};
+            mod.Module.register = mod.register;
+
+            // --- setSourceMapsSupport (Node.js 22+ no-op stub) ---
+            mod.setSourceMapsSupport = function(enable) {};
+            mod.Module.setSourceMapsSupport = mod.setSourceMapsSupport;
 
             return mod;
         })();

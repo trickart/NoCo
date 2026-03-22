@@ -356,6 +356,47 @@ import JavaScriptCore
     #expect(json.contains("\"_preloadModules\":\"function\""))
 }
 
+// MARK: - registerHooks / register
+
+@Test func moduleRegisterHooksIsFunction() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var m = require('module');
+        JSON.stringify({
+            registerHooks: typeof m.registerHooks,
+            moduleRegisterHooks: typeof m.Module.registerHooks,
+            register: typeof m.register,
+            moduleRegister: typeof m.Module.register,
+            setSourceMapsSupport: typeof m.setSourceMapsSupport
+        });
+    """)
+    let json = result?.toString() ?? ""
+    #expect(json.contains("\"registerHooks\":\"function\""))
+    #expect(json.contains("\"moduleRegisterHooks\":\"function\""))
+    #expect(json.contains("\"register\":\"function\""))
+    #expect(json.contains("\"moduleRegister\":\"function\""))
+    #expect(json.contains("\"setSourceMapsSupport\":\"function\""))
+}
+
+@Test func moduleRegisterHooksAcceptsHooks() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var m = require('module');
+        var resolvedSpecs = [];
+        m.registerHooks({
+            resolve: function(specifier, context, nextResolve) {
+                resolvedSpecs.push(specifier);
+                return nextResolve(specifier, context);
+            }
+        });
+        require('path');
+        // ビルトインは Swift 側で直接処理されるため、ファイルモジュール解決のみフックが呼ばれる
+        // registerHooks がクラッシュしないことを確認
+        true;
+    """)
+    #expect(result?.toBool() == true)
+}
+
 @Test func moduleEnableCompileCacheReturnsObject() async throws {
     let runtime = NodeRuntime()
     let result = runtime.evaluate("""
