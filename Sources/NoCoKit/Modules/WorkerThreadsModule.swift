@@ -101,10 +101,13 @@ public struct WorkerThreadsModule: NodeModule {
         parentPort.setValue(unsafeBitCast(releaseHandle, to: AnyObject.self), forProperty: "_releaseHandle")
 
         // parentPort.postMessage(value) — sends message to parent
+        // Use structured clone serialization to handle circular references (like vitest's test objects)
         let postMessage: @convention(block) (JSValue) -> Void = { value in
             let ctx = JSContext.current()!
-            let json = ctx.evaluateScript("JSON.stringify")!.call(withArguments: [value])
-            guard let jsonStr = json?.toString(), jsonStr != "undefined" else { return }
+            let serialized = ctx.evaluateScript("globalThis.__noco_ipc.serialize")!
+                .call(withArguments: [value])!
+            guard !serialized.isUndefined else { return }
+            let jsonStr = serialized.toString()!
             runtime.workerContext?.parentSendMessage(jsonStr)
         }
         parentPort.setValue(unsafeBitCast(postMessage, to: AnyObject.self), forProperty: "postMessage")
@@ -206,9 +209,10 @@ public struct WorkerThreadsModule: NodeModule {
         let parentEventLoop = runtime.eventLoop
 
         // Closure: deliver message from worker → parent (called on worker's queue)
+        // Use structured clone deserialization to reconstruct circular references
         let parentSendMessage: @Sendable (String) -> Void = { jsonStr in
             parentEventLoop.enqueueCallback {
-                let parsed = runtime.context.evaluateScript("JSON.parse")!
+                let parsed = runtime.context.evaluateScript("globalThis.__noco_ipc.deserialize")!
                     .call(withArguments: [jsonStr])
                 worker.invokeMethod("emit", withArguments: ["message", parsed as Any])
             }
@@ -223,14 +227,16 @@ public struct WorkerThreadsModule: NodeModule {
         // Store a way to send messages parent → worker (set after worker runtime is created)
         let workerMailbox = WorkerMailbox()
 
-        // worker.postMessage(value)
-        let postMessage: @convention(block) (JSValue) -> Void = { value in
+        // worker.postMessage(value) — structured clone serialization for circular refs
+        let postMessageParent: @convention(block) (JSValue) -> Void = { value in
             let ctx = JSContext.current()!
-            let json = ctx.evaluateScript("JSON.stringify")!.call(withArguments: [value])
-            guard let jsonStr = json?.toString(), jsonStr != "undefined" else { return }
+            let serialized = ctx.evaluateScript("globalThis.__noco_ipc.serialize")!
+                .call(withArguments: [value])!
+            guard !serialized.isUndefined else { return }
+            let jsonStr = serialized.toString()!
             workerMailbox.send(jsonStr)
         }
-        worker.setValue(unsafeBitCast(postMessage, to: AnyObject.self), forProperty: "postMessage")
+        worker.setValue(unsafeBitCast(postMessageParent, to: AnyObject.self), forProperty: "postMessage")
 
         // worker.terminate() → Promise
         let terminate: @convention(block) () -> JSValue = {
@@ -305,9 +311,9 @@ public struct WorkerThreadsModule: NodeModule {
             let workerRuntime = NodeRuntime(workerContext: workerCtx)
             workerState.setRuntime(workerRuntime)
 
-            // Set up mailbox: parent → worker message delivery
+            // Set up mailbox: parent → worker message delivery (structured clone deserialization)
             workerMailbox.setTarget(workerRuntime.eventLoop) { jsonStr in
-                let parsed = workerRuntime.context.evaluateScript("JSON.parse")!
+                let parsed = workerRuntime.context.evaluateScript("globalThis.__noco_ipc.deserialize")!
                     .call(withArguments: [jsonStr])
                 // Get the parentPort from the worker's require cache
                 let wt = workerRuntime.context.evaluateScript("require('worker_threads')")!
@@ -422,12 +428,12 @@ public struct WorkerThreadsModule: NodeModule {
                     var peer = this._peer;
                     if (!peer || peer._closed) return;
                     var json;
-                    try { json = JSON.stringify(value); } catch(e) { return; }
+                    try { json = globalThis.__noco_ipc.serialize(value); } catch(e) { return; }
                     // Deliver asynchronously via nextTick
                     process.nextTick(function() {
                         if (peer._closed) return;
                         var parsed;
-                        try { parsed = JSON.parse(json); } catch(e) { return; }
+                        try { parsed = globalThis.__noco_ipc.deserialize(json); } catch(e) { return; }
                         if (typeof peer.emit === 'function') {
                             peer.emit('message', parsed);
                         }
