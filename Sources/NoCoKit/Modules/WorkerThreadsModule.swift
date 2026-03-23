@@ -101,9 +101,9 @@ public struct WorkerThreadsModule: NodeModule {
         }
         parentPort.setValue(unsafeBitCast(releaseHandle, to: AnyObject.self), forProperty: "_releaseHandle")
 
-        // parentPort.postMessage(value) — sends message to parent
+        // parentPort.postMessage(value, transferList?) — sends message to parent
         // Use structured clone serialization to handle circular references (like vitest's test objects)
-        let postMessage: @convention(block) (JSValue) -> Void = { value in
+        let postMessage: @convention(block) (JSValue, JSValue) -> Void = { value, _ in
             let ctx = JSContext.current()!
             let serialized = ctx.evaluateScript("globalThis.__noco_ipc.serialize")!
                 .call(withArguments: [value])!
@@ -233,8 +233,8 @@ public struct WorkerThreadsModule: NodeModule {
         // Store a way to send messages parent → worker (set after worker runtime is created)
         let workerMailbox = WorkerMailbox()
 
-        // worker.postMessage(value) — structured clone serialization for circular refs
-        let postMessageParent: @convention(block) (JSValue) -> Void = { value in
+        // worker.postMessage(value, transferList?) — structured clone serialization for circular refs
+        let postMessageParent: @convention(block) (JSValue, JSValue) -> Void = { value, _ in
             let ctx = JSContext.current()!
             let serialized = ctx.evaluateScript("globalThis.__noco_ipc.serialize")!
                 .call(withArguments: [value])!
@@ -416,8 +416,10 @@ public struct WorkerThreadsModule: NodeModule {
                 var EE = this.__NoCo_EventEmitter;
 
                 function MessagePort() {
-                    this._peer = null;
-                    this._closed = false;
+                    Object.defineProperty(this, '_peer', { value: null, writable: true, enumerable: false, configurable: true });
+                    Object.defineProperty(this, '_closed', { value: false, writable: true, enumerable: false, configurable: true });
+                    Object.defineProperty(this, '_queue', { value: undefined, writable: true, enumerable: false, configurable: true });
+                    Object.defineProperty(this, '_isMessagePort', { value: true, writable: false, enumerable: false, configurable: false });
                     if (EE) {
                         this._events = Object.create(null);
                         this._maxListeners = EE.defaultMaxListeners;
@@ -465,8 +467,8 @@ public struct WorkerThreadsModule: NodeModule {
                 function MessageChannel() {
                     this.port1 = new MessagePort();
                     this.port2 = new MessagePort();
-                    this.port1._peer = this.port2;
-                    this.port2._peer = this.port1;
+                    Object.defineProperty(this.port1, '_peer', { value: this.port2, writable: true, enumerable: false, configurable: true });
+                    Object.defineProperty(this.port2, '_peer', { value: this.port1, writable: true, enumerable: false, configurable: true });
                 }
 
                 wt.MessagePort = MessagePort;

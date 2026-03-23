@@ -1180,9 +1180,17 @@ public struct ChildProcessModule: NodeModule {
                 guard !serialized.isUndefined else { return }
                 result = serialized.toString()
             } else {
-                let jsonResult = ctx.evaluateScript("JSON.stringify")!.call(withArguments: [message])!
-                guard !jsonResult.isUndefined else { return }
-                result = jsonResult.toString()
+                // Try JSON.stringify first; fall back to structured clone on failure (e.g. cyclic refs)
+                let jsonResult = ctx.evaluateScript("JSON.stringify")!.call(withArguments: [message])
+                if let json = jsonResult, !json.isUndefined, ctx.exception == nil {
+                    result = json.toString()
+                } else {
+                    ctx.exception = nil
+                    let serialized = ctx.evaluateScript("globalThis.__noco_ipc.serialize")!
+                        .call(withArguments: [message])!
+                    guard !serialized.isUndefined else { return }
+                    result = serialized.toString()
+                }
             }
             ipcChannel.write(result)
         }

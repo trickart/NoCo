@@ -896,4 +896,33 @@ func spawnUnrefReturnsSelf() async throws {
     """)
     #expect(result?.toString() == "true:true")
 }
+
+// MARK: - IPC send fallback for cyclic references
+
+@Test(.timeLimit(.minutes(1)))
+func forkSendCyclicObjectFallback() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var child = cp.fork('/dev/null', [], {});
+        // Create a cyclic object
+        var a = { x: 1 };
+        var b = { y: 2, ref: a };
+        a.ref = b;
+        // send() should not throw — falls back to structured clone
+        var err = null;
+        try {
+            child.send(a);
+        } catch(e) {
+            err = e.message;
+        }
+        console.log('sendError:' + err);
+        child.kill();
+    """)
+    await runEventLoopInBackground(runtime, timeout: 5)
+    #expect(messages.contains("sendError:null"))
+}
 #endif
