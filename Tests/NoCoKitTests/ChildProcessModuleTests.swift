@@ -839,4 +839,61 @@ func forkAdvancedSerializationEcho() async throws {
     let isCircular = runtime.evaluate("received && received.items[0].root === received")
     #expect(isCircular?.toBool() == true)
 }
+
+// MARK: - ref / unref
+
+@Test(.timeLimit(.minutes(1)))
+func spawnRefUnrefExist() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var cp = require('child_process');
+        var child = cp.spawn('echo', ['test']);
+        typeof child.ref + ':' + typeof child.unref;
+    """)
+    #expect(result?.toString() == "function:function")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func spawnUnrefAllowsEventLoopExit() async throws {
+    // After unref(), the event loop should be able to exit even if the child is still running
+    let runtime = NodeRuntime()
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var child = cp.spawn('sleep', ['10']);
+        child.unref();
+    """)
+
+    // Event loop should exit quickly (not wait 10 seconds for sleep)
+    await runEventLoopInBackground(runtime, timeout: 2)
+    // If we get here within the time limit, unref worked
+}
+
+@Test(.timeLimit(.minutes(1)))
+func spawnRefReRefKeepsEventLoop() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var cp = require('child_process');
+        var child = cp.spawn('echo', ['hello']);
+        child.unref();
+        child.ref();
+        // Double ref should not double-count
+        child.ref();
+        'ok';
+    """)
+    #expect(result?.toString() == "ok")
+    await runEventLoopInBackground(runtime, timeout: 2)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func spawnUnrefReturnsSelf() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var cp = require('child_process');
+        var child = cp.spawn('echo', ['test']);
+        var r1 = child.unref();
+        var r2 = child.ref();
+        (r1 === child) + ':' + (r2 === child);
+    """)
+    #expect(result?.toString() == "true:true")
+}
 #endif

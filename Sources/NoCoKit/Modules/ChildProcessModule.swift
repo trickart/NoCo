@@ -528,6 +528,25 @@ public struct ChildProcessModule: NodeModule {
         }
         childProcess.setValue(unsafeBitCast(kill, to: AnyObject.self), forProperty: "kill")
 
+        // ref / unref — control whether this child keeps the event loop alive
+        var isReferenced = true // starts as ref'd (retainHandle is called at launch)
+        let ref: @convention(block) () -> JSValue = { [weak runtime, weak childProcess] in
+            if !isReferenced {
+                isReferenced = true
+                runtime?.eventLoop.retainHandle()
+            }
+            return childProcess ?? JSValue(undefinedIn: JSContext.current())
+        }
+        let unref: @convention(block) () -> JSValue = { [weak runtime, weak childProcess] in
+            if isReferenced {
+                isReferenced = false
+                runtime?.eventLoop.releaseHandle()
+            }
+            return childProcess ?? JSValue(undefinedIn: JSContext.current())
+        }
+        childProcess.setValue(unsafeBitCast(ref, to: AnyObject.self), forProperty: "ref")
+        childProcess.setValue(unsafeBitCast(unref, to: AnyObject.self), forProperty: "unref")
+
         // connected / killed / exitCode / signalCode
         childProcess.setValue(false, forProperty: "killed")
         childProcess.setValue(JSValue(nullIn: context), forProperty: "exitCode")
@@ -972,6 +991,28 @@ public struct ChildProcessModule: NodeModule {
             proc.terminate()
         }
         childProcess.setValue(unsafeBitCast(kill, to: AnyObject.self), forProperty: "kill")
+
+        // ref / unref — control whether this child keeps the event loop alive
+        // Fork uses 2 handles (process + IPC), so ref/unref adjusts both
+        var isReferenced = true
+        let ref: @convention(block) () -> JSValue = { [weak runtime, weak childProcess] in
+            if !isReferenced {
+                isReferenced = true
+                runtime?.eventLoop.retainHandle()  // for process
+                runtime?.eventLoop.retainHandle()  // for IPC channel
+            }
+            return childProcess ?? JSValue(undefinedIn: JSContext.current())
+        }
+        let unref: @convention(block) () -> JSValue = { [weak runtime, weak childProcess] in
+            if isReferenced {
+                isReferenced = false
+                runtime?.eventLoop.releaseHandle()  // for process
+                runtime?.eventLoop.releaseHandle()  // for IPC channel
+            }
+            return childProcess ?? JSValue(undefinedIn: JSContext.current())
+        }
+        childProcess.setValue(unsafeBitCast(ref, to: AnyObject.self), forProperty: "ref")
+        childProcess.setValue(unsafeBitCast(unref, to: AnyObject.self), forProperty: "unref")
 
         // Launch
         do {
