@@ -35,7 +35,8 @@ public struct WorkerThreadsModule: NodeModule {
             workerThreads.setValue(parentPort, forProperty: "parentPort")
 
             if let json = runtime.workerContext?.workerDataJSON {
-                let data = context.evaluateScript("JSON.parse")!.call(withArguments: [json])
+                let data = context.evaluateScript("globalThis.__noco_ipc.deserialize")!
+                    .call(withArguments: [json])
                 workerThreads.setValue(data, forProperty: "workerData")
             } else {
                 workerThreads.setValue(JSValue(nullIn: context), forProperty: "workerData")
@@ -156,12 +157,17 @@ public struct WorkerThreadsModule: NodeModule {
             if envJSON == "undefined" { envJSON = nil }
         }
 
-        // Serialize workerData
+        // Serialize workerData (using structured clone to support SharedArrayBuffer)
         var workerDataJSON: String? = nil
         if let wd = options?.forProperty("workerData"), !wd.isUndefined && !wd.isNull {
-            let json = ctx.evaluateScript("JSON.stringify")!.call(withArguments: [wd])
-            workerDataJSON = json?.toString()
+            let serialized = ctx.evaluateScript("globalThis.__noco_ipc.serialize")!
+                .call(withArguments: [wd])
+            workerDataJSON = serialized?.toString()
             if workerDataJSON == "undefined" { workerDataJSON = nil }
+            // Retain SharedArrayBuffer references for the worker
+            if let json = workerDataJSON {
+                Self.retainSABsInJSON(json)
+            }
         }
 
         // Resolve file path
@@ -478,6 +484,28 @@ public struct WorkerThreadsModule: NodeModule {
                 };
             })
         """)!.call(withArguments: [workerThreads])
+    }
+
+    // MARK: - SharedArrayBuffer helpers
+
+    /// Scan serialized JSON for $sab markers and retain each referenced SharedArrayBuffer.
+    private static func retainSABsInJSON(_ json: String) {
+        // Simple scan for "$sab": <number> patterns in the JSON
+        guard let data = json.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data) else { return }
+        retainSABsInValue(parsed)
+    }
+
+    private static func retainSABsInValue(_ value: Any) {
+        if let dict = value as? [String: Any] {
+            if let sabId = dict["$sab"] as? NSNumber {
+                SharedMemoryStore.shared.retain(UInt64(sabId.doubleValue))
+            } else {
+                for (_, v) in dict { retainSABsInValue(v) }
+            }
+        } else if let arr = value as? [Any] {
+            for v in arr { retainSABsInValue(v) }
+        }
     }
 
     // MARK: - EventEmitter mixin helper
