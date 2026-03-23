@@ -163,6 +163,58 @@ public struct EventEmitterModule: NodeModule {
             EventEmitter._defaultMaxListeners = 10;
             EventEmitter.EventEmitter = EventEmitter;
 
+            // EventEmitterAsyncResource — subclass with AsyncResource tracking (stub)
+            class EventEmitterAsyncResource extends EventEmitter {
+                constructor(options) {
+                    super();
+                    this.asyncResource = {
+                        type: options?.name || 'EventEmitterAsyncResource',
+                        asyncId: function() { return 0; },
+                        triggerAsyncId: function() { return 0; },
+                        runInAsyncScope: function(fn, thisArg) {
+                            var args = [].slice.call(arguments, 2);
+                            return fn.apply(thisArg, args);
+                        },
+                        emitDestroy: function() {}
+                    };
+                }
+                get asyncId() { return 0; }
+                get triggerAsyncId() { return 0; }
+                emitDestroy() { return this; }
+            }
+            EventEmitter.EventEmitterAsyncResource = EventEmitterAsyncResource;
+
+            // once(emitter, name) — returns a promise that resolves on the first event
+            EventEmitter.once = function once(emitter, name) {
+                return new Promise(function(resolve, reject) {
+                    function onEvent() {
+                        if (name !== 'error') emitter.removeListener('error', onError);
+                        resolve([].slice.call(arguments));
+                    }
+                    function onError(err) {
+                        emitter.removeListener(name, onEvent);
+                        reject(err);
+                    }
+                    emitter.once(name, onEvent);
+                    if (name !== 'error') emitter.once('error', onError);
+                });
+            };
+
+            // on(emitter, event) — returns an AsyncIterator (minimal stub)
+            EventEmitter.on = function on(emitter, event) {
+                var buffer = [];
+                var resolve = null;
+                emitter.on(event, function() {
+                    var args = [].slice.call(arguments);
+                    if (resolve) { var r = resolve; resolve = null; r({ value: args, done: false }); }
+                    else buffer.push(args);
+                });
+                return { next: function() {
+                    if (buffer.length > 0) return Promise.resolve({ value: buffer.shift(), done: false });
+                    return new Promise(function(r) { resolve = r; });
+                }, [Symbol.asyncIterator]: function() { return this; } };
+            };
+
             return EventEmitter;
         })();
         """

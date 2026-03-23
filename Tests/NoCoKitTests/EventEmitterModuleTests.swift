@@ -208,3 +208,113 @@ import JavaScriptCore
     """)
     #expect(result?.toBool() == true)
 }
+
+// MARK: - EventEmitterAsyncResource
+
+@Test func eventEmitterAsyncResourceIsSubclass() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var EE = require('events');
+        var ear = new EE.EventEmitterAsyncResource({ name: 'test' });
+        (ear instanceof EE) + ':' + ear.asyncResource.type;
+    """)
+    #expect(result?.toString() == "true:test")
+}
+
+@Test func eventEmitterAsyncResourceEmitsEvents() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var EE = require('events');
+        var ear = new EE.EventEmitterAsyncResource({ name: 'myResource' });
+        var received = '';
+        ear.on('data', function(v) { received = v; });
+        ear.emit('data', 'hello');
+        received;
+    """)
+    #expect(result?.toString() == "hello")
+}
+
+@Test func eventEmitterAsyncResourceMethods() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var EE = require('events');
+        var ear = new EE.EventEmitterAsyncResource();
+        var results = [];
+        results.push(typeof ear.asyncResource.asyncId === 'function');
+        results.push(typeof ear.asyncResource.triggerAsyncId === 'function');
+        results.push(typeof ear.asyncResource.runInAsyncScope === 'function');
+        results.push(ear.asyncResource.asyncId() === 0);
+        results.push(ear.asyncResource.triggerAsyncId() === 0);
+        // runInAsyncScope should call the function with the given thisArg and args
+        var ctx = { val: 42 };
+        var ran = ear.asyncResource.runInAsyncScope(function(a, b) { return this.val + a + b; }, ctx, 1, 2);
+        results.push(ran === 45);
+        results.push(ear.emitDestroy() === ear);
+        results.every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+// MARK: - events.once()
+
+@Test func eventsOnceResolvesOnEvent() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var EE = require('events');
+        var emitter = new EE();
+        EE.once(emitter, 'done').then(function(args) {
+            console.log('once:' + args[0] + ':' + args[1]);
+        });
+        emitter.emit('done', 'a', 'b');
+    """)
+    runtime.context.evaluateScript("void 0") // drain microtasks
+
+    #expect(messages.contains("once:a:b"))
+}
+
+@Test func eventsOnceRejectsOnError() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var EE = require('events');
+        var emitter = new EE();
+        EE.once(emitter, 'done').catch(function(err) {
+            console.log('error:' + err.message);
+        });
+        emitter.emit('error', new Error('fail'));
+    """)
+    runtime.context.evaluateScript("void 0")
+
+    #expect(messages.contains("error:fail"))
+}
+
+// MARK: - events.on()
+
+@Test func eventsOnReturnsAsyncIterator() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var EE = require('events');
+        var emitter = new EE();
+        var iter = EE.on(emitter, 'data');
+        // Symbol.asyncIterator should be defined
+        console.log('asyncIter:' + (typeof iter[Symbol.asyncIterator] === 'function'));
+        // Emit before consuming — should buffer
+        emitter.emit('data', 'x');
+        emitter.emit('data', 'y');
+        iter.next().then(function(r) { console.log('v1:' + r.value[0] + ':' + r.done); });
+        iter.next().then(function(r) { console.log('v2:' + r.value[0] + ':' + r.done); });
+    """)
+    runtime.context.evaluateScript("void 0")
+
+    #expect(messages.contains("asyncIter:true"))
+    #expect(messages.contains("v1:x:false"))
+    #expect(messages.contains("v2:y:false"))
+}
