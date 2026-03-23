@@ -480,3 +480,207 @@ func receiveMessageOnPortConsumesBeforeEmit() async throws {
     #expect(messages.contains("sync:sync"))
     #expect(messages.contains("emitCount:1")) // only the second message should emit
 }
+
+// MARK: - MessagePort internal properties non-enumerable
+
+@Test(.timeLimit(.minutes(1)))
+func messagePortPeerNonEnumerable() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var wt = require('worker_threads');
+        var { port1, port2 } = new wt.MessageChannel();
+        var keys = Object.keys(port1);
+        // _peer, _closed, _queue, _isMessagePort should NOT be in Object.keys
+        var hasPeer = keys.indexOf('_peer') >= 0;
+        var hasClosed = keys.indexOf('_closed') >= 0;
+        var hasQueue = keys.indexOf('_queue') >= 0;
+        hasPeer + ':' + hasClosed + ':' + hasQueue;
+    """)
+    #expect(result?.toString() == "false:false:false")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func messagePortJsonStringifyNoCycle() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var wt = require('worker_threads');
+        var { port1, port2 } = new wt.MessageChannel();
+        var err = null;
+        try {
+            JSON.stringify(port1);
+        } catch(e) {
+            err = e.message;
+        }
+        err;
+    """)
+    // Should be null (no error) because _peer is non-enumerable
+    #expect(result?.isNull == true)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func messagePortIsMessagePortMarker() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var wt = require('worker_threads');
+        var { port1 } = new wt.MessageChannel();
+        port1._isMessagePort === true;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+// MARK: - postMessage with transferList argument
+
+@Test(.timeLimit(.minutes(1)))
+func workerPostMessageWithTransferList() async throws {
+    let runtime = NodeRuntime()
+    runtime.evaluate("""
+        var wt = require('worker_threads');
+        var received = null;
+        var w = new wt.Worker(
+            "var { parentPort } = require('worker_threads'); parentPort.postMessage('ok');",
+            { eval: true }
+        );
+        w.on('message', function(msg) {
+            received = msg;
+            w.terminate();
+        });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("received")
+    #expect(result?.toString() == "ok")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func parentPortPostMessageWithTransferList() async throws {
+    let runtime = NodeRuntime()
+    runtime.evaluate("""
+        var wt = require('worker_threads');
+        var received = null;
+        var w = new wt.Worker(
+            "var { parentPort } = require('worker_threads'); parentPort.postMessage('data', []);",
+            { eval: true }
+        );
+        w.on('message', function(msg) {
+            received = msg;
+            w.terminate();
+        });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("received")
+    #expect(result?.toString() == "data")
+}
+
+// MARK: - Structured clone (serialize/deserialize) types
+
+@Test(.timeLimit(.minutes(1)))
+func structuredCloneDate() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var json = globalThis.__noco_ipc.serialize(new Date('2024-01-15T12:00:00.000Z'));
+        var restored = globalThis.__noco_ipc.deserialize(json);
+        (restored instanceof Date) + ':' + restored.toISOString();
+    """)
+    #expect(result?.toString() == "true:2024-01-15T12:00:00.000Z")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func structuredCloneRegExp() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var json = globalThis.__noco_ipc.serialize(/hello\\sworld/gi);
+        var restored = globalThis.__noco_ipc.deserialize(json);
+        (restored instanceof RegExp) + ':' + restored.source + ':' + restored.flags;
+    """)
+    #expect(result?.toString() == "true:hello\\sworld:gi")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func structuredCloneMap() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var m = new Map([['a', 1], ['b', 2]]);
+        var json = globalThis.__noco_ipc.serialize(m);
+        var restored = globalThis.__noco_ipc.deserialize(json);
+        (restored instanceof Map) + ':' + restored.get('a') + ':' + restored.get('b') + ':' + restored.size;
+    """)
+    #expect(result?.toString() == "true:1:2:2")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func structuredCloneSet() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var s = new Set([10, 20, 30]);
+        var json = globalThis.__noco_ipc.serialize(s);
+        var restored = globalThis.__noco_ipc.deserialize(json);
+        (restored instanceof Set) + ':' + restored.has(10) + ':' + restored.has(20) + ':' + restored.size;
+    """)
+    #expect(result?.toString() == "true:true:true:3")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func structuredCloneError() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var e = new TypeError('test error');
+        e.code = 'ERR_TEST';
+        var json = globalThis.__noco_ipc.serialize(e);
+        var restored = globalThis.__noco_ipc.deserialize(json);
+        (restored instanceof Error) + ':' + restored.name + ':' + restored.message + ':' + restored.code;
+    """)
+    #expect(result?.toString() == "true:TypeError:test error:ERR_TEST")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func structuredCloneArrayBuffer() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var ab = new ArrayBuffer(4);
+        new Uint8Array(ab).set([1, 2, 3, 4]);
+        var json = globalThis.__noco_ipc.serialize(ab);
+        var restored = globalThis.__noco_ipc.deserialize(json);
+        (restored instanceof ArrayBuffer) + ':' + new Uint8Array(restored).join(',');
+    """)
+    #expect(result?.toString() == "true:1,2,3,4")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func structuredCloneTypedArray() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var ta = new Int32Array([100, 200, -300]);
+        var json = globalThis.__noco_ipc.serialize(ta);
+        var restored = globalThis.__noco_ipc.deserialize(json);
+        (restored instanceof Int32Array) + ':' + restored.join(',');
+    """)
+    #expect(result?.toString() == "true:100,200,-300")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func structuredCloneCyclicObject() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var a = { name: 'a' };
+        var b = { name: 'b', ref: a };
+        a.ref = b;
+        var json = globalThis.__noco_ipc.serialize(a);
+        var restored = globalThis.__noco_ipc.deserialize(json);
+        restored.name + ':' + restored.ref.name + ':' + (restored.ref.ref === restored);
+    """)
+    #expect(result?.toString() == "a:b:true")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func structuredCloneMessagePort() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var wt = require('worker_threads');
+        var { port1 } = new wt.MessageChannel();
+        var obj = { msg: 'hello', port: port1 };
+        var json = globalThis.__noco_ipc.serialize(obj);
+        var restored = globalThis.__noco_ipc.deserialize(json);
+        restored.msg + ':' + typeof restored.port;
+    """)
+    // MessagePort is serialized as placeholder object
+    #expect(result?.toString() == "hello:object")
+}

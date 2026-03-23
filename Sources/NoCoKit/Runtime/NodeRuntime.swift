@@ -732,17 +732,59 @@ public final class NodeRuntime: @unchecked Sendable {
                     function walk(val) {
                         if (val === null || typeof val !== 'object') return val;
                         if (typeof val === 'function') return undefined;
+                        // MessagePort — not transferable via serialization
+                        if (val._isMessagePort) return { '$messagePort': true };
+                        // SharedArrayBuffer
                         if (typeof SharedArrayBuffer !== 'undefined' && val instanceof SharedArrayBuffer) {
                             return { '$sab': val._sabId, '$sabLen': val.byteLength };
                         }
+                        // Circular reference detection
                         if (seen.has(val)) return { '$circRef': seen.get(val) };
                         var id = nextId++;
                         seen.set(val, id);
+                        // Date
+                        if (val instanceof Date) return { '$id': id, '$date': val.toISOString() };
+                        // RegExp
+                        if (val instanceof RegExp) return { '$id': id, '$regexp': { source: val.source, flags: val.flags } };
+                        // Map
+                        if (val instanceof Map) {
+                            var mapEntries = [];
+                            val.forEach(function(v, k) { mapEntries.push([walk(k), walk(v)]); });
+                            return { '$id': id, '$map': mapEntries };
+                        }
+                        // Set
+                        if (val instanceof Set) {
+                            var setItems = [];
+                            val.forEach(function(v) { setItems.push(walk(v)); });
+                            return { '$id': id, '$set': setItems };
+                        }
+                        // Error
+                        if (val instanceof Error) {
+                            return { '$id': id, '$error': { name: val.name, message: val.message, stack: val.stack, code: val.code } };
+                        }
+                        // ArrayBuffer (not SharedArrayBuffer)
+                        if (val instanceof ArrayBuffer) {
+                            return { '$id': id, '$ab': Array.from(new Uint8Array(val)) };
+                        }
+                        // TypedArray (Uint8Array, Int32Array, Float64Array, etc.)
+                        if (ArrayBuffer.isView(val) && !(val instanceof DataView)) {
+                            return { '$id': id, '$ta': { type: val.constructor.name, data: Array.from(val) } };
+                        }
+                        // DataView
+                        if (val instanceof DataView) {
+                            return { '$id': id, '$dv': { byteOffset: val.byteOffset, byteLength: val.byteLength, buffer: walk(val.buffer) } };
+                        }
+                        // Buffer (Node.js)
+                        if (typeof Buffer !== 'undefined' && Buffer.isBuffer(val)) {
+                            return { '$id': id, '$buffer': Array.from(val) };
+                        }
+                        // Array
                         if (Array.isArray(val)) {
                             var items = [];
                             for (var i = 0; i < val.length; i++) items[i] = walk(val[i]);
                             return { '$id': id, '$array': items };
                         }
+                        // Plain object
                         var obj = { '$id': id };
                         var keys = Object.keys(val);
                         for (var i = 0; i < keys.length; i++) {
@@ -758,10 +800,75 @@ public final class NodeRuntime: @unchecked Sendable {
                     function restore(val) {
                         if (val === null || typeof val !== 'object') return val;
                         if (val['$circRef'] !== undefined) return registry[val['$circRef']];
+                        if (val['$messagePort'] !== undefined) return {};
                         if (val['$sab'] !== undefined && typeof SharedArrayBuffer !== 'undefined') {
                             return SharedArrayBuffer._fromId(val['$sab']);
                         }
                         var id = val['$id'];
+                        // Date
+                        if (val['$date'] !== undefined) {
+                            var d = new Date(val['$date']);
+                            if (id !== undefined) registry[id] = d;
+                            return d;
+                        }
+                        // RegExp
+                        if (val['$regexp'] !== undefined) {
+                            var r = new RegExp(val['$regexp'].source, val['$regexp'].flags);
+                            if (id !== undefined) registry[id] = r;
+                            return r;
+                        }
+                        // Map
+                        if (val['$map'] !== undefined) {
+                            var m = new Map();
+                            if (id !== undefined) registry[id] = m;
+                            var entries = val['$map'];
+                            for (var i = 0; i < entries.length; i++) m.set(restore(entries[i][0]), restore(entries[i][1]));
+                            return m;
+                        }
+                        // Set
+                        if (val['$set'] !== undefined) {
+                            var s = new Set();
+                            if (id !== undefined) registry[id] = s;
+                            var setItems = val['$set'];
+                            for (var i = 0; i < setItems.length; i++) s.add(restore(setItems[i]));
+                            return s;
+                        }
+                        // Error
+                        if (val['$error'] !== undefined) {
+                            var e = new Error(val['$error'].message);
+                            e.name = val['$error'].name;
+                            if (val['$error'].stack) e.stack = val['$error'].stack;
+                            if (val['$error'].code) e.code = val['$error'].code;
+                            if (id !== undefined) registry[id] = e;
+                            return e;
+                        }
+                        // ArrayBuffer
+                        if (val['$ab'] !== undefined) {
+                            var ab = new Uint8Array(val['$ab']).buffer;
+                            if (id !== undefined) registry[id] = ab;
+                            return ab;
+                        }
+                        // TypedArray
+                        if (val['$ta'] !== undefined) {
+                            var TACtor = globalThis[val['$ta'].type] || Uint8Array;
+                            var ta = new TACtor(val['$ta'].data);
+                            if (id !== undefined) registry[id] = ta;
+                            return ta;
+                        }
+                        // DataView
+                        if (val['$dv'] !== undefined) {
+                            var dvBuf = restore(val['$dv'].buffer);
+                            var dv = new DataView(dvBuf, val['$dv'].byteOffset, val['$dv'].byteLength);
+                            if (id !== undefined) registry[id] = dv;
+                            return dv;
+                        }
+                        // Buffer
+                        if (val['$buffer'] !== undefined && typeof Buffer !== 'undefined') {
+                            var buf = Buffer.from(val['$buffer']);
+                            if (id !== undefined) registry[id] = buf;
+                            return buf;
+                        }
+                        // Array
                         if (val['$array'] !== undefined) {
                             var result = [];
                             if (id !== undefined) registry[id] = result;
@@ -769,6 +876,7 @@ public final class NodeRuntime: @unchecked Sendable {
                             for (var i = 0; i < items.length; i++) result[i] = restore(items[i]);
                             return result;
                         }
+                        // Plain object
                         var result = {};
                         if (id !== undefined) registry[id] = result;
                         var keys = Object.keys(val);
@@ -820,10 +928,18 @@ public final class NodeRuntime: @unchecked Sendable {
                 guard !serialized.isUndefined else { return }
                 result = serialized.toString()
             } else {
+                // Try JSON.stringify first; fall back to structured clone on failure (e.g. cyclic refs)
                 let jsonResult = self.context.evaluateScript("JSON.stringify")!
-                    .call(withArguments: [message])!
-                guard !jsonResult.isUndefined else { return }
-                result = jsonResult.toString()
+                    .call(withArguments: [message])
+                if let json = jsonResult, !json.isUndefined, self.context.exception == nil {
+                    result = json.toString()
+                } else {
+                    self.context.exception = nil
+                    let serialized = self.context.evaluateScript("globalThis.__noco_ipc.serialize")!
+                        .call(withArguments: [message])!
+                    guard !serialized.isUndefined else { return }
+                    result = serialized.toString()
+                }
             }
             ipcChannel.write(result)
         }
@@ -853,8 +969,16 @@ public final class NodeRuntime: @unchecked Sendable {
                     parsed = ctx.evaluateScript("globalThis.__noco_ipc.deserialize")!
                         .call(withArguments: [jsonString])!
                 } else {
-                    parsed = ctx.evaluateScript("JSON.parse")!
-                        .call(withArguments: [jsonString])!
+                    // Try JSON.parse first; fall back to structured clone deserialize
+                    let jsonParsed = ctx.evaluateScript("JSON.parse")!
+                        .call(withArguments: [jsonString])
+                    if let jp = jsonParsed, !jp.isUndefined, ctx.exception == nil {
+                        parsed = jp
+                    } else {
+                        ctx.exception = nil
+                        parsed = ctx.evaluateScript("globalThis.__noco_ipc.deserialize")!
+                            .call(withArguments: [jsonString])!
+                    }
                 }
                 let p = ctx.objectForKeyedSubscript("process")!
                 p.invokeMethod("emit", withArguments: ["message", parsed])
