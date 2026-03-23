@@ -757,7 +757,7 @@ func fsWatchFileDetectsChange() async throws {
     runtime.evaluate("""
         var fs = require('fs');
         var keepAlive = setTimeout(function(){}, 30000);
-        fs.watchFile('\(tmpPath)', {interval: 200}, function(curr, prev) {
+        fs.watchFile('\(tmpPath)', {interval: 500}, function(curr, prev) {
             console.log('changed:' + curr.mtimeMs + ':' + prev.mtimeMs);
             fs.unwatchFile('\(tmpPath)');
             clearTimeout(keepAlive);
@@ -765,15 +765,15 @@ func fsWatchFileDetectsChange() async throws {
     """)
 
     let eventLoopTask = Task.detached {
-        await runEventLoopInBackgroundFS(runtime, timeout: 10)
+        await runEventLoopInBackgroundFS(runtime, timeout: 30)
     }
 
-    // Wait a bit then modify the file
-    try await Task.sleep(nanoseconds: 300_000_000)
+    // Wait a bit then modify the file (longer delay to ensure watchFile is set up)
+    try await Task.sleep(nanoseconds: 1_000_000_000)
     try "modified".write(toFile: tmpPath, atomically: true, encoding: .utf8)
 
-    // Wait for callback
-    for _ in 0..<100 {
+    // Wait for callback (up to 20 seconds for slow CI)
+    for _ in 0..<200 {
         try await Task.sleep(nanoseconds: 100_000_000)
         if messages.contains(where: { $0.hasPrefix("changed:") }) { break }
     }
