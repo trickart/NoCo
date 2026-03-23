@@ -1,0 +1,3 @@
+import { createRequire as __cr } from "node:module";const require = __cr(import.meta.url);
+var fs = require('fs');
+console.log("sameline:" + typeof fs.readFileSync);

@@ -318,9 +318,9 @@ public final class ModuleLoader {
         let hasTLA = isESM && ESMTransformer.containsTopLevelAwait(jsSource)
         if isESM {
             if hasTLA {
-                wrapped = "(async function(exports, require, module, __noco_filename__, __noco_dirname__) {\(transformedSource)\n})"
+                wrapped = "(async function(exports, __noco_require__, module, __noco_filename__, __noco_dirname__) {\(transformedSource)\n})"
             } else {
-                wrapped = "(function(exports, require, module, __noco_filename__, __noco_dirname__) {\(transformedSource)\n})"
+                wrapped = "(function(exports, __noco_require__, module, __noco_filename__, __noco_dirname__) {\(transformedSource)\n})"
             }
         } else {
             wrapped = "(function(exports, require, module, __filename, __dirname) {\(transformedSource)\n})"

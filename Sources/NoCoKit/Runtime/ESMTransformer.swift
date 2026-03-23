@@ -25,7 +25,7 @@ public enum ESMTransformer {
         result = transformDynamicImportInSource(result, excluded: exc, dirnameVar: "__noco_dirname__")
 
         // 5. Prepend import_meta definition and __esModule marker (single line to preserve line numbers)
-        let header = "Object.defineProperty(module.exports, '__esModule', {value: true}); var import_meta = Object.freeze({ url: 'file://' + __noco_filename__, dirname: __noco_dirname__, filename: __noco_filename__, resolve: function(specifier) { return 'file://' + require('path').resolve(__noco_dirname__, specifier); } });"
+        let header = "Object.defineProperty(module.exports, '__esModule', {value: true}); var import_meta = Object.freeze({ url: 'file://' + __noco_filename__, dirname: __noco_dirname__, filename: __noco_filename__, resolve: function(specifier) { return 'file://' + __noco_require__('path').resolve(__noco_dirname__, specifier); } });"
         result = header + result
 
         return result

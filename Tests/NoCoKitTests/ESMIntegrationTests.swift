@@ -311,3 +311,31 @@ private func fixtureDir() -> String {
 
     #expect(messages.contains("many-imports:v1:v16:function"))
 }
+
+// MARK: - const require redefinition in ESM
+
+@Test func esmConstRequireRedefinition() async throws {
+    // Bundlers like esbuild emit `const require = createRequire(import.meta.url)` in ESM files.
+    // The CJS wrapper must not shadow `require` as a parameter for ESM files,
+    // otherwise `const require` causes a SyntaxError (duplicate lexical declaration).
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let path = fixtureDir() + "/const-require.mjs"
+    runtime.moduleLoader.loadFile(at: path)
+
+    #expect(messages.contains("const-require:a/b"))
+}
+
+@Test func esmConstRequireSameLine() async throws {
+    // Same pattern but import and const on the same line (common in minified output)
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let path = fixtureDir() + "/const-require-sameline.mjs"
+    runtime.moduleLoader.loadFile(at: path)
+
+    #expect(messages.contains("sameline:function"))
+}
