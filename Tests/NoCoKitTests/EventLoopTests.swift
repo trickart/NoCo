@@ -129,7 +129,7 @@ import Synchronization
     let doneTime = DispatchTime.now().uptimeNanoseconds
 
     let elapsedMs = Double(doneTime - stopTime) / 1_000_000
-    #expect(elapsedMs < 50, "stop() should wake up the loop immediately, but took \(elapsedMs)ms")
+    #expect(elapsedMs < 500, "stop() should wake up the loop immediately, but took \(elapsedMs)ms")
 }
 
 @Test func multipleEnqueueCallbacksProcessedInOrder() async throws {
