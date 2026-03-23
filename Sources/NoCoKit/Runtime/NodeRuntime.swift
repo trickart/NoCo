@@ -240,6 +240,7 @@ public final class NodeRuntime: @unchecked Sendable {
         """)
 
         WebCryptoModule.install(in: context, runtime: self)
+        SharedArrayBufferModule.install(in: context, runtime: self)
 
         // Register require()-able modules
         registerModule(PathModule.self)
@@ -731,6 +732,9 @@ public final class NodeRuntime: @unchecked Sendable {
                     function walk(val) {
                         if (val === null || typeof val !== 'object') return val;
                         if (typeof val === 'function') return undefined;
+                        if (typeof SharedArrayBuffer !== 'undefined' && val instanceof SharedArrayBuffer) {
+                            return { '$sab': val._sabId, '$sabLen': val.byteLength };
+                        }
                         if (seen.has(val)) return { '$circRef': seen.get(val) };
                         var id = nextId++;
                         seen.set(val, id);
@@ -754,6 +758,9 @@ public final class NodeRuntime: @unchecked Sendable {
                     function restore(val) {
                         if (val === null || typeof val !== 'object') return val;
                         if (val['$circRef'] !== undefined) return registry[val['$circRef']];
+                        if (val['$sab'] !== undefined && typeof SharedArrayBuffer !== 'undefined') {
+                            return SharedArrayBuffer._fromId(val['$sab']);
+                        }
                         var id = val['$id'];
                         if (val['$array'] !== undefined) {
                             var result = [];
