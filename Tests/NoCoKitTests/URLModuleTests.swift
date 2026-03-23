@@ -98,3 +98,37 @@ import JavaScriptCore
     let result = runtime.evaluate("require('url').URL.canParse('https://example.com')")
     #expect(result?.toBool() == true)
 }
+
+// MARK: - url module URL/URLSearchParams exports
+
+@Test func urlModuleExportsURL() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var URL = require('url').URL;
+        var u = new URL('https://example.com:8080/path?q=1');
+        u.hostname + ':' + u.port + ':' + u.pathname;
+    """)
+    #expect(result?.toString() == "example.com:8080:/path")
+}
+
+@Test func urlModuleExportsURLSearchParams() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var URLSearchParams = require('url').URLSearchParams;
+        var p = new URLSearchParams('a=1&b=2');
+        p.get('a') + ':' + p.get('b');
+    """)
+    #expect(result?.toString() == "1:2")
+}
+
+@Test func urlModuleURLMatchesGlobal() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("require('url').URL === URL")
+    #expect(result?.toBool() == true)
+}
+
+@Test func urlModuleURLSearchParamsMatchesGlobal() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("require('url').URLSearchParams === URLSearchParams")
+    #expect(result?.toBool() == true)
+}
