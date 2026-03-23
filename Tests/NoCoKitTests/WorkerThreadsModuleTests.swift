@@ -408,3 +408,75 @@ func workerStdoutNull() async throws {
     """)
     #expect(result?.toBool() == true)
 }
+
+// MARK: - receiveMessageOnPort
+
+@Test(.timeLimit(.minutes(1)))
+func receiveMessageOnPortBasic() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var wt = require('worker_threads');
+        var { port1, port2 } = new wt.MessageChannel();
+        port1.postMessage('hello');
+        var msg = wt.receiveMessageOnPort(port2);
+        msg.message;
+    """)
+    #expect(result?.toString() == "hello")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func receiveMessageOnPortReturnsUndefinedWhenEmpty() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var wt = require('worker_threads');
+        var { port1, port2 } = new wt.MessageChannel();
+        wt.receiveMessageOnPort(port2) === undefined;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func receiveMessageOnPortMultiple() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var wt = require('worker_threads');
+        var { port1, port2 } = new wt.MessageChannel();
+        port1.postMessage({ a: 1 });
+        port1.postMessage({ b: 2 });
+        var m1 = wt.receiveMessageOnPort(port2);
+        var m2 = wt.receiveMessageOnPort(port2);
+        var m3 = wt.receiveMessageOnPort(port2);
+        m1.message.a + ':' + m2.message.b + ':' + (m3 === undefined);
+    """)
+    #expect(result?.toString() == "1:2:true")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func receiveMessageOnPortConsumesBeforeEmit() async throws {
+    // receiveMessageOnPort consumes the message, so the 'message' event should not fire for it
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var wt = require('worker_threads');
+        var { port1, port2 } = new wt.MessageChannel();
+        var emitCount = 0;
+        port2.on('message', function() { emitCount++; });
+        port1.postMessage('sync');
+        port1.postMessage('async');
+        // Consume the first message synchronously
+        var msg = wt.receiveMessageOnPort(port2);
+        console.log('sync:' + msg.message);
+    """)
+
+    // Run event loop to process nextTick callbacks
+    await runEventLoopInBackground(runtime, timeout: 0.5)
+
+    runtime.evaluate("""
+        console.log('emitCount:' + emitCount);
+    """)
+
+    #expect(messages.contains("sync:sync"))
+    #expect(messages.contains("emitCount:1")) // only the second message should emit
+}

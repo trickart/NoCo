@@ -429,11 +429,16 @@ public struct WorkerThreadsModule: NodeModule {
                     if (!peer || peer._closed) return;
                     var json;
                     try { json = globalThis.__noco_ipc.serialize(value); } catch(e) { return; }
-                    // Deliver asynchronously via nextTick
+                    // Queue message on peer for synchronous retrieval via receiveMessageOnPort
+                    if (!peer._queue) peer._queue = [];
+                    peer._queue.push(json);
+                    // Also deliver asynchronously via nextTick (emit consumes from queue)
                     process.nextTick(function() {
                         if (peer._closed) return;
+                        if (!peer._queue || peer._queue.length === 0) return; // already consumed by receiveMessageOnPort
+                        var queuedJson = peer._queue.shift();
                         var parsed;
-                        try { parsed = globalThis.__noco_ipc.deserialize(json); } catch(e) { return; }
+                        try { parsed = globalThis.__noco_ipc.deserialize(queuedJson); } catch(e) { return; }
                         if (typeof peer.emit === 'function') {
                             peer.emit('message', parsed);
                         }
@@ -460,6 +465,17 @@ public struct WorkerThreadsModule: NodeModule {
 
                 wt.MessagePort = MessagePort;
                 wt.MessageChannel = MessageChannel;
+
+                // receiveMessageOnPort — synchronously receive a message from a port
+                wt.receiveMessageOnPort = function(port) {
+                    if (port && port._queue && port._queue.length > 0) {
+                        var json = port._queue.shift();
+                        var parsed;
+                        try { parsed = globalThis.__noco_ipc.deserialize(json); } catch(e) { return undefined; }
+                        return { message: parsed };
+                    }
+                    return undefined;
+                };
             })
         """)!.call(withArguments: [workerThreads])
     }
