@@ -67,3 +67,34 @@ import JavaScriptCore
     """)
     #expect(result?.toString() == "http://example.com:3000/api")
 }
+
+// MARK: - URL.canParse
+
+@Test func urlCanParseValid() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("URL.canParse('https://example.com/path')")
+    #expect(result?.toBool() == true)
+}
+
+@Test func urlCanParseConsistentWithConstructor() async throws {
+    // canParse should return false when URL constructor would throw
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var threw = false;
+        try { new URL(''); } catch(e) { threw = true; }
+        URL.canParse('') === !threw;
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func urlCanParseWithBase() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("URL.canParse('/path', 'https://example.com')")
+    #expect(result?.toBool() == true)
+}
+
+@Test func urlCanParseFromUrlModule() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("require('url').URL.canParse('https://example.com')")
+    #expect(result?.toBool() == true)
+}

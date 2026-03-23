@@ -609,6 +609,16 @@ public final class NodeRuntime: @unchecked Sendable {
                     };
                     g.URL.revokeObjectURL = function(url) {};
                 }
+                if (!g.URL.canParse) {
+                    g.URL.canParse = function(url, base) {
+                        try {
+                            new g.URL(url, base);
+                            return true;
+                        } catch(e) {
+                            return false;
+                        }
+                    };
+                }
             })(this);
             """)
 

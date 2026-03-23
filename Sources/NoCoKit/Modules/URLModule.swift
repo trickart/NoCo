@@ -170,6 +170,12 @@ public struct URLModule: NodeModule {
         urlModule.setValue(unsafeBitCast(domainToASCII, to: AnyObject.self), forProperty: "domainToASCII")
         urlModule.setValue(unsafeBitCast(domainToASCII, to: AnyObject.self), forProperty: "domainToUnicode")
 
+        // Export global URL and URLSearchParams classes
+        let globalURL = context.objectForKeyedSubscript("URL" as NSString)
+        urlModule.setValue(globalURL, forProperty: "URL")
+        let globalURLSearchParams = context.objectForKeyedSubscript("URLSearchParams" as NSString)
+        urlModule.setValue(globalURLSearchParams, forProperty: "URLSearchParams")
+
         return urlModule
     }
 }
