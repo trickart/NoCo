@@ -284,3 +284,64 @@ import JavaScriptCore
     #expect(messages.contains("hasOn:true"))
     #expect(messages.contains("hasEmit:true"))
 }
+
+@Test func processRemoveListener() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var count = 0;
+        function handler() { count++; }
+        process.on('test-event', handler);
+        process.emit('test-event');
+        process.removeListener('test-event', handler);
+        process.emit('test-event');
+        count;
+    """)
+    #expect(result?.toInt32() == 1)
+}
+
+@Test func processOff() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var count = 0;
+        function handler() { count++; }
+        process.on('test-event', handler);
+        process.off('test-event', handler);
+        process.emit('test-event');
+        count;
+    """)
+    #expect(result?.toInt32() == 0)
+}
+
+@Test func processOnce() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var count = 0;
+        process.once('test-once', function() { count++; });
+        process.emit('test-once');
+        process.emit('test-once');
+        count;
+    """)
+    #expect(result?.toInt32() == 1)
+}
+
+@Test func processEventEmitterFullAPI() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        [
+            typeof process.on === 'function',
+            typeof process.off === 'function',
+            typeof process.once === 'function',
+            typeof process.emit === 'function',
+            typeof process.addListener === 'function',
+            typeof process.removeListener === 'function',
+            typeof process.removeAllListeners === 'function',
+            typeof process.listeners === 'function',
+            typeof process.listenerCount === 'function',
+            typeof process.eventNames === 'function',
+            typeof process.prependListener === 'function',
+            typeof process.setMaxListeners === 'function',
+            typeof process.getMaxListeners === 'function',
+        ].every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
