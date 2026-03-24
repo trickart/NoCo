@@ -28,6 +28,7 @@ _napi_create_double
 _napi_create_error
 _napi_create_external
 _napi_create_external_arraybuffer
+_napi_create_external_buffer
 _napi_create_function
 _napi_create_int32
 _napi_create_int64
