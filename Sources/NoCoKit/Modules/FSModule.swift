@@ -38,7 +38,7 @@ final class FileDescriptorTable: Sendable {
     }
 
     func remove(_ fd: Int) {
-        state.withLock { $0.table.removeValue(forKey: fd) }
+        state.withLock { _ = $0.table.removeValue(forKey: fd) }
     }
 }
 
@@ -550,17 +550,12 @@ public struct FSModule: NodeModule {
         // fs.createWriteStream(path, options?)
         let createWriteStream: @convention(block) (String, JSValue) -> JSValue = { path, options in
             var flags = "w"
-            var encodingOpt = "utf8"
 
             if options.isObject && !options.isUndefined {
                 if let f = options.forProperty("flags"), !f.isUndefined, let s = f.toString() {
                     flags = s
                 }
-                if let e = options.forProperty("encoding"), !e.isUndefined, let s = e.toString() {
-                    encodingOpt = s
-                }
             }
-            let encoding = encodingOpt
 
             // Create a Writable instance
             let streamModule = context.objectForKeyedSubscript("require")!.call(withArguments: ["stream"])!
@@ -626,7 +621,7 @@ public struct FSModule: NodeModule {
             // Open file in background
             DispatchQueue.global().async {
                 let dir = (resolved as NSString).deletingLastPathComponent
-                if !fm.fileExists(atPath: dir) {
+                if !FileManager.default.fileExists(atPath: dir) {
                     runtime.eventLoop.enqueueCallback {
                         let ctx = runtime.context
                         let err = ctx.createSystemError(
@@ -640,9 +635,9 @@ public struct FSModule: NodeModule {
 
                 // Create/truncate file for 'w' mode, create if needed for 'a' mode
                 if !isAppend {
-                    fm.createFile(atPath: resolved, contents: nil, attributes: nil)
-                } else if !fm.fileExists(atPath: resolved) {
-                    fm.createFile(atPath: resolved, contents: nil, attributes: nil)
+                    FileManager.default.createFile(atPath: resolved, contents: nil, attributes: nil)
+                } else if !FileManager.default.fileExists(atPath: resolved) {
+                    FileManager.default.createFile(atPath: resolved, contents: nil, attributes: nil)
                 }
 
                 guard let handle = FileHandle(forWritingAtPath: resolved) else {
@@ -662,8 +657,6 @@ public struct FSModule: NodeModule {
                 }
 
                 runtime.eventLoop.enqueueCallback {
-                    let ctx = runtime.context
-
                     // Helper: convert chunk to Data
                     func chunkToData(_ chunk: JSValue) -> Data {
                         if chunk.isString, let str = chunk.toString() {
@@ -763,7 +756,7 @@ public struct FSModule: NodeModule {
                 let realPath = (resolved as NSString).resolvingSymlinksInPath
                 runtime.eventLoop.enqueueCallback {
                     let ctx = runtime.context
-                    if fm.fileExists(atPath: realPath) {
+                    if FileManager.default.fileExists(atPath: realPath) {
                         callback.call(withArguments: [JSValue(nullIn: ctx)!, realPath])
                     } else {
                         let err = ctx.createSystemError(
@@ -1026,7 +1019,7 @@ public struct FSModule: NodeModule {
                 } catch {
                     runtime.eventLoop.enqueueCallback {
                         let ctx = runtime.context
-                        let code = flags.contains("x") && fm.fileExists(atPath: resolved) ? "EEXIST" : "ENOENT"
+                        let code = flags.contains("x") && FileManager.default.fileExists(atPath: resolved) ? "EEXIST" : "ENOENT"
                         let err = ctx.createSystemError(
                             error.localizedDescription, code: code, syscall: "open", path: path
                         )
@@ -1257,7 +1250,7 @@ public struct FSModule: NodeModule {
 
             DispatchQueue.global().async {
                 do {
-                    try fm.createDirectory(
+                    try FileManager.default.createDirectory(
                         atPath: resolved, withIntermediateDirectories: recursive, attributes: nil
                     )
                     runtime.eventLoop.enqueueCallback {
@@ -1420,10 +1413,9 @@ public struct FSModule: NodeModule {
             let resolved = (path as NSString).standardizingPath
             runtime.eventLoop.retainHandle()
             DispatchQueue.global().async {
-                let localFm = FileManager.default
                 let entries: [String]?
                 do {
-                    entries = try localFm.contentsOfDirectory(atPath: resolved)
+                    entries = try FileManager.default.contentsOfDirectory(atPath: resolved)
                 } catch {
                     entries = nil
                 }
@@ -1431,7 +1423,7 @@ public struct FSModule: NodeModule {
                     let ctx = runtime.context
                     if let entries = entries {
                         if withFileTypes {
-                            let arr = Self.createDirentArray(entries, directory: resolved, fm: localFm, context: ctx)
+                            let arr = Self.createDirentArray(entries, directory: resolved, fm: FileManager.default, context: ctx)
                             callback.call(withArguments: [JSValue(nullIn: ctx)!, arr])
                         } else {
                             let arr = JSValue(newArrayIn: ctx)!
