@@ -128,6 +128,17 @@ import Synchronization
     #expect(msgs.contains("tsf-call-2"))
 }
 
+// MARK: - NAPI Buffer: napi_create_external_buffer シンボルエクスポート
+
+@Test func napiCreateExternalBufferSymbolExists() async throws {
+    // napi_create_external_buffer が実行バイナリからエクスポートされていることを確認
+    // NAPI ネイティブアドオン（rollup 等）がこのシンボルを dlsym で解決する
+    let handle = dlopen(nil, RTLD_NOW)
+    defer { if let handle { dlclose(handle) } }
+    let sym = dlsym(handle, "napi_create_external_buffer")
+    #expect(sym != nil, "napi_create_external_buffer should be exported from the binary")
+}
+
 // MARK: - NAPI Promise + async chain: microtask drain 回避
 
 @Test func napiPromiseResolvedViaCallback() async throws {

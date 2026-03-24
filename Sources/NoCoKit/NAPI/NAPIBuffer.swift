@@ -35,6 +35,36 @@ public func _napi_create_buffer_copy(_ env: napi_env!, _ length: Int, _ data: Un
     return e.clearLastError()
 }
 
+@_cdecl("napi_create_external_buffer")
+public func _napi_create_external_buffer(_ env: napi_env!, _ length: Int,
+                                    _ data: UnsafeMutableRawPointer?,
+                                    _ finalizeCb: napi_finalize?,
+                                    _ finalizeHint: UnsafeMutableRawPointer?,
+                                    _ result: UnsafeMutablePointer<napi_value?>!) -> napi_status {
+    let e = NAPIEnvironment.from(env)
+
+    // Create a Buffer and copy data from the external pointer
+    if let data = data, length > 0 {
+        let jsArray = JSValue(newArrayIn: e.context)!
+        let src = data.assumingMemoryBound(to: UInt8.self)
+        for i in 0..<length {
+            jsArray.setValue(src[i], at: i)
+        }
+        let buf = e.context.evaluateScript("(function(a){return Buffer.from(a)})")!.call(withArguments: [jsArray])!
+        result.pointee = e.wrap(buf)
+    } else {
+        let buf = e.context.evaluateScript("(function(n){return Buffer.alloc(n)})")!.call(withArguments: [length])!
+        result.pointee = e.wrap(buf)
+    }
+
+    // Call finalize callback to free the external data
+    if let finalizeCb = finalizeCb {
+        finalizeCb(env, data, finalizeHint)
+    }
+
+    return e.clearLastError()
+}
+
 @_cdecl("napi_get_buffer_info")
 public func _napi_get_buffer_info(_ env: napi_env!, _ value: napi_value!,
                             _ data: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
