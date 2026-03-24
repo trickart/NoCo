@@ -422,6 +422,60 @@ public struct ProcessModule: NodeModule {
         }
         process.setValue(unsafeBitCast(memoryUsage, to: AnyObject.self), forProperty: "memoryUsage")
 
+        // process EventEmitter methods (Node.js の process は EventEmitter)
+        context.evaluateScript("""
+            (function(p) {
+                p._listeners = {};
+                p.on = function(event, fn) {
+                    if (!p._listeners[event]) p._listeners[event] = [];
+                    p._listeners[event].push(fn);
+                    return p;
+                };
+                p.addListener = p.on;
+                p.once = function(event, fn) {
+                    fn._once = true;
+                    return p.on(event, fn);
+                };
+                p.emit = function(event) {
+                    var args = Array.prototype.slice.call(arguments, 1);
+                    var fns = (p._listeners[event] || []).slice();
+                    for (var i = 0; i < fns.length; i++) {
+                        if (fns[i]._once) {
+                            p.removeListener(event, fns[i]);
+                        }
+                        fns[i].apply(p, args);
+                    }
+                    return fns.length > 0;
+                };
+                p.removeListener = function(event, fn) {
+                    var fns = p._listeners[event] || [];
+                    p._listeners[event] = fns.filter(function(f) { return f !== fn; });
+                    return p;
+                };
+                p.off = p.removeListener;
+                p.removeAllListeners = function(event) {
+                    if (event) delete p._listeners[event];
+                    else p._listeners = {};
+                    return p;
+                };
+                p.listeners = function(event) { return (p._listeners[event] || []).slice(); };
+                p.listenerCount = function(event) { return (p._listeners[event] || []).length; };
+                p.eventNames = function() { return Object.keys(p._listeners); };
+                p.prependListener = function(event, fn) {
+                    if (!p._listeners[event]) p._listeners[event] = [];
+                    p._listeners[event].unshift(fn);
+                    return p;
+                };
+                p.prependOnceListener = function(event, fn) {
+                    fn._once = true;
+                    return p.prependListener(event, fn);
+                };
+                p.setMaxListeners = function() { return p; };
+                p.getMaxListeners = function() { return 10; };
+                p.rawListeners = p.listeners;
+            })
+        """)!.call(withArguments: [process])
+
         context.setObject(process, forKeyedSubscript: "process" as NSString)
 
         // Set global to the actual global object (not process)
