@@ -187,12 +187,17 @@ public struct EventEmitterModule: NodeModule {
             // once(emitter, name) — returns a promise that resolves on the first event
             EventEmitter.once = function once(emitter, name) {
                 return new Promise(function(resolve, reject) {
+                    var remove = typeof emitter.removeListener === 'function'
+                        ? function(e, f) { emitter.removeListener(e, f); }
+                        : typeof emitter.off === 'function'
+                            ? function(e, f) { emitter.off(e, f); }
+                            : function() {};
                     function onEvent() {
-                        if (name !== 'error') emitter.removeListener('error', onError);
+                        if (name !== 'error') remove('error', onError);
                         resolve([].slice.call(arguments));
                     }
                     function onError(err) {
-                        emitter.removeListener(name, onEvent);
+                        remove(name, onEvent);
                         reject(err);
                     }
                     emitter.once(name, onEvent);
