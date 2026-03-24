@@ -40,6 +40,11 @@ private func parseDNSNameFromWire(data: UnsafePointer<UInt8>, length: Int, offse
     return (labels.joined(separator: "."), bytesConsumed)
 }
 
+private func stringFromCStringBuffer(_ buffer: [CChar]) -> String {
+    let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+    return String(decoding: bytes, as: UTF8.self)
+}
+
 private func dnsQueryCallback(
     _ sdRef: DNSServiceRef?,
     _ flags: DNSServiceFlags,
@@ -69,7 +74,7 @@ private func dnsQueryCallback(
         if rdlen >= 4 {
             var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
             inet_ntop(AF_INET, rdata, &buf, socklen_t(INET_ADDRSTRLEN))
-            let addr = String(cString: buf)
+            let addr = stringFromCStringBuffer(buf)
             ctx.pointee.results.append(["type": "A", "value": addr])
         }
 
@@ -77,7 +82,7 @@ private func dnsQueryCallback(
         if rdlen >= 16 {
             var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
             inet_ntop(AF_INET6, rdata, &buf, socklen_t(INET6_ADDRSTRLEN))
-            let addr = String(cString: buf)
+            let addr = stringFromCStringBuffer(buf)
             ctx.pointee.results.append(["type": "AAAA", "value": addr])
         }
 
@@ -234,14 +239,14 @@ public struct DNSModule: NodeModule {
                         var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
                         var inAddr = addr.sin_addr
                         inet_ntop(AF_INET, &inAddr, &buf, socklen_t(INET_ADDRSTRLEN))
-                        addresses.append((String(cString: buf), 4))
+                        addresses.append((stringFromCStringBuffer(buf), 4))
                     } else if info.pointee.ai_family == AF_INET6 {
                         var addr = sockaddr_in6()
                         memcpy(&addr, info.pointee.ai_addr, Int(MemoryLayout<sockaddr_in6>.size))
                         var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
                         var in6Addr = addr.sin6_addr
                         inet_ntop(AF_INET6, &in6Addr, &buf, socklen_t(INET6_ADDRSTRLEN))
-                        addresses.append((String(cString: buf), 6))
+                        addresses.append((stringFromCStringBuffer(buf), 6))
                     }
                     current = info.pointee.ai_next
                 }
@@ -353,7 +358,7 @@ public struct DNSModule: NodeModule {
                     return
                 }
 
-                let hostname = String(cString: hostBuf)
+                let hostname = stringFromCStringBuffer(hostBuf)
                 eventLoop.enqueueCallback {
                     let ctx = runtime.context
                     let arr = JSValue(newArrayIn: ctx)!
@@ -420,8 +425,8 @@ public struct DNSModule: NodeModule {
                     return
                 }
 
-                let hostname = String(cString: hostBuf)
-                let service = String(cString: servBuf)
+                let hostname = stringFromCStringBuffer(hostBuf)
+                let service = stringFromCStringBuffer(servBuf)
                 eventLoop.enqueueCallback {
                     let ctx = runtime.context
                     callback.call(withArguments: [JSValue(nullIn: ctx)!, hostname, service])
