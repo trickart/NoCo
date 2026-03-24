@@ -157,8 +157,45 @@ public enum ESMRuntime {
 
         context.setObject(
             unsafeBitCast(dynamicImportBlock, to: AnyObject.self),
-            forKeyedSubscript: "__importDynamic" as NSString
+            forKeyedSubscript: "__importDynamic_native" as NSString
         )
+
+        // JS wrapper: basedir が省略された場合は process.cwd() をフォールバックに使用
+        // new Function() 内から呼ばれた場合に basedir が渡されないケースに対応
+        context.evaluateScript("""
+            globalThis.__importDynamic = function(specifier, basedir) {
+                return __importDynamic_native(
+                    specifier,
+                    (basedir != null && basedir !== '') ? basedir : process.cwd()
+                );
+            };
+            """)
+
+        // Function コンストラクタをオーバーライドし、
+        // 関数本体中の import() を __importDynamic() に変換する。
+        // new Function('specifier', 'return import(specifier)') のようなパターンに対応。
+        context.evaluateScript("""
+            (function() {
+                var OrigFunction = Function;
+                var patchBody = function(body) {
+                    if (typeof body !== 'string' || body.indexOf('import(') === -1) return body;
+                    return body.replace(/(^|[^.\\w$])import\\s*\\(/g, '$1__importDynamic(');
+                };
+                var NewFunction = function() {
+                    var args = [];
+                    for (var i = 0; i < arguments.length; i++) args.push(arguments[i]);
+                    if (args.length > 0) {
+                        args[args.length - 1] = patchBody(args[args.length - 1]);
+                    }
+                    return OrigFunction.apply(this, args);
+                };
+                NewFunction.prototype = OrigFunction.prototype;
+                NewFunction.prototype.constructor = NewFunction;
+                Object.defineProperty(NewFunction, 'length', { value: 1, configurable: true });
+                Object.defineProperty(NewFunction, 'name', { value: 'Function', configurable: true });
+                globalThis.Function = NewFunction;
+            })();
+            """)
     }
 
     /// Wrap a CJS module value as an ESM namespace object.

@@ -328,6 +328,63 @@ private func fixtureDir() -> String {
     #expect(messages.contains("const-require:a/b"))
 }
 
+// MARK: - Dynamic import() inside new Function()
+
+@Test func dynamicImportInNewFunction() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let path = fixtureDir() + "/new-function-import.cjs"
+    runtime.moduleLoader.loadFile(at: path)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("new-function-import:hello"))
+}
+
+@Test func dynamicImportInNewFunctionWithFileUrl() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let path = fixtureDir() + "/new-function-import-fileurl.cjs"
+    runtime.moduleLoader.loadFile(at: path)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("new-function-fileurl:hello"))
+}
+
+@Test func dynamicImportInNewFunctionInline() async throws {
+    // inline で new Function + import() をテスト（フィクスチャ不要）
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_newfunc_\(UUID().uuidString).mjs"
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+    try "export const value = 42;".write(toFile: tmpPath, atomically: true, encoding: .utf8)
+
+    runtime.evaluate("""
+        var importESM = new Function('specifier', 'return import(specifier)');
+        importESM('\(tmpPath)').then(function(m) {
+            console.log('inline:' + m.value);
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("inline:42"))
+}
+
+@Test func newFunctionWithoutImportUnchanged() async throws {
+    // import() を含まない new Function は正常に動作する
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var fn = new Function('a', 'b', 'return a + b');
+        fn(3, 4);
+    """)
+    #expect(result?.toInt32() == 7)
+}
+
 @Test func esmConstRequireSameLine() async throws {
     // Same pattern but import and const on the same line (common in minified output)
     let runtime = NodeRuntime()
