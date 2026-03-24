@@ -109,7 +109,7 @@ public final class DependencyResolver: Sendable {
             isNested = false
             // Root dep resolved — remove from pending
             if parentInstallPath == nil {
-                state.withLock { $0.pendingRootDeps.remove(name) }
+                state.withLock { _ = $0.pendingRootDeps.remove(name) }
             }
         case .nested(let path):
             installPath = path

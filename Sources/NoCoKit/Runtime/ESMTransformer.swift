@@ -764,25 +764,16 @@ public enum ESMTransformer {
             }
 
             let stmtEnd = i
-            let fullDecl = String(source[afterExport..<stmtEnd])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
 
             // Get just the declaration part (without "export ")
             // afterExport already points past "export const/let/var "
             // But we need the keyword for the output
             let exportAndDecl = String(source[replaceStart..<stmtEnd])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            // Remove trailing semicolon for clean processing
-            let declForNames: String
-            if exportAndDecl.hasSuffix(";") {
-                declForNames = String(fullDecl.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
-            } else {
-                declForNames = fullDecl
-            }
 
             // Extract the const/let/var keyword + rest for name extraction
             let keywordAndRest: String
-            if let spaceIdx = exportAndDecl.dropFirst("export ".count).firstIndex(of: " ") {
+            if exportAndDecl.dropFirst("export ".count).firstIndex(of: " ") != nil {
                 // "export const foo = 1" -> "const foo = 1"
                 keywordAndRest = String(exportAndDecl.dropFirst("export ".count))
             } else {

@@ -1,5 +1,5 @@
 import Foundation
-import JavaScriptCore
+@preconcurrency import JavaScriptCore
 
 /// Implements the Node.js `process` global object.
 public struct ProcessModule: NodeModule {
