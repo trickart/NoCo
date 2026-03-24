@@ -175,7 +175,6 @@ func workerThreadIdIncrements() async throws {
         }
     """)
     await runEventLoopInBackground(runtime, timeout: 10)
-    let ids = runtime.evaluate("JSON.stringify(ids)")?.toString() ?? "[]"
     let doneCount = runtime.evaluate("doneCount")?.toInt32() ?? 0
     // All IDs should be unique
     let uniqueCheck = runtime.evaluate("""
