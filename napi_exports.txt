@@ -132,4 +132,3 @@ _napi_wrap
 _node_api_create_syntax_error
 _node_api_throw_syntax_error
 _main
-_NoCo_main
