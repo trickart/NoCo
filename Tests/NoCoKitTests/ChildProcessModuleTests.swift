@@ -925,4 +925,28 @@ func forkSendCyclicObjectFallback() async throws {
     await runEventLoopInBackground(runtime, timeout: 5)
     #expect(messages.contains("sendError:null"))
 }
+
+// MARK: - fork(path, undefined, options) — args が undefined でも options を正しくパースする
+
+@Test(.timeLimit(.minutes(1)))
+func forkUndefinedArgsWithOptions() async throws {
+    let runtime = NodeRuntime()
+    let execPath = nocoExecPath()
+    let fixturePath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/fork_send.js").path
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var received = null;
+        // tinypool calls fork(path, undefined, options) — args is undefined
+        var child = cp.fork('\(fixturePath)', undefined, { execPath: '\(execPath)', stdio: 'pipe' });
+        child.on('message', function(msg) {
+            received = msg;
+            child.disconnect();
+        });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 10)
+    let result = runtime.evaluate("JSON.stringify(received)")
+    #expect(result?.toString() == "{\"hello\":\"from child\"}")
+}
 #endif
