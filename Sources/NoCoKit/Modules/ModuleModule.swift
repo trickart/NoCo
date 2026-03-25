@@ -31,13 +31,55 @@ public struct ModuleModule: NodeModule {
         (function() {
             var mod = {};
 
-            // createRequire returns the global require function
+            // createRequire returns a require function scoped to the given filename
             mod.createRequire = function(filename) {
-                return require;
+                var path = require('path');
+                var url = filename;
+                // Support file:// URLs (Node.js compatible)
+                if (typeof url === 'string' && url.startsWith('file://')) {
+                    url = url.slice(7);
+                }
+                // Support URL objects
+                if (typeof url === 'object' && url !== null) {
+                    if (url.protocol === 'file:') {
+                        url = url.pathname;
+                    } else if (url.href) {
+                        url = url.href.replace(/^file:\/\//, '');
+                    }
+                }
+                var baseDir = path.dirname(path.resolve(url));
+                var scopedRequire = function(request) {
+                    if (request.startsWith('.') || request.startsWith('/')) {
+                        return require(path.resolve(baseDir, request));
+                    }
+                    return require(request);
+                };
+                scopedRequire.resolve = function(request) {
+                    if (request.startsWith('.') || request.startsWith('/')) {
+                        var resolved = path.resolve(baseDir, request);
+                        if (require.resolve) {
+                            return require.resolve(resolved);
+                        }
+                        return resolved;
+                    }
+                    if (require.resolve) {
+                        return require.resolve(request);
+                    }
+                    return request;
+                };
+                scopedRequire.resolve.paths = function(request) {
+                    if (require.resolve && require.resolve.paths) {
+                        return require.resolve.paths(request);
+                    }
+                    return null;
+                };
+                scopedRequire.cache = require.cache || {};
+                scopedRequire.main = require.main;
+                return scopedRequire;
             };
 
             mod.createRequireFromPath = function(filename) {
-                return require;
+                return mod.createRequire(filename);
             };
 
             // Module constructor stub
