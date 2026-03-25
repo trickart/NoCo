@@ -272,14 +272,30 @@ public final class EventLoop: @unchecked Sendable {
                         if scheduled || hasPendingWork { continue }
                     }
 
-                    // Grace period: NAPI handle が使われたことがある場合のみ
-                    // バックグラウンドスレッドからの callback を待つ
+                    // Grace period: handle が使われたことがある場合、
+                    // バックグラウンドスレッドからの callback を段階的に待つ。
+                    // 非同期操作間の隙間（handle 解放後〜次の retain まで）を埋める。
                     if hasHadActiveHandles.withLock({ $0 }) {
-                        CFRunLoopRunInMode(.defaultMode, 0.01, true)
-                        drainMicrotasks?()
-                        drainNextTick()
-                        drainCallbacks()
-                        if !hasPendingWork { break }
+                        var recovered = false
+                        // 非同期操作間の隙間を埋める grace period。
+                        // バックグラウンドスレッドからの callback を段階的に待つ:
+                        // 10ms × 5 + 50ms × 5 + 100ms × 5 = 最大 800ms
+                        let intervals: [TimeInterval] = [
+                            0.01, 0.01, 0.01, 0.01, 0.01,
+                            0.05, 0.05, 0.05, 0.05, 0.05,
+                            0.1,  0.1,  0.1,  0.1,  0.1,
+                        ]
+                        for wait in intervals {
+                            CFRunLoopRunInMode(.defaultMode, wait, true)
+                            drainMicrotasks?()
+                            drainNextTick()
+                            drainCallbacks()
+                            if hasPendingWork {
+                                recovered = true
+                                break
+                            }
+                        }
+                        if !recovered { break }
                     } else {
                         break
                     }
