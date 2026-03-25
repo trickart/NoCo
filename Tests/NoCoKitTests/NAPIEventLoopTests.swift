@@ -371,3 +371,53 @@ import Synchronization
 
     #expect(messages.contains("imports-ok:function,function,function"))
 }
+
+// MARK: - NAPI async work gap: ステップ間でループが早期終了しない
+
+@Test func napiAsyncWorkGapDoesNotExitPrematurely() async throws {
+    // NAPI async work の complete (releaseHandle) → 次の queue (retainHandle) の間に
+    // 短い gap がある場合、grace period によりループが生存する
+    //
+    // 実際の NAPI パターン: バックグラウンドスレッドが完了後、即座に次の async work を
+    // enqueueCallback 経由で開始する。retainHandle → enqueueCallback の間の短い gap を
+    // grace period がカバーする。
+    let runtime = NodeRuntime()
+    let messages = Mutex<[String]>([])
+    runtime.consoleHandler = { _, msg in messages.withLock { $0.append(msg) } }
+
+    // Step 1: NAPI async work を開始
+    runtime.eventLoop.retainHandle()
+
+    async let loopDone: Void = withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            runtime.runEventLoop(timeout: 5)
+            continuation.resume()
+        }
+    }
+
+    // Step 1 の background work → complete → Step 2 の background work → complete
+    DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
+        runtime.eventLoop.enqueueCallback {
+            runtime.context.evaluateScript("console.log('step1-done')")
+            runtime.eventLoop.releaseHandle()
+            // ここで activeHandles=0 (gap)
+        }
+        // Step 2: バックグラウンドから直接 retainHandle + enqueueCallback
+        // (実際の NAPI パターンでは napi_queue_async_work が即座に retainHandle する)
+        Thread.sleep(forTimeInterval: 0.002)
+        runtime.eventLoop.retainHandle()
+        DispatchQueue.global().async {
+            Thread.sleep(forTimeInterval: 0.01)
+            runtime.eventLoop.enqueueCallback {
+                runtime.context.evaluateScript("console.log('step2-done')")
+                runtime.eventLoop.releaseHandle()
+            }
+        }
+    }
+
+    await loopDone
+
+    let msgs = messages.withLock { $0 }
+    #expect(msgs.contains("step1-done"))
+    #expect(msgs.contains("step2-done"))
+}

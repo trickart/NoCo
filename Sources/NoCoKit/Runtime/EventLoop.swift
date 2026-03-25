@@ -16,6 +16,9 @@ public final class EventLoop: @unchecked Sendable {
         var pendingCallbacks: [@Sendable () -> Void] = []
         var activeHandles: Int = 0
         var running: Bool = false
+        /// process.exit() など明示的な停止が呼ばれた場合 true。
+        /// run() 開始時に false にリセットしない。beforeExit の抑制に使用。
+        var explicitlyStopped: Bool = false
     }
     private let ioState = Mutex(IOState())
 
@@ -32,6 +35,14 @@ public final class EventLoop: @unchecked Sendable {
 
     /// Called after draining callbacks/timers to flush JSC's internal microtask queue.
     var drainMicrotasks: (() -> Void)?
+
+    /// Called when the event loop is about to exit (hasPendingWork == false).
+    /// Returns true if new work was scheduled (loop should continue).
+    var onBeforeExit: (() -> Bool)?
+
+    /// Tracks whether retainHandle() was ever called during this EventLoop's lifetime.
+    /// Used to apply a grace period only for programs that use NAPI async work.
+    private let hasHadActiveHandles = Mutex(false)
 
     struct TimerEntry {
         let id: Int
@@ -144,6 +155,8 @@ public final class EventLoop: @unchecked Sendable {
     /// Increment active I/O handle count. Thread-safe.
     func retainHandle() {
         ioState.withLock { $0.activeHandles += 1 }
+        hasHadActiveHandles.withLock { $0 = true }
+        wakeRunLoop()
     }
 
     /// Decrement active I/O handle count. Thread-safe.
@@ -250,7 +263,27 @@ public final class EventLoop: @unchecked Sendable {
                 drainMicrotasks?()
                 drainNextTick()
                 drainCallbacks()
-                if !hasPendingWork { break }
+                if !hasPendingWork {
+                    // beforeExit イベントを fire（Node.js 互換）
+                    // process.exit() による明示的終了では fire しない
+                    let explicitStop = ioState.withLock { $0.explicitlyStopped }
+                    if !explicitStop {
+                        let scheduled = onBeforeExit?() ?? false
+                        if scheduled || hasPendingWork { continue }
+                    }
+
+                    // Grace period: NAPI handle が使われたことがある場合のみ
+                    // バックグラウンドスレッドからの callback を待つ
+                    if hasHadActiveHandles.withLock({ $0 }) {
+                        CFRunLoopRunInMode(.defaultMode, 0.01, true)
+                        drainMicrotasks?()
+                        drainNextTick()
+                        drainCallbacks()
+                        if !hasPendingWork { break }
+                    } else {
+                        break
+                    }
+                }
             }
 
             let callbacksEmpty = ioState.withLock { $0.pendingCallbacks.isEmpty }
@@ -272,7 +305,10 @@ public final class EventLoop: @unchecked Sendable {
 
     /// Stop the event loop.
     func stop() {
-        ioState.withLock { $0.running = false }
+        ioState.withLock {
+            $0.running = false
+            $0.explicitlyStopped = true
+        }
         wakeRunLoop()
     }
 
@@ -285,6 +321,7 @@ public final class EventLoop: @unchecked Sendable {
             s.pendingCallbacks.removeAll()
             s.activeHandles = 0
             s.running = false
+            s.explicitlyStopped = false
         }
     }
 }

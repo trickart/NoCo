@@ -358,3 +358,60 @@ import Synchronization
     #expect(!messages.contains("should-not-run"))
     #expect(messages.contains("should-run"))
 }
+
+// MARK: - beforeExit event
+
+@Test func beforeExitEventFires() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        process.on('beforeExit', function(code) {
+            console.log('beforeExit:' + code);
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("beforeExit:0"))
+}
+
+@Test func beforeExitCanScheduleNewWork() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var count = 0;
+        process.on('beforeExit', function(code) {
+            count++;
+            console.log('beforeExit:' + count);
+            if (count < 3) {
+                setTimeout(function() { console.log('work:' + count); }, 1);
+            }
+        });
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(messages.contains("beforeExit:1"))
+    #expect(messages.contains("work:1"))
+    #expect(messages.contains("beforeExit:2"))
+    #expect(messages.contains("work:2"))
+    #expect(messages.contains("beforeExit:3"))
+}
+
+@Test func beforeExitNotFiredOnExplicitExit() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        process.on('beforeExit', function() {
+            console.log('beforeExit-should-not-fire');
+        });
+        process.exit(0);
+    """)
+    runtime.runEventLoop(timeout: 2)
+
+    #expect(!messages.contains("beforeExit-should-not-fire"))
+}
