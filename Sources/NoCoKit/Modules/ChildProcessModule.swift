@@ -226,6 +226,10 @@ public struct ChildProcessModule: NodeModule {
             var args: [String] = []
             var options: JSValue? = nil
             var idx = 1
+            // Skip undefined/null args (tinypool passes fork(path, undefined, options))
+            if idx < jsArgs.count && jsArgs[idx].isNullOrUndefined {
+                idx += 1
+            }
             if idx < jsArgs.count && jsArgs[idx].isArray {
                 let arr = jsArgs[idx]
                 let len = Int(arr.forProperty("length")!.toInt32())
