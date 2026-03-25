@@ -23,22 +23,76 @@ import JavaScriptCore
     #expect(result?.toString() == "function")
 }
 
-@Test func moduleCreateRequireReturnsRequire() async throws {
+@Test func moduleCreateRequireReturnsScopedFunction() async throws {
     let runtime = NodeRuntime()
     let result = runtime.evaluate("""
         var m = require('module');
         var req = m.createRequire('/tmp/test.js');
-        req === require;
+        typeof req === 'function' && typeof req.resolve === 'function';
     """)
     #expect(result?.toBool() == true)
 }
 
-@Test func moduleCreateRequireFromPathReturnsRequire() async throws {
+@Test func moduleCreateRequireFromPathReturnsScopedFunction() async throws {
     let runtime = NodeRuntime()
     let result = runtime.evaluate("""
         var m = require('module');
         var req = m.createRequireFromPath('/tmp/test.js');
-        req === require;
+        typeof req === 'function' && typeof req.resolve === 'function';
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func moduleCreateRequireResolvesRelativeFromFilename() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var m = require('module');
+        var fs = require('fs');
+        var path = require('path');
+        var tmpDir = '/tmp/noco_createreq_' + Date.now();
+        var subDir = path.join(tmpDir, 'a', 'b', 'c');
+        fs.mkdirSync(subDir, { recursive: true });
+        fs.writeFileSync(path.join(tmpDir, 'target.json'), '{"ok":true}');
+        // createRequire from a/b/c/test.js, resolve ../../../target.json
+        var req = m.createRequire(path.join(subDir, 'test.js'));
+        var resolved = req.resolve('../../../target.json');
+        // cleanup
+        fs.unlinkSync(path.join(tmpDir, 'target.json'));
+        fs.rmdirSync(path.join(tmpDir, 'a', 'b', 'c'));
+        fs.rmdirSync(path.join(tmpDir, 'a', 'b'));
+        fs.rmdirSync(path.join(tmpDir, 'a'));
+        fs.rmdirSync(tmpDir);
+        resolved;
+    """)
+    let r = result?.toString() ?? ""
+    #expect(r.contains("target.json"))
+}
+
+@Test func moduleCreateRequireWithFileURL() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var m = require('module');
+        var fs = require('fs');
+        var path = require('path');
+        var tmpDir = '/tmp/noco_createreq_url_' + Date.now();
+        fs.mkdirSync(tmpDir, { recursive: true });
+        fs.writeFileSync(path.join(tmpDir, 'hello.json'), '{"hello":true}');
+        var req = m.createRequire('file://' + path.join(tmpDir, 'test.js'));
+        var resolved = req.resolve('./hello.json');
+        fs.unlinkSync(path.join(tmpDir, 'hello.json'));
+        fs.rmdirSync(tmpDir);
+        resolved;
+    """)
+    let r = result?.toString() ?? ""
+    #expect(r.contains("hello.json"))
+}
+
+@Test func moduleCreateRequireCanLoadBuiltins() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var m = require('module');
+        var req = m.createRequire('/tmp/test.js');
+        typeof req('path') === 'object';
     """)
     #expect(result?.toBool() == true)
 }
