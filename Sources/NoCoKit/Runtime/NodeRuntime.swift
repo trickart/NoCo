@@ -124,6 +124,17 @@ public final class NodeRuntime: @unchecked Sendable {
             self?.context.evaluateScript("void 0")
         }
 
+        eventLoop.onBeforeExit = { [weak self] in
+            guard let self else { return false }
+            let process = self.context.objectForKeyedSubscript("process")!
+            let count = process.invokeMethod("listenerCount", withArguments: ["beforeExit"])!
+            guard count.toInt32() > 0 else { return false }
+            let exitCode = process.forProperty("exitCode") ?? JSValue(int32: 0, in: self.context)!
+            process.invokeMethod("emit", withArguments: ["beforeExit", exitCode as Any])
+            self.checkException()
+            return self.eventLoop.hasPendingWork
+        }
+
         configure?(self)
     }
 
