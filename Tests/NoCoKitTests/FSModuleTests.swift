@@ -803,14 +803,18 @@ func fsWatchFileDetectsChange() async throws {
         await runEventLoopInBackgroundFS(runtime, timeout: 30)
     }
 
-    // Wait for watchFile polling to start, then modify the file.
-    // Use sleep(2) to guarantee mtime changes (HFS+/APFS may have 1s granularity).
-    try await Task.sleep(nanoseconds: 2_000_000_000)
-    // Write non-atomically to ensure the same path is updated in-place
-    try "modified".data(using: .utf8)!.write(to: URL(fileURLWithPath: tmpPath))
+    // Wait for watchFile polling to start, then repeatedly modify the file.
+    // Repeated writes with growing content ensure both mtime and size change,
+    // even on filesystems with coarse timestamp granularity.
+    for i in 0..<10 {
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        if messages.contains(where: { $0.hasPrefix("changed:") }) { break }
+        let content = String(repeating: "modified_\(i)\n", count: i + 2)
+        try content.data(using: .utf8)!.write(to: URL(fileURLWithPath: tmpPath))
+    }
 
-    // Wait for callback (up to 20 seconds for slow CI)
-    for _ in 0..<200 {
+    // Extra wait for the callback to propagate through the event loop
+    for _ in 0..<50 {
         try await Task.sleep(nanoseconds: 100_000_000)
         if messages.contains(where: { $0.hasPrefix("changed:") }) { break }
     }
