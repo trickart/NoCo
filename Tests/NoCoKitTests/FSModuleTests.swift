@@ -789,32 +789,33 @@ func fsWatchFileDetectsChange() async throws {
     FileManager.default.createFile(atPath: tmpPath, contents: "initial".data(using: .utf8))
     defer { try? FileManager.default.removeItem(atPath: tmpPath) }
 
+    // Write the file from JS using setInterval so both the watchFile polling
+    // and the file modifications run within the same event loop context.
+    // Previous approaches that wrote from Swift Tasks suffered CI flakes because
+    // DispatchSource timers on DispatchQueue.global() were unreliable in the
+    // GitHub Actions macOS sandbox.
     runtime.evaluate("""
         var fs = require('fs');
         var keepAlive = setTimeout(function(){}, 30000);
-        fs.watchFile('\(tmpPath)', {interval: 300}, function(curr, prev) {
+        fs.watchFile('\(tmpPath)', {interval: 200}, function(curr, prev) {
             console.log('changed:' + curr.mtimeMs + ':' + prev.mtimeMs);
             fs.unwatchFile('\(tmpPath)');
+            clearInterval(writer);
             clearTimeout(keepAlive);
         });
+        var writeCount = 0;
+        var writer = setInterval(function() {
+            writeCount++;
+            fs.writeFileSync('\(tmpPath)', 'modified_' + writeCount + '_' + Date.now());
+            if (writeCount > 20) clearInterval(writer);
+        }, 500);
     """)
 
     let eventLoopTask = Task.detached {
         await runEventLoopInBackgroundFS(runtime, timeout: 30)
     }
 
-    // Wait for watchFile polling to start, then repeatedly modify the file.
-    // Repeated writes with growing content ensure both mtime and size change,
-    // even on filesystems with coarse timestamp granularity.
-    for i in 0..<10 {
-        try await Task.sleep(nanoseconds: 1_000_000_000)
-        if messages.contains(where: { $0.hasPrefix("changed:") }) { break }
-        let content = String(repeating: "modified_\(i)\n", count: i + 2)
-        try content.data(using: .utf8)!.write(to: URL(fileURLWithPath: tmpPath))
-    }
-
-    // Extra wait for the callback to propagate through the event loop
-    for _ in 0..<50 {
+    for _ in 0..<200 {
         try await Task.sleep(nanoseconds: 100_000_000)
         if messages.contains(where: { $0.hasPrefix("changed:") }) { break }
     }
