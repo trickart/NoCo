@@ -45,6 +45,61 @@ import JavaScriptCore
     #expect(pid > 0)
 }
 
+@Test func processGetuid() async throws {
+    let runtime = NodeRuntime()
+    let uid = runtime.evaluate("process.getuid()")?.toInt32() ?? -1
+    #expect(uid >= 0)
+    #expect(uid == Int32(getuid()))
+}
+
+@Test func processGetgid() async throws {
+    let runtime = NodeRuntime()
+    let gid = runtime.evaluate("process.getgid()")?.toInt32() ?? -1
+    #expect(gid >= 0)
+    #expect(gid == Int32(getgid()))
+}
+
+@Test func processGetgroups() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var g = process.getgroups();
+        Array.isArray(g) && g.length > 0 && typeof g[0] === 'number';
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func processKill() async throws {
+    let runtime = NodeRuntime()
+    // Sending SIGCONT (harmless) to own process should succeed
+    let result = runtime.evaluate("""
+        var err = null;
+        try { process.kill(process.pid, 'SIGCONT'); } catch(e) { err = e.message; }
+        err;
+    """)
+    #expect(result?.isNull == true)
+}
+
+@Test func processKillInvalidPid() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var code = null;
+        try { process.kill(999999, 'SIGTERM'); } catch(e) { code = e.code; }
+        code;
+    """)
+    #expect(result?.toString() == "ESRCH")
+}
+
+@Test func processKillSignalNumber() async throws {
+    let runtime = NodeRuntime()
+    // Signal 0 can be used to check if process exists
+    let result = runtime.evaluate("""
+        var err = null;
+        try { process.kill(process.pid, 0); } catch(e) { err = e.message; }
+        err;
+    """)
+    #expect(result?.isNull == true)
+}
+
 @Test func processArgv() async throws {
     let runtime = NodeRuntime()
     let isArray = runtime.evaluate("Array.isArray(process.argv)")?.toBool()

@@ -230,11 +230,16 @@ public struct FSModule: NodeModule {
             // S_IFREG = 0o100000, S_IFDIR = 0o040000
             let mode = (isDirFlag.boolValue ? 0o040000 : 0o100000) | posix
 
+            let uid = (attrs[.ownerAccountID] as? UInt) ?? UInt(getuid())
+            let gid = (attrs[.groupOwnerAccountID] as? UInt) ?? UInt(getgid())
+
             stat.setValue(size, forProperty: "size")
             stat.setValue(ino, forProperty: "ino")
             stat.setValue(dev, forProperty: "dev")
             stat.setValue(nlink, forProperty: "nlink")
             stat.setValue(mode, forProperty: "mode")
+            stat.setValue(uid, forProperty: "uid")
+            stat.setValue(gid, forProperty: "gid")
             let mtimeMs = floor(mtime.timeIntervalSince1970 * 1000)
             let ctimeMs = floor(ctime.timeIntervalSince1970 * 1000)
             stat.setValue(mtimeMs, forProperty: "mtimeMs")
@@ -812,11 +817,16 @@ public struct FSModule: NodeModule {
         let posix = (attrs[.posixPermissions] as? Int) ?? 0o644
         let mode = (isDirFlag.boolValue ? 0o040000 : 0o100000) | posix
 
+        let uid = (attrs[.ownerAccountID] as? UInt) ?? UInt(getuid())
+        let gid = (attrs[.groupOwnerAccountID] as? UInt) ?? UInt(getgid())
+
         stat.setValue(size, forProperty: "size")
         stat.setValue(ino, forProperty: "ino")
         stat.setValue(dev, forProperty: "dev")
         stat.setValue(nlink, forProperty: "nlink")
         stat.setValue(mode, forProperty: "mode")
+        stat.setValue(uid, forProperty: "uid")
+        stat.setValue(gid, forProperty: "gid")
         let mtimeMs = floor(mtime.timeIntervalSince1970 * 1000)
         let ctimeMs = floor(ctime.timeIntervalSince1970 * 1000)
         stat.setValue(mtimeMs, forProperty: "mtimeMs")

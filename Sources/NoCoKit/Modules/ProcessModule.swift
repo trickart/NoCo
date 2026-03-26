@@ -56,6 +56,60 @@ public struct ProcessModule: NodeModule {
         // process.pid
         process.setValue(ProcessInfo.processInfo.processIdentifier, forProperty: "pid")
 
+        // process.getuid / process.getgid / process.getgroups
+        let getuidFn: @convention(block) () -> UInt32 = { getuid() }
+        process.setValue(unsafeBitCast(getuidFn, to: AnyObject.self), forProperty: "getuid")
+        let getgidFn: @convention(block) () -> UInt32 = { getgid() }
+        process.setValue(unsafeBitCast(getgidFn, to: AnyObject.self), forProperty: "getgid")
+        let getgroupsFn: @convention(block) () -> [UInt32] = {
+            var groups = [gid_t](repeating: 0, count: 64)
+            let count = getgroups(Int32(groups.count), &groups)
+            if count > 0 {
+                return Array(groups.prefix(Int(count)))
+            }
+            return [getgid()]
+        }
+        process.setValue(unsafeBitCast(getgroupsFn, to: AnyObject.self), forProperty: "getgroups")
+
+        // process.kill(pid, signal)
+        let killFn: @convention(block) (JSValue, JSValue) -> Void = { pidVal, signalVal in
+            let pid = pidVal.toInt32()
+            guard pid != 0 else {
+                context.exception = JSValue(newErrorFromMessage: "Invalid pid: 0", in: context)
+                return
+            }
+            // Map signal name to number
+            var sig: Int32 = 15 // SIGTERM default
+            if !signalVal.isUndefined {
+                if signalVal.isNumber {
+                    sig = signalVal.toInt32()
+                } else if let name = signalVal.toString() {
+                    let signalMap: [String: Int32] = [
+                        "SIGHUP": 1, "SIGINT": 2, "SIGQUIT": 3, "SIGKILL": 9,
+                        "SIGTERM": 15, "SIGUSR1": 30, "SIGUSR2": 31, "SIGSTOP": 17,
+                        "SIGCONT": 19, "SIGPIPE": 13, "SIGALRM": 14
+                    ]
+                    sig = signalMap[name] ?? 15
+                }
+            }
+            let result = Darwin.kill(pid, sig)
+            if result != 0 {
+                let errCode = errno
+                if errCode == ESRCH {
+                    context.exception = context.createSystemError(
+                        "kill \(sig) \(pid) - No such process",
+                        code: "ESRCH", syscall: "kill"
+                    )
+                } else if errCode == EPERM {
+                    context.exception = context.createSystemError(
+                        "kill \(sig) \(pid) - Operation not permitted",
+                        code: "EPERM", syscall: "kill"
+                    )
+                }
+            }
+        }
+        process.setValue(unsafeBitCast(killFn, to: AnyObject.self), forProperty: "kill")
+
         // process.argv
         let argv = JSValue.array(from: runtime.argv, in: context)
         process.setValue(argv, forProperty: "argv")
