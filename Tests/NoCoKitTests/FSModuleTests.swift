@@ -792,7 +792,7 @@ func fsWatchFileDetectsChange() async throws {
     runtime.evaluate("""
         var fs = require('fs');
         var keepAlive = setTimeout(function(){}, 30000);
-        fs.watchFile('\(tmpPath)', {interval: 500}, function(curr, prev) {
+        fs.watchFile('\(tmpPath)', {interval: 300}, function(curr, prev) {
             console.log('changed:' + curr.mtimeMs + ':' + prev.mtimeMs);
             fs.unwatchFile('\(tmpPath)');
             clearTimeout(keepAlive);
@@ -803,9 +803,11 @@ func fsWatchFileDetectsChange() async throws {
         await runEventLoopInBackgroundFS(runtime, timeout: 30)
     }
 
-    // Wait a bit then modify the file (longer delay to ensure watchFile is set up)
-    try await Task.sleep(nanoseconds: 1_000_000_000)
-    try "modified".write(toFile: tmpPath, atomically: true, encoding: .utf8)
+    // Wait for watchFile polling to start, then modify the file.
+    // Use sleep(2) to guarantee mtime changes (HFS+/APFS may have 1s granularity).
+    try await Task.sleep(nanoseconds: 2_000_000_000)
+    // Write non-atomically to ensure the same path is updated in-place
+    try "modified".data(using: .utf8)!.write(to: URL(fileURLWithPath: tmpPath))
 
     // Wait for callback (up to 20 seconds for slow CI)
     for _ in 0..<200 {
