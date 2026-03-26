@@ -385,11 +385,15 @@ public struct ChildProcessModule: NodeModule {
             })
         """)!.call(withArguments: [childProcess])
 
-        // stdout EventEmitter
+        // stdout — EventEmitter + ReadableStream hybrid
         let stdout = JSValue(newObjectIn: context)!
         context.evaluateScript("""
             (function(s) {
                 s._listeners = {};
+                s._rsController = null;
+                s._readableStream = new ReadableStream({
+                    start: function(controller) { s._rsController = controller; }
+                });
                 s.on = function(event, fn) {
                     if (!s._listeners[event]) s._listeners[event] = [];
                     s._listeners[event].push(fn);
@@ -408,6 +412,12 @@ public struct ChildProcessModule: NodeModule {
                         if (!fns[i]._once) remaining.push(fns[i]);
                     }
                     s._listeners[event] = remaining;
+                    if (event === 'data' && s._rsController) {
+                        try { s._rsController.enqueue(args[0]); } catch(e) {}
+                    } else if (event === 'end' && s._rsController) {
+                        try { s._rsController.close(); } catch(e) {}
+                        s._rsController = null;
+                    }
                 };
                 s.removeListener = function(event, fn) {
                     var fns = s._listeners[event] || [];
@@ -421,15 +431,22 @@ public struct ChildProcessModule: NodeModule {
                     return dest;
                 };
                 s.setEncoding = function(enc) { s._encoding = enc; return s; };
+                s[Symbol.asyncIterator] = function() {
+                    return s._readableStream[Symbol.asyncIterator]();
+                };
             })
         """)!.call(withArguments: [stdout])
         childProcess.setValue(stdout, forProperty: "stdout")
 
-        // stderr EventEmitter
+        // stderr — EventEmitter + ReadableStream hybrid
         let stderr = JSValue(newObjectIn: context)!
         context.evaluateScript("""
             (function(s) {
                 s._listeners = {};
+                s._rsController = null;
+                s._readableStream = new ReadableStream({
+                    start: function(controller) { s._rsController = controller; }
+                });
                 s.on = function(event, fn) {
                     if (!s._listeners[event]) s._listeners[event] = [];
                     s._listeners[event].push(fn);
@@ -448,6 +465,12 @@ public struct ChildProcessModule: NodeModule {
                         if (!fns[i]._once) remaining.push(fns[i]);
                     }
                     s._listeners[event] = remaining;
+                    if (event === 'data' && s._rsController) {
+                        try { s._rsController.enqueue(args[0]); } catch(e) {}
+                    } else if (event === 'end' && s._rsController) {
+                        try { s._rsController.close(); } catch(e) {}
+                        s._rsController = null;
+                    }
                 };
                 s.removeListener = function(event, fn) {
                     var fns = s._listeners[event] || [];
@@ -460,6 +483,9 @@ public struct ChildProcessModule: NodeModule {
                     s.on('end', function() { if (typeof dest.end === 'function') dest.end(); });
                     if (typeof dest.emit === 'function') dest.emit('pipe', s);
                     return dest;
+                };
+                s[Symbol.asyncIterator] = function() {
+                    return s._readableStream[Symbol.asyncIterator]();
                 };
             })
         """)!.call(withArguments: [stderr])

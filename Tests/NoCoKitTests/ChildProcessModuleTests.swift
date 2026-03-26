@@ -231,6 +231,67 @@ func spawnStdoutData() async throws {
 }
 
 @Test(.timeLimit(.minutes(1)))
+func spawnStdoutAsyncIterator() async throws {
+    let runtime = NodeRuntime()
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var lines = [];
+        async function run() {
+            var child = cp.spawn('printf', ['line1\\nline2\\nline3']);
+            for await (var chunk of child.stdout) {
+                var text = (typeof chunk === 'string') ? chunk : chunk.toString();
+                text.split('\\n').forEach(function(l) { if (l) lines.push(l); });
+            }
+        }
+        run();
+    """)
+    await runEventLoopInBackground(runtime, timeout: 5)
+    let result = runtime.evaluate("JSON.stringify(lines)")
+    #expect(result?.toString() == #"["line1","line2","line3"]"#)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func spawnStdoutReadableStream() async throws {
+    let runtime = NodeRuntime()
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var chunks = [];
+        async function run() {
+            var child = cp.spawn('echo', ['hello']);
+            var reader = child.stdout._readableStream.getReader();
+            while (true) {
+                var r = await reader.read();
+                if (r.done) break;
+                chunks.push(r.value.toString().trim());
+            }
+        }
+        run();
+    """)
+    await runEventLoopInBackground(runtime, timeout: 5)
+    let result = runtime.evaluate("chunks[0]")
+    #expect(result?.toString() == "hello")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func spawnStdoutEventEmitterStillWorks() async throws {
+    // Verify that adding ReadableStream doesn't break existing on('data') usage
+    let runtime = NodeRuntime()
+    runtime.evaluate("""
+        var cp = require('child_process');
+        var dataResult = '';
+        var endCalled = false;
+        var child = cp.spawn('echo', ['compat_test']);
+        child.stdout.on('data', function(d) { dataResult += d; });
+        child.stdout.on('end', function() { endCalled = true; });
+    """)
+    await runEventLoopInBackground(runtime, timeout: 5)
+    let data = runtime.evaluate("dataResult.trim()")
+    let end = runtime.evaluate("endCalled")
+    #expect(data?.toString() == "compat_test")
+    #expect(end?.toBool() == true)
+}
+
+@Test(.timeLimit(.minutes(1)))
 func spawnExitAndCloseEvent() async throws {
     let runtime = NodeRuntime()
     runtime.evaluate("""
