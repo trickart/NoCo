@@ -275,6 +275,41 @@ func fsReadFileAsyncDuringEventLoop() async throws {
     #expect(result?.toBool() == true)
 }
 
+@Test func fsStatSyncHasUidAndGid() async throws {
+    let runtime = NodeRuntime()
+    let tmpPath = NSTemporaryDirectory() + "noco_test_stat_uidgid_\(UUID().uuidString).txt"
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    FileManager.default.createFile(atPath: tmpPath, contents: "test".data(using: .utf8))
+
+    let result = runtime.evaluate("""
+        var fs = require('fs');
+        var stat = fs.statSync('\(tmpPath)');
+        var results = [
+            typeof stat.uid === 'number' && stat.uid >= 0,
+            typeof stat.gid === 'number' && stat.gid >= 0
+        ];
+        results.every(function(v) { return v === true; });
+    """)
+    #expect(result?.toBool() == true)
+}
+
+@Test func fsStatSyncUidMatchesCurrentUser() async throws {
+    let runtime = NodeRuntime()
+    let tmpPath = NSTemporaryDirectory() + "noco_test_stat_uid_match_\(UUID().uuidString).txt"
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    FileManager.default.createFile(atPath: tmpPath, contents: "test".data(using: .utf8))
+
+    // File created by current user should have matching uid
+    let result = runtime.evaluate("""
+        var fs = require('fs');
+        var stat = fs.statSync('\(tmpPath)');
+        stat.uid === process.getuid();
+    """)
+    #expect(result?.toBool() == true)
+}
+
 @Test func fsStatSyncModeIncludesFileType() async throws {
     let runtime = NodeRuntime()
 
