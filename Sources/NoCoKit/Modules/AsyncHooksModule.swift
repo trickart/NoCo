@@ -21,14 +21,19 @@ public struct AsyncHooksModule: NodeModule {
                         args.push(arguments[i]);
                     }
                     var result = callback.apply(null, args);
-                    if (result && typeof result.then === 'function') {
-                        var self = this;
-                        return result.then(
-                            function(v) { self._store = previous; return v; },
-                            function(e) { self._store = previous; throw e; }
-                        );
-                    }
                     this._store = previous;
+                    if (result && typeof result.then === 'function') {
+                        // Use Promise.prototype.then to avoid triggering
+                        // Symbol.species (which can re-invoke subclass
+                        // constructors like ProcessPromise and cause disarm).
+                        var self = this;
+                        var savedStore = store;
+                        Promise.prototype.then.call(result,
+                            function(v) { self._store = previous; },
+                            function(e) { self._store = previous; }
+                        );
+                        this._store = savedStore;
+                    }
                     return result;
                 } catch(e) {
                     this._store = previous;
