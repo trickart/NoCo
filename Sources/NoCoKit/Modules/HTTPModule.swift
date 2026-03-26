@@ -4,6 +4,7 @@ import Network
 import NIOCore
 import NIOHTTP1
 import NIOTransportServices
+import Synchronization
 
 /// Implements Node.js `http` module. Client uses URLSession; server uses NIOHTTP1.
 public struct HTTPModule: NodeModule {
@@ -18,6 +19,7 @@ public struct HTTPModule: NodeModule {
             var servers: [Int: NIOHTTPServer] = [:]
             var nextServerId: Int = 1
             var pendingRequests: [Int: HTTPRequestState] = [:]
+            var upgradeNioSockets: [Int: NIOAcceptedSocket] = [:]
         }
         let storage = HTTPStorage()
 
@@ -29,6 +31,10 @@ public struct HTTPModule: NodeModule {
             storage.nextServerId += 1
             let server = NIOHTTPServer(eventLoop: runtime.eventLoop) { reqState in
                 storage.pendingRequests[reqState.requestId] = reqState
+            }
+            server.onRegisterUpgradeSocket = { nioSock in
+                storage.upgradeNioSockets[nioSock.socketId] = nioSock
+                runtime.eventLoop.retainHandle()
             }
             storage.servers[id] = server
             return id
@@ -98,6 +104,43 @@ public struct HTTPModule: NodeModule {
             storage.pendingRequests.removeValue(forKey: reqId)
         }
         context.setObject(endBlock, forKeyedSubscript: "__httpEnd" as NSString)
+
+        // --- Upgrade socket bridge functions ---
+
+        // __httpUpgradeWrite(socketId, dataArray, callback)
+        let upgradeWriteBlock: @convention(block) (Int, JSValue, JSValue) -> Bool = { id, dataVal, cb in
+            guard let nioSock = storage.upgradeNioSockets[id] else { return false }
+            let len = Int(dataVal.forProperty("length")?.toInt32() ?? 0)
+            var bytes = Data(count: len)
+            for i in 0..<len {
+                bytes[i] = UInt8(dataVal.atIndex(i).toInt32() & 0xFF)
+            }
+            nioSock.write(bytes) {
+                if !cb.isNull && !cb.isUndefined {
+                    runtime.eventLoop.enqueueCallback {
+                        cb.call(withArguments: [])
+                    }
+                }
+            }
+            return true
+        }
+        context.setObject(upgradeWriteBlock, forKeyedSubscript: "__httpUpgradeWrite" as NSString)
+
+        // __httpUpgradeDestroy(socketId)
+        let upgradeDestroyBlock: @convention(block) (Int) -> Void = { id in
+            guard let nioSock = storage.upgradeNioSockets[id] else { return }
+            nioSock.close()
+            storage.upgradeNioSockets.removeValue(forKey: id)
+            runtime.eventLoop.releaseHandle()
+        }
+        context.setObject(upgradeDestroyBlock, forKeyedSubscript: "__httpUpgradeDestroy" as NSString)
+
+        // __httpUpgradeSetOnData(socketId, jsSocket)
+        let upgradeSetOnDataBlock: @convention(block) (Int, JSValue) -> Void = { id, jsSocket in
+            guard let nioSock = storage.upgradeNioSockets[id] else { return }
+            nioSock.jsSocket = jsSocket
+        }
+        context.setObject(upgradeSetOnDataBlock, forKeyedSubscript: "__httpUpgradeSetOnData" as NSString)
 
         // --- JS-side http.createServer ---
         let createServerJS = """
@@ -389,6 +432,80 @@ public struct HTTPModule: NodeModule {
                 }
             };
 
+            function UpgradeSocket(socketId, remoteAddr, remotePort) {
+                this._events = Object.create(null);
+                this._maxListeners = 10;
+                this.readable = true;
+                this.writable = true;
+                this.destroyed = false;
+                this._socketId = socketId;
+                this.remoteAddress = remoteAddr;
+                this.remotePort = remotePort;
+                this._encoding = null;
+                this.allowHalfOpen = true;
+                this.bytesWritten = 0;
+            }
+            UpgradeSocket.prototype = Object.create(EventEmitter.prototype);
+            UpgradeSocket.prototype.constructor = UpgradeSocket;
+            UpgradeSocket.prototype.write = function(data, encoding, callback) {
+                if (typeof encoding === 'function') { callback = encoding; encoding = null; }
+                var buf = (typeof data === 'string') ? Buffer.from(data, encoding || 'utf8') :
+                          (data instanceof Buffer) ? data : Buffer.from(data);
+                var arr = [];
+                for (var i = 0; i < buf.length; i++) arr.push(buf[i]);
+                this.bytesWritten += buf.length;
+                return __httpUpgradeWrite(this._socketId, arr, callback || null);
+            };
+            UpgradeSocket.prototype.end = function(data, encoding, callback) {
+                if (typeof data === 'function') { callback = data; data = null; }
+                if (typeof encoding === 'function') { callback = encoding; encoding = null; }
+                if (data) this.write(data, encoding);
+                this.destroy();
+                if (callback) callback();
+                return this;
+            };
+            UpgradeSocket.prototype.destroy = function(err) {
+                if (this.destroyed) return this;
+                this.destroyed = true;
+                this.writable = false;
+                this.readable = false;
+                __httpUpgradeDestroy(this._socketId);
+                if (err) this.emit('error', err);
+                this.emit('close');
+                return this;
+            };
+            UpgradeSocket.prototype.cork = function() { return this; };
+            UpgradeSocket.prototype.uncork = function() { return this; };
+            UpgradeSocket.prototype.setNoDelay = function() { return this; };
+            UpgradeSocket.prototype.setTimeout = function(ms, cb) { if (cb) this.once('timeout', cb); return this; };
+            UpgradeSocket.prototype.setKeepAlive = function() { return this; };
+            UpgradeSocket.prototype.ref = function() { return this; };
+            UpgradeSocket.prototype.unref = function() { return this; };
+            UpgradeSocket.prototype.setEncoding = function(enc) { this._encoding = enc; return this; };
+            UpgradeSocket.prototype.pipe = function(dest) {
+                this.on('data', function(c) { dest.write(c); });
+                this.on('end', function() { if (typeof dest.end === 'function') dest.end(); });
+                return dest;
+            };
+            var _origEmit = EventEmitter.prototype.emit;
+            UpgradeSocket.prototype.emit = function(event) {
+                if (event === 'data' && this._encoding && arguments[1] instanceof Buffer) {
+                    arguments[1] = arguments[1].toString(this._encoding);
+                }
+                return _origEmit.apply(this, arguments);
+            };
+
+            Server.prototype._handleUpgrade = function(method, url, headersObj, httpVersion, rawHeaders, socketId, remoteAddr, remotePort) {
+                var req = new IncomingMessage(-1, method, url, headersObj, httpVersion, rawHeaders, remoteAddr, remotePort);
+                req.upgrade = true;
+                var socket = new UpgradeSocket(socketId, remoteAddr, remotePort);
+                __httpUpgradeSetOnData(socketId, socket);
+                req.socket = socket;
+                req.connection = socket;
+                var head = Buffer.alloc(0);
+                this.emit('upgrade', req, socket, head);
+            };
+
             http.createServer = function(options, requestListener) {
                 if (typeof options === 'function') {
                     requestListener = options;
@@ -637,13 +754,19 @@ final class NIOHTTPServer: @unchecked Sendable {
     var boundPort: Int = 0
     var boundHost: String = ""
     var tlsOptions: NWProtocolTLS.Options?
+    var onRegisterUpgradeSocket: ((NIOAcceptedSocket) -> Void)?
     private var group: NIOTSEventLoopGroup?
     private var channel: Channel?
     private let requestIdCounter = AtomicCounter(initial: 1)
+    private let upgradeSocketIdCounter = AtomicCounter(initial: 500000)
 
     init(eventLoop: EventLoop, onRegisterRequest: @escaping (HTTPRequestState) -> Void) {
         self.eventLoop = eventLoop
         self.onRegisterRequest = onRegisterRequest
+    }
+
+    func nextUpgradeSocketId() -> Int {
+        upgradeSocketIdCounter.next()
     }
 
     func bind(host: String, port: Int) {
@@ -653,11 +776,12 @@ final class NIOHTTPServer: @unchecked Sendable {
 
         var bootstrap = NIOTSListenerBootstrap(group: group)
             .childChannelInitializer { channel in
-                channel.pipeline.addHandlers([
-                    ByteToMessageHandler(HTTPRequestDecoder()),
-                    HTTPResponseEncoder(),
-                    HTTPBridgeHandler(server: serverRef),
-                ])
+                let decoder = ByteToMessageHandler(HTTPRequestDecoder())
+                let encoder = HTTPResponseEncoder()
+                let bridge = HTTPBridgeHandler(server: serverRef)
+                bridge.httpDecoder = decoder
+                bridge.httpEncoder = encoder
+                return channel.pipeline.addHandlers([decoder, encoder, bridge])
             }
 
         if let tls = self.tlsOptions {
@@ -814,13 +938,16 @@ final class HTTPRequestState: @unchecked Sendable {
 // MARK: - HTTPBridgeHandler
 
 /// NIO ChannelInboundHandler that bridges HTTP requests to the JS event loop.
-final class HTTPBridgeHandler: ChannelInboundHandler, @unchecked Sendable {
+final class HTTPBridgeHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
     let server: NIOHTTPServer
+    var httpDecoder: (any RemovableChannelHandler)?
+    var httpEncoder: (any RemovableChannelHandler)?
     private var requestHead: HTTPRequestHead?
     private var activeRequestId: Int?
+    private var pendingUpgrade: Bool = false
 
     init(server: NIOHTTPServer) {
         self.server = server
@@ -831,6 +958,17 @@ final class HTTPBridgeHandler: ChannelInboundHandler, @unchecked Sendable {
         switch part {
         case .head(let head):
             requestHead = head
+
+            // Detect HTTP upgrade request
+            let hasUpgradeHeader = head.headers["upgrade"].first != nil
+            let hasConnectionUpgrade = head.headers["connection"].contains(where: {
+                $0.lowercased().contains("upgrade")
+            })
+            if hasUpgradeHeader && hasConnectionUpgrade {
+                pendingUpgrade = true
+                return
+            }
+
             let reqId = server.nextRequestId()
             self.activeRequestId = reqId
             let keepAlive = head.isKeepAlive
@@ -869,6 +1007,7 @@ final class HTTPBridgeHandler: ChannelInboundHandler, @unchecked Sendable {
             }
 
         case .body(var buf):
+            if pendingUpgrade { return }
             guard let reqId = activeRequestId else { return }
             if let bytes = buf.readBytes(length: buf.readableBytes) {
                 let str = String(data: Data(bytes), encoding: .utf8)
@@ -880,12 +1019,66 @@ final class HTTPBridgeHandler: ChannelInboundHandler, @unchecked Sendable {
             }
 
         case .end:
+            if pendingUpgrade, let head = requestHead {
+                handleUpgrade(context: context, head: head)
+                pendingUpgrade = false
+                requestHead = nil
+                return
+            }
             guard let reqId = activeRequestId else { return }
             server.eventLoop.enqueueCallback { [weak self] in
                 guard let self else { return }
                 self.server.jsServer?.invokeMethod("_endBody", withArguments: [reqId])
             }
             requestHead = nil
+        }
+    }
+
+    private func handleUpgrade(context: ChannelHandlerContext, head: HTTPRequestHead) {
+        let channel = context.channel
+        let socketId = server.nextUpgradeSocketId()
+        let nioSock = NIOAcceptedSocket(socketId: socketId, channel: channel, eventLoop: server.eventLoop)
+
+        let method = head.method.rawValue
+        let uri = head.uri
+        let httpVersionStr = "\(head.version.major).\(head.version.minor)"
+        let headerPairs: [(String, String)] = head.headers.map { ($0.name, $0.value) }
+        let remoteAddr = context.remoteAddress?.ipAddress ?? "127.0.0.1"
+        let remotePort = context.remoteAddress?.port ?? 0
+
+        let pipeline = context.pipeline
+        let upgradedHandler = UpgradedSocketHandler(nioSocket: nioSock)
+
+        // Remove HTTP handlers and add raw byte handler
+        pipeline.removeHandler(self).flatMap {
+            pipeline.removeHandler(self.httpEncoder!)
+        }.flatMap {
+            pipeline.removeHandler(self.httpDecoder!)
+        }.flatMap {
+            pipeline.addHandler(upgradedHandler)
+        }.whenComplete { _ in
+            self.server.eventLoop.enqueueCallback {
+                self.server.onRegisterUpgradeSocket?(nioSock)
+                guard let jsServer = self.server.jsServer, let ctx = jsServer.context else { return }
+                let headersObj = JSValue(newObjectIn: ctx)!
+                let rawHeadersArr = JSValue(newArrayIn: ctx)!
+                var rawIdx: Int = 0
+                for (name, value) in headerPairs {
+                    let lname = name.lowercased()
+                    if let existing = headersObj.forProperty(lname), !existing.isUndefined {
+                        headersObj.setValue(existing.toString()! + ", " + value, forProperty: lname)
+                    } else {
+                        headersObj.setValue(value, forProperty: lname)
+                    }
+                    rawHeadersArr.setValue(name, at: rawIdx)
+                    rawHeadersArr.setValue(value, at: rawIdx + 1)
+                    rawIdx += 2
+                }
+                jsServer.invokeMethod("_handleUpgrade", withArguments: [
+                    method, uri, headersObj, httpVersionStr, rawHeadersArr,
+                    socketId, remoteAddr, remotePort,
+                ])
+            }
         }
     }
 
@@ -905,5 +1098,29 @@ final class HTTPBridgeHandler: ChannelInboundHandler, @unchecked Sendable {
             guard let self else { return }
             self.server.jsServer?.invokeMethod("_notifyClose", withArguments: [reqId])
         }
+    }
+}
+
+// MARK: - UpgradedSocketHandler
+
+/// NIO ChannelInboundHandler for upgraded connections (WebSocket etc.).
+/// Passes raw ByteBuffer data to the JS socket after HTTP codec removal.
+final class UpgradedSocketHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+
+    let nioSocket: NIOAcceptedSocket
+
+    init(nioSocket: NIOAcceptedSocket) {
+        self.nioSocket = nioSocket
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buf = unwrapInboundIn(data)
+        guard let bytes = buf.readBytes(length: buf.readableBytes) else { return }
+        nioSocket.deliverData(bytes)
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        nioSocket.deliverEnd()
     }
 }

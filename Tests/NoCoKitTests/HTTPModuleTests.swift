@@ -1346,3 +1346,160 @@ func httpCreateServerEndWithDataContentLength() async throws {
     #expect(messages.contains("before:false"))
     #expect(messages.contains("after:true"))
 }
+
+// MARK: - HTTP Upgrade Tests
+
+@Test(.timeLimit(.minutes(1)))
+func httpUpgradeEventFires() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {
+            res.writeHead(200);
+            res.end('normal');
+        });
+        server.on('upgrade', function(req, socket, head) {
+            console.log('upgrade:' + req.headers['upgrade']);
+            console.log('url:' + req.url);
+            console.log('method:' + req.method);
+            socket.write('HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\n\\r\\n');
+        });
+        server.listen(0, '127.0.0.1', function() {
+            console.log('listening:' + server.address().port);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackground(runtime, timeout: 10)
+    }
+
+    var port = 0
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if let msg = messages.first(where: { $0.hasPrefix("listening:") }) {
+            port = Int(msg.replacingOccurrences(of: "listening:", with: "")) ?? 0
+            break
+        }
+    }
+    #expect(port > 0)
+
+    // Send raw HTTP upgrade request via TCP using Foundation streams
+    var inputStream: InputStream?
+    var outputStream: OutputStream?
+    Stream.getStreamsToHost(withName: "127.0.0.1", port: port, inputStream: &inputStream, outputStream: &outputStream)
+    guard let input = inputStream, let output = outputStream else {
+        #expect(Bool(false), "Failed to create streams")
+        return
+    }
+    input.open()
+    output.open()
+
+    let upgradeRequest = "GET /ws HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    let requestData = Array(upgradeRequest.utf8)
+    output.write(requestData, maxLength: requestData.count)
+
+    // Wait for upgrade event and response
+    try await Task.sleep(nanoseconds: 500_000_000)
+
+    // Read response
+    var responseBuffer = [UInt8](repeating: 0, count: 4096)
+    let bytesRead = input.read(&responseBuffer, maxLength: responseBuffer.count)
+    let responseStr = bytesRead > 0 ? String(bytes: responseBuffer[0..<bytesRead], encoding: .utf8) ?? "" : ""
+
+    #expect(messages.contains("upgrade:websocket"))
+    #expect(messages.contains("url:/ws"))
+    #expect(messages.contains("method:GET"))
+    #expect(responseStr.contains("101 Switching Protocols"))
+
+    input.close()
+    output.close()
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+}
+
+@Test(.timeLimit(.minutes(1)))
+func httpUpgradeSocketBidirectional() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var http = require('http');
+        var server = http.createServer(function(req, res) {
+            res.writeHead(200);
+            res.end('normal');
+        });
+        server.on('upgrade', function(req, socket, head) {
+            socket.write('HTTP/1.1 101 Switching Protocols\\r\\n\\r\\n');
+            socket.on('data', function(data) {
+                console.log('received:' + data.toString());
+                socket.write('echo:' + data.toString());
+            });
+        });
+        server.listen(0, '127.0.0.1', function() {
+            console.log('listening:' + server.address().port);
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackground(runtime, timeout: 10)
+    }
+
+    var port = 0
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if let msg = messages.first(where: { $0.hasPrefix("listening:") }) {
+            port = Int(msg.replacingOccurrences(of: "listening:", with: "")) ?? 0
+            break
+        }
+    }
+    #expect(port > 0)
+
+    var inputStream: InputStream?
+    var outputStream: OutputStream?
+    Stream.getStreamsToHost(withName: "127.0.0.1", port: port, inputStream: &inputStream, outputStream: &outputStream)
+    guard let input = inputStream, let output = outputStream else {
+        #expect(Bool(false), "Failed to create streams")
+        return
+    }
+    input.open()
+    output.open()
+
+    // Send upgrade request
+    let upgradeRequest = "GET /ws HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    let requestData = Array(upgradeRequest.utf8)
+    output.write(requestData, maxLength: requestData.count)
+
+    // Wait for 101 response
+    try await Task.sleep(nanoseconds: 300_000_000)
+
+    // Read 101 response
+    var responseBuffer = [UInt8](repeating: 0, count: 4096)
+    let bytesRead = input.read(&responseBuffer, maxLength: responseBuffer.count)
+    let responseStr = bytesRead > 0 ? String(bytes: responseBuffer[0..<bytesRead], encoding: .utf8) ?? "" : ""
+    #expect(responseStr.contains("101"))
+
+    // Send data over upgraded connection
+    let testData = Array("hello".utf8)
+    output.write(testData, maxLength: testData.count)
+
+    // Wait for echo
+    try await Task.sleep(nanoseconds: 300_000_000)
+
+    // Read echoed data
+    var echoBuffer = [UInt8](repeating: 0, count: 4096)
+    let echoBytesRead = input.read(&echoBuffer, maxLength: echoBuffer.count)
+    let echoStr = echoBytesRead > 0 ? String(bytes: echoBuffer[0..<echoBytesRead], encoding: .utf8) ?? "" : ""
+
+    #expect(messages.contains("received:hello"))
+    #expect(echoStr == "echo:hello")
+
+    input.close()
+    output.close()
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+}
+
