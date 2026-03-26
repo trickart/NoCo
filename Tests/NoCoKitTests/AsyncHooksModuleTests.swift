@@ -139,3 +139,75 @@ import JavaScriptCore
     #expect(messages.contains("same:true"))
     #expect(messages.contains("result:done"))
 }
+
+@Test func asyncLocalStorageRunReturnsPromiseSubclass() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    // Verify that run() does not break Promise subclasses that use
+    // Symbol.species (e.g. zx's ProcessPromise). The key issue was that
+    // .then() on the return value triggered Symbol.species, re-invoking
+    // the subclass constructor without proper initialization.
+    runtime.evaluate("""
+        var als = require('async_hooks').AsyncLocalStorage;
+        var storage = new als();
+        var SHOT = Symbol('shot');
+
+        class TestPromise extends Promise {
+            constructor(executor) {
+                var _resolve;
+                super(function(resolve, reject) {
+                    _resolve = resolve;
+                    executor(resolve, reject);
+                });
+                this._shot = executor[SHOT];
+                if (!this._shot) {
+                    this._disarmed = true;
+                } else {
+                    this._disarmed = false;
+                }
+            }
+        }
+
+        function within(cb) {
+            return storage.run(Object.assign({}, storage.getStore() || {}), cb);
+        }
+
+        var result = within(function() {
+            var cb = function() { cb[SHOT] = { halt: true }; };
+            var p = new TestPromise(cb);
+            return p;
+        });
+
+        console.log('disarmed:' + result._disarmed);
+        console.log('shot:' + JSON.stringify(result._shot));
+    """)
+
+    #expect(messages.contains("disarmed:false"))
+    #expect(messages.contains { $0.hasPrefix("shot:") && $0.contains("halt") })
+}
+
+@Test func asyncLocalStorageRunNestedRestoresCorrectly() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var als = require('async_hooks').AsyncLocalStorage;
+        var storage = new als();
+        storage.run('outer', function() {
+            console.log('a:' + storage.getStore());
+            storage.run('inner', function() {
+                console.log('b:' + storage.getStore());
+            });
+            console.log('c:' + storage.getStore());
+        });
+        console.log('d:' + storage.getStore());
+    """)
+
+    #expect(messages.contains("a:outer"))
+    #expect(messages.contains("b:inner"))
+    #expect(messages.contains("c:outer"))
+    #expect(messages.contains("d:undefined"))
+}
