@@ -794,10 +794,12 @@ func fsWatchFileDetectsChange() async throws {
     // Previous approaches that wrote from Swift Tasks suffered CI flakes because
     // DispatchSource timers on DispatchQueue.global() were unreliable in the
     // GitHub Actions macOS sandbox.
+    // Use a shorter poll interval (100ms) and more frequent writes (200ms) to
+    // reduce timing sensitivity on slow CI runners.
     runtime.evaluate("""
         var fs = require('fs');
-        var keepAlive = setTimeout(function(){}, 30000);
-        fs.watchFile('\(tmpPath)', {interval: 200}, function(curr, prev) {
+        var keepAlive = setTimeout(function(){}, 60000);
+        fs.watchFile('\(tmpPath)', {interval: 100}, function(curr, prev) {
             console.log('changed:' + curr.mtimeMs + ':' + prev.mtimeMs);
             fs.unwatchFile('\(tmpPath)');
             clearInterval(writer);
@@ -807,8 +809,8 @@ func fsWatchFileDetectsChange() async throws {
         var writer = setInterval(function() {
             writeCount++;
             fs.writeFileSync('\(tmpPath)', 'modified_' + writeCount + '_' + Date.now());
-            if (writeCount > 20) clearInterval(writer);
-        }, 500);
+            if (writeCount > 40) clearInterval(writer);
+        }, 200);
     """)
 
     let eventLoopTask = Task.detached {
