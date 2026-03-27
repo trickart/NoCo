@@ -35,6 +35,20 @@ public struct ProcessModule: NodeModule {
         versions.setValue("10.2", forProperty: "v8")
         process.setValue(versions, forProperty: "versions")
 
+        // process.features
+        let features = JSValue(newObjectIn: context)!
+        features.setValue(false, forProperty: "inspector")
+        features.setValue(false, forProperty: "debug")
+        features.setValue(false, forProperty: "uv")
+        features.setValue(true, forProperty: "ipv6")
+        features.setValue(false, forProperty: "tls_alpn")
+        features.setValue(true, forProperty: "tls_sni")
+        features.setValue(false, forProperty: "tls_ocsp")
+        features.setValue(true, forProperty: "tls")
+        features.setValue(false, forProperty: "cached_builtins")
+        features.setValue(false, forProperty: "require_module")
+        process.setValue(features, forProperty: "features")
+
         // process.platform
         #if os(iOS)
         process.setValue("darwin", forProperty: "platform")
