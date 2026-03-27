@@ -8,10 +8,51 @@ public struct ConsoleModule: NodeModule {
     public static func install(in context: JSContext, runtime: NodeRuntime) -> JSValue {
         let console = JSValue(newObjectIn: context)!
 
+        // Install a shared format function that mirrors util.format behavior
+        // This is defined here because console is installed before util module
+        let formatFn = context.evaluateScript("""
+        (function() {
+            return function formatArgs(args) {
+                if (args.length === 0) return '';
+                var fmt = args[0];
+                if (typeof fmt !== 'string') {
+                    var parts = [];
+                    for (var i = 0; i < args.length; i++) {
+                        parts.push(typeof args[i] === 'object' && args[i] !== null ? JSON.stringify(args[i]) : String(args[i]));
+                    }
+                    return parts.join(' ');
+                }
+                var a = 1;
+                var result = fmt.replace(/%[sdjifoO%]/g, function(m) {
+                    if (m === '%%') return '%';
+                    if (a >= args.length) return m;
+                    var v = args[a++];
+                    switch(m) {
+                        case '%s': return String(v);
+                        case '%d': case '%i': return parseInt(v, 10).toString();
+                        case '%f': return parseFloat(v).toString();
+                        case '%j': try { return JSON.stringify(v); } catch(e) { return '[Circular]'; }
+                        case '%o': case '%O': try { return JSON.stringify(v); } catch(e) { return '[Circular]'; }
+                        default: return m;
+                    }
+                });
+                while (a < args.length) {
+                    result += ' ' + (typeof args[a] === 'object' && args[a] !== null ? JSON.stringify(args[a]) : String(args[a]));
+                    a++;
+                }
+                return result;
+            };
+        })()
+        """)!
+
         let makeLogger = { (level: NodeRuntime.ConsoleLevel) -> @convention(block) () -> Void in
-            return {
+            return { [formatFn] in
                 let args = JSContext.currentArguments() as? [JSValue] ?? []
-                let message = args.map { formatValue($0) }.joined(separator: " ")
+                let jsArgs = JSValue(newArrayIn: context)!
+                for (i, arg) in args.enumerated() {
+                    jsArgs.setValue(arg, at: i)
+                }
+                let message = formatFn.call(withArguments: [jsArgs])?.toString() ?? ""
                 runtime.consoleHandler(level, message)
             }
         }

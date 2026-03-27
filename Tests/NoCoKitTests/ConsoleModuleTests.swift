@@ -183,3 +183,104 @@ import JavaScriptCore
     #expect(messages[0] == "a b c")
     #expect(messages[1] == "1 2 3")
 }
+
+// MARK: - Console printf-style formatting
+
+@Test func consoleFormatStringSubstitution() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("console.log('hello %s', 'world')")
+    #expect(messages[0] == "hello world")
+}
+
+@Test func consoleFormatNumberSubstitution() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("console.log('count: %d', 42)")
+    runtime.evaluate("console.log('int: %i', 3.7)")
+    runtime.evaluate("console.log('float: %f', 3.14)")
+
+    #expect(messages[0] == "count: 42")
+    #expect(messages[1] == "int: 3")
+    #expect(messages[2] == "float: 3.14")
+}
+
+@Test func consoleFormatJsonSubstitution() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("console.log('data: %j', {a: 1})")
+    #expect(messages[0] == "data: {\"a\":1}")
+}
+
+@Test func consoleFormatObjectSubstitution() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("console.log('obj: %o', {x: 2})")
+    runtime.evaluate("console.log('obj: %O', {y: 3})")
+    #expect(messages[0] == "obj: {\"x\":2}")
+    #expect(messages[1] == "obj: {\"y\":3}")
+}
+
+@Test func consoleFormatEscapedPercent() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("console.log('100%% done')")
+    #expect(messages[0] == "100% done")
+}
+
+@Test func consoleFormatMultipleSpecifiers() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("console.log('%s has %d items', 'cart', 3)")
+    #expect(messages[0] == "cart has 3 items")
+}
+
+@Test func consoleFormatExtraArgsAppended() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("console.log('%s', 'hello', 'extra', 42)")
+    #expect(messages[0] == "hello extra 42")
+}
+
+@Test func consoleFormatFewerArgsThanSpecifiers() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("console.log('%s and %s', 'foo')")
+    #expect(messages[0] == "foo and %s")
+}
+
+@Test func consoleFormatWorksForAllLevels() async throws {
+    let runtime = NodeRuntime()
+    var messages: [(NodeRuntime.ConsoleLevel, String)] = []
+    runtime.consoleHandler = { level, msg in messages.append((level, msg)) }
+
+    runtime.evaluate("""
+        console.log('log %s', 'a');
+        console.info('info %s', 'b');
+        console.warn('warn %s', 'c');
+        console.error('error %s', 'd');
+        console.debug('debug %s', 'e');
+    """)
+
+    #expect(messages[0] == (.log, "log a"))
+    #expect(messages[1] == (.info, "info b"))
+    #expect(messages[2] == (.warn, "warn c"))
+    #expect(messages[3] == (.error, "error d"))
+    #expect(messages[4] == (.debug, "debug e"))
+}
