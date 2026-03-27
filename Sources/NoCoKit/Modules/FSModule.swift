@@ -792,6 +792,75 @@ public struct FSModule: NodeModule {
         // Watch APIs (watchFile, unwatchFile, watch)
         installWatchAPIs(fs: fs, context: context, runtime: runtime)
 
+        // fs.constants
+        let constants = JSValue(newObjectIn: context)!
+        constants.setValue(0, forProperty: "F_OK")
+        constants.setValue(4, forProperty: "R_OK")
+        constants.setValue(2, forProperty: "W_OK")
+        constants.setValue(1, forProperty: "X_OK")
+        fs.setValue(constants, forProperty: "constants")
+
+        // fs.accessSync(path, mode?)
+        let accessSync: @convention(block) () -> Void = {
+            let ctx = JSContext.current()!
+            let args = JSContext.currentArguments() as? [JSValue] ?? []
+            guard let pathArg = args.first, !pathArg.isUndefined else {
+                ctx.exception = JSValue(newErrorFromMessage: "path is required", in: ctx)
+                return
+            }
+            let path = (stripFileURL(pathArg.toString()) as NSString).standardizingPath
+            let mode = args.count > 1 && !args[1].isUndefined ? args[1].toInt32() : 0 // F_OK
+
+            if Darwin.access(path, mode) != 0 {
+                let code = errno == ENOENT ? "ENOENT" : "EACCES"
+                ctx.exception = ctx.createSystemError(
+                    "no such file or directory, access '\(path)'",
+                    code: code, syscall: "access", path: path
+                )
+            }
+        }
+        fs.setValue(unsafeBitCast(accessSync, to: AnyObject.self), forProperty: "accessSync")
+
+        // fs.access(path, mode?, callback)
+        let access: @convention(block) () -> Void = {
+            let ctx = JSContext.current()!
+            let args = JSContext.currentArguments() as? [JSValue] ?? []
+            guard args.count >= 2 else { return }
+
+            let pathStr = stripFileURL(args[0].toString())
+            let resolved = (pathStr as NSString).standardizingPath
+            let callback: JSValue
+            let mode: Int32
+
+            if args.count >= 3 && !args[2].isUndefined && !args[2].isNull {
+                mode = args[1].toInt32()
+                callback = args[2]
+            } else {
+                mode = 0 // F_OK
+                callback = args[1]
+            }
+
+            runtime.eventLoop.retainHandle()
+            DispatchQueue.global().async {
+                let result = Darwin.access(resolved, mode)
+                let errNo = errno
+                runtime.eventLoop.enqueueCallback {
+                    if result != 0 {
+                        let code = errNo == ENOENT ? "ENOENT" : "EACCES"
+                        let err = ctx.createSystemError(
+                            "no such file or directory, access '\(resolved)'",
+                            code: code, syscall: "access", path: resolved
+                        )
+                        callback.call(withArguments: [err as Any])
+                    } else {
+                        callback.call(withArguments: [JSValue(undefinedIn: ctx) as Any])
+                    }
+                    runtime.eventLoop.releaseHandle()
+                }
+            }
+        }
+        fs.setValue(unsafeBitCast(access, to: AnyObject.self), forProperty: "access")
+
         return fs
     }
 

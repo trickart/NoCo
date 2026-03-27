@@ -777,6 +777,166 @@ func fsMkdirAsync() async throws {
     #expect(messages.contains("isDir:true"))
 }
 
+// MARK: - fs.constants
+
+@Test func fsConstantsExist() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var fs = require('fs');
+        var c = fs.constants;
+        c.F_OK + ':' + c.R_OK + ':' + c.W_OK + ':' + c.X_OK;
+    """)
+    #expect(result?.toString() == "0:4:2:1")
+}
+
+// MARK: - fs.accessSync
+
+@Test func fsAccessSyncExistingFile() async throws {
+    let runtime = NodeRuntime()
+    let tmpPath = NSTemporaryDirectory() + "noco_test_access_\(UUID().uuidString).txt"
+    FileManager.default.createFile(atPath: tmpPath, contents: "test".data(using: .utf8))
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    let result = runtime.evaluate("""
+        var fs = require('fs');
+        try { fs.accessSync('\(tmpPath)'); 'ok'; } catch(e) { 'error:' + e.message; }
+    """)
+    #expect(result?.toString() == "ok")
+}
+
+@Test func fsAccessSyncNonexistent() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var fs = require('fs');
+        try { fs.accessSync('/nonexistent_\(UUID().uuidString)'); 'ok'; } catch(e) { e.code; }
+    """)
+    #expect(result?.toString() == "ENOENT")
+}
+
+@Test func fsAccessSyncWithMode() async throws {
+    let runtime = NodeRuntime()
+    let tmpPath = NSTemporaryDirectory() + "noco_test_access_mode_\(UUID().uuidString).txt"
+    FileManager.default.createFile(atPath: tmpPath, contents: "test".data(using: .utf8))
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    let result = runtime.evaluate("""
+        var fs = require('fs');
+        try { fs.accessSync('\(tmpPath)', fs.constants.R_OK); 'readable'; } catch(e) { 'error'; }
+    """)
+    #expect(result?.toString() == "readable")
+}
+
+@Test func fsAccessSyncErrorHasProperties() async throws {
+    let runtime = NodeRuntime()
+    let result = runtime.evaluate("""
+        var fs = require('fs');
+        try { fs.accessSync('/nonexistent_xyz'); 'ok'; } catch(e) {
+            e.code + ':' + e.syscall + ':' + (e.path !== undefined);
+        }
+    """)
+    #expect(result?.toString() == "ENOENT:access:true")
+}
+
+// MARK: - fs.access (async)
+
+@Test(.timeLimit(.minutes(1)))
+func fsAccessAsyncExistingFile() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_access_async_\(UUID().uuidString).txt"
+    FileManager.default.createFile(atPath: tmpPath, contents: "test".data(using: .utf8))
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 10000);
+        fs.access('\(tmpPath)', function(err) {
+            clearTimeout(keepAlive);
+            console.log(err ? 'error:' + err.code : 'ok');
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if !messages.isEmpty { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("ok"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fsAccessAsyncNonexistent() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 10000);
+        fs.access('/nonexistent_\(UUID().uuidString)', function(err) {
+            clearTimeout(keepAlive);
+            console.log(err ? err.code : 'ok');
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if !messages.isEmpty { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("ENOENT"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func fsAccessAsyncWithMode() async throws {
+    let runtime = NodeRuntime()
+    var messages: [String] = []
+    runtime.consoleHandler = { _, msg in messages.append(msg) }
+
+    let tmpPath = NSTemporaryDirectory() + "noco_test_access_async_mode_\(UUID().uuidString).txt"
+    FileManager.default.createFile(atPath: tmpPath, contents: "test".data(using: .utf8))
+    defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+    runtime.evaluate("""
+        var fs = require('fs');
+        var keepAlive = setTimeout(function(){}, 10000);
+        fs.access('\(tmpPath)', fs.constants.R_OK | fs.constants.W_OK, function(err) {
+            clearTimeout(keepAlive);
+            console.log(err ? 'error:' + err.code : 'rw_ok');
+        });
+    """)
+
+    let eventLoopTask = Task.detached {
+        await runEventLoopInBackgroundFS(runtime, timeout: 5)
+    }
+
+    for _ in 0..<100 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        if !messages.isEmpty { break }
+    }
+
+    runtime.eventLoop.stop()
+    await eventLoopTask.value
+
+    #expect(messages.contains("rw_ok"))
+}
+
 // MARK: - fs.watchFile / fs.unwatchFile / fs.watch Tests
 
 @Test(.timeLimit(.minutes(1)))
