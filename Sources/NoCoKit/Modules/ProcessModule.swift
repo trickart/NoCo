@@ -246,6 +246,14 @@ public struct ProcessModule: NodeModule {
         // process.execArgv
         process.setValue(JSValue(newArrayIn: context), forProperty: "execArgv")
 
+        // process.allowedNodeEnvironmentFlags (empty Set-like object)
+        context.evaluateScript("""
+            (function(p) {
+                var flags = new Set();
+                p.allowedNodeEnvironmentFlags = flags;
+            })
+        """)!.call(withArguments: [process])
+
         // process.exitCode (get/set via defineProperty)
         context.evaluateScript("""
             (function(p) {
